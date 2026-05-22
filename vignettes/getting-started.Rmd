@@ -1,402 +1,182 @@
 ---
-title: "Getting Started with smoothbp"
+title: "Getting Started with bjlm"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Getting Started with smoothbp}
+  %\VignetteIndexEntry{Getting Started with bjlm}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(collapse = TRUE, comment = "#>", eval = TRUE)
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", eval = FALSE)
 ```
 
 ## Overview
 
-`smoothbp` fits hierarchical piecewise regression models with **multiple
-change-points**, each smoothed by a logistic sigmoid. The general mean function
-for $K$ change-points is:
+**`bjlm`** (Bayesian Joint Longitudinal Modelling) is a standalone, high-performance R package designed for joint longitudinal and causal analysis. It simultaneously estimates:
+1. A **Propensity Score Model** ($p(Trt \mid X)$) capturing subject-level treatment allocation.
+2. A **Weighted Outcome Model** ($p(Y \mid \tau, \text{Trt}, \dots)$) incorporating subject-specific inverse probability weights (IPW) to correct for confounding.
+
+By performing joint estimation, `bjlm` automatically propagates the uncertainty of the propensity weights into the causal effect posterior, preventing the underestimation of credible intervals common in two-stage statistical methods. Under the hood, a fast, multithreaded sampler written in Rust handles the MCMC execution.
+
+---
+
+## The Next-Generation Piped API
+
+The package features an elegant, block-based declarative builder API that leverages R's native pipe operator (`|>`). It isolates treatment, GP, and outcome models dynamically into individual blocks:
+
+```R
+library(bjlm)
+
+fit <- bjlm_model() |>
+  propensity(Trt ~ X1 + X2, data = df_subject) |>
+  outcome(Y ~ X1 + Trt, data = df_obs) |>
+  compile() |>
+  fit()
+```
+
+### Pipelines and Modular Steps
+
+* **`bjlm_model()`**: Initializes an empty model specification builder.
+* **`propensity(model, formula, data, family = binomial("logit"))`**: Stages the treatment assignment model (LHS must be binary `0`/`1`).
+* **`outcome(model, formula, b0, b1, deltas, omega, rho, data, family = gaussian("identity"))`**: Stages the outcome model. Can fit standard linear regressions or piecewise change-point models.
+* **`latent_gp(model, name, time, subject, kernel = "se")`**: Optionally registers continuous-time latent Gaussian Process confounders (can add multiple GPs sequentially).
+* **`compile(model)`**: Performs alignment across subject-level and observation-level data, validates GP structures, and enforces the **strict Bayesian Cut** (which prevents outcome feedback into the propensity model).
+* **`fit(compiled_model, priors = NULL, ...)`**: Compiles priors and runs the fast Rust sampler.
+
+---
+
+## 1. Quick Start: Standard Regression (Zero-Breakpoint Speed Shortcut)
+
+If you wish to fit a standard linear model without any breakpoints, simply omit the piecewise parameters (`b0`, `b1`, etc.) from the `outcome()` block. The compiler automatically triggers the **zero-breakpoint speed shortcut**, which bypasses sigmoid calculations entirely for maximum performance.
+
+### Simulating Confounded Data
+
+Here, we simulate cross-sectional data where treatment `Trt` is confounded by `X1`:
+
+```{r simulate-data}
+set.seed(42)
+n <- 300
+
+# Confounder X1
+X1 <- rnorm(n)
+
+# Confounded treatment probability
+pi_true <- plogis(0.5 + 0.8 * X1)
+Trt <- rbinom(n, 1, pi_true)
+
+# Outcome confounded by X1, with true treatment effect (ATE) of 2.0
+Y <- 5.0 + 2.0 * Trt + 1.5 * X1 + rnorm(n)
+
+dat <- data.frame(Y = Y, Trt = Trt, X1 = X1)
+```
+
+### Specifying and Fitting the Model
+
+```{r fit-linear}
+# Build and compile the joint model
+linear_model <- bjlm_model() |>
+  propensity(Trt ~ X1, data = dat) |>
+  outcome(Y ~ X1 + Trt, data = dat) |>
+  compile()
+
+# Fit using the fast Rust sampler
+fit_linear <- fit(linear_model, chains = 2L, iter = 1000L, warmup = 500L)
+```
+
+---
+
+## 2. Advanced: Piecewise Change-Point Models
+
+For repeated-measures or longitudinal data where the trajectory changes slope at one or more unknown time thresholds, `bjlm` supports smoothed piecewise change-point models:
 
 $$
-\mu_i = b0_i + b1_i(\tau_i - \omega_{1i}) +
-  \sum_{k=1}^{K} \delta_{ki}(\tau_i - \omega_{ki})\,
-  \sigma\!\left[(\tau_i - \omega_{ki})\rho_{ki}\right]
+\mu_i = b0_i + b1_i(\tau_i - \omega_{1i}) + \sum_{k=1}^{K} \delta_{ki}(\tau_i - \omega_{ki})\, \sigma\!\left[(\tau_i - \omega_{ki})\rho_{ki}\right]
 $$
 
-where
+where:
+* **$\tau$** is the time variable.
+* **$b0$** is the level at the first breakpoint.
+* **$b1$** is the pre-change slope.
+* **$\omega_k$** represents the location of the $k$-th change-point.
+* **$\delta_k$** is the change in slope at change-point $k$.
+* **$\rho_k$** is the transition sharpness.
 
-| Symbol | Role |
-|--------|------|
-| $\tau$ | time / covariate |
-| $\omega_k$ | location of the $k$-th change-point |
-| $\rho_k$ | transition sharpness for change-point $k$ ($\rho \to \infty$ → hard kink) |
-| $b0$ | level at the first change-point |
-| $b1$ | pre-change slope (anchored at $\omega_1$) |
-| $\delta_k$ | slope change attributable to change-point $k$ |
+### Specifying a One-Breakpoint Longitudinal Model
 
-When $K = 0$ the model reduces to a standard hierarchical linear regression.
-When $K = 1$ it matches the classic two-phase piecewise model.
+```{r fit-piecewise}
+# Subject-level propensity and observation-level outcomes
+pw_model <- bjlm_model() |>
+  propensity(Trt ~ X1, data = dat_subjects) |>
+  outcome(
+    formula = Y ~ tau,               # Outcome Y and time variable tau
+    b0      = ~ 1 + Trt + (1 | id),  # Level with subject random intercept
+    b1      = ~ 1,                   # Initial slope
+    deltas  = list(~ 1),             # Slope change parameter
+    omega   = list(~ 1),             # Unknown change-point location
+    rho     = list(~ 1),             # Transition sharpness
+    data    = dat_observations
+  ) |>
+  compile()
 
-Each parameter has its own linear predictor specified via a formula.
-`b0` may also include a random intercept `(1 | group)` for clustered /
-repeated-measures data.
-
-Posterior inference uses a **Metropolis-within-Gibbs sampler written in Rust**:
-
-- $b0$, $b1$, $\delta_k$, random intercepts — exact Gibbs (conjugate normal).
-- $\omega_k$, $\rho_k$ — Hamiltonian Monte Carlo with adaptive mass matrix during warmup.
-- $\sigma$, $\sigma_u$ — exact Gibbs (inverse-gamma conjugate).
-- $\gamma_k$ (spike-and-slab) — Gibbs with Bernoulli likelihood.
-
----
-
-## Real-World Applications
-
-While `smoothbp` is a general-purpose statistical tool, it is uniquely powerful for modeling structural changes across various scientific domains:
-
-- **Pharmacokinetics / Medicine**: Modeling the delayed onset of a drug's effect and identifying the precise time threshold where clearance rates exponentially shift.
-- **Ecology / Climate Science**: Identifying "tipping points" where species population growth trajectories abruptly change in response to accumulated temperature variations.
-- **Epidemiology**: Tracking structural shifts in infection rates ($R_0$) to pinpoint exactly when a public health intervention successfully flattened the curve.
-- **Finance**: Discovering the exact timing of market regime shifts and measuring how individual assets respond differently to global economic shocks.
+fit_pw <- fit(pw_model, chains = 4L, iter = 2000L, warmup = 1000L, cores = 4L)
+```
 
 ---
 
-## Simulating data
+## 3. Post-Processing & Diagnostics
 
-`simulate_smoothbp()` generates synthetic data from the model. It is
-useful for testing and for understanding how the parameters relate to the
-observable trajectory shape.
+`bjlm` includes a premium suite of post-processing and diagnostic methods tailored to joint longitudinal estimation:
 
-```{r simulate}
-library(smoothbp)
+### A. Print and Summary Methods
+The `summary()` method extracts MCMC stats as a structured data frame, while `print()` produces a formatted terminal layout.
 
-dat <- simulate_smoothbp(
-  n_subj    = 20,
-  n_obs     = 8,
-  b0        = 5.0,   # level at change-point
-  b1        = -0.3,  # pre-change slope
-  b2        =  1.2,  # slope change (delta_1)
-  omega     =  3.0,  # change-point location
-  rho       =  4.0,  # transition sharpness
-  sigma     =  0.4,  # residual SD
-  sigma_u   =  0.5,  # between-subject SD
-  tau_range = c(0, 6),
-  seed      = 42
+```{r postprocess}
+# Print high-level diagnostics and metadata
+print(fit_linear)
+
+# Obtain posterior means, SDs, and Rhat values
+summary(fit_linear, model = "both")
+```
+
+### B. Weight Diagnostics
+Since weights are calculated at every MCMC iteration, you can inspect stabilised weight distributions and max trimming thresholds directly:
+
+```{r weight-diagnostics}
+weight_diagnostics(fit_linear)
+```
+
+### C. Causal Effects
+Extract and print average treatment effects (ATE) or treatment effects on the treated (ATT):
+
+```{r causal-effect}
+# Get credible intervals for the treatment coefficient
+causal_effect(fit_linear, param = "b0_Trt")
+```
+
+### D. Trace and Density Plots
+Inspect MCMC chain convergence and parameter densities:
+
+```{r plotting}
+# Plot posterior trace-lines and density distributions
+plot(fit_linear)
+```
+
+---
+
+## 4. Side-by-Side Model Comparison Tables
+
+The package provides `tab_bjlm()` to generate professional, CRAN-standard fixed-effects comparison tables across multiple fitted models. It aligns parameters across rows and displays models side-by-side:
+
+```{r compare-table}
+# Generate comparison table
+comparison_table <- tab_bjlm(
+  fit_linear, 
+  fit_pw, 
+  labels = c("Linear IPW Model", "Piecewise IPW Model")
 )
 
-head(dat)
-true_params(dat)
-```
-
----
-
-## Fitting the model
-
-### Zero change-points (linear fallback)
-
-When `deltas`, `omega`, and `rho` are empty lists, `smoothbp` fits a
-standard hierarchical linear regression:
-
-```{r fit-zero-bp}
-fit0 <- smoothbp(
-  formula = y ~ tau,
-  b0      = ~ 1 + (1 | subject),
-  b1      = ~ 1,
-  deltas  = list(),   # no change-points
-  omega   = list(),
-  rho     = list(),
-  data    = dat,
-  chains  = 2L, iter = 1000L, warmup = 500L, seed = 42L, .verbose = FALSE
-)
-summary(fit0)
-```
-
-### One change-point
-
-```{r fit-one-bp}
-fit1 <- smoothbp(
-  formula = y ~ tau,
-  b0      = ~ 1 + (1 | subject),
-  b1      = ~ 1,
-  deltas  = list(~ 1),          # one slope change
-  omega   = list(~ 1),          # one change-point location
-  rho     = list(~ 1),          # one sharpness
-  data    = dat,
-  priors  = smoothbp_priors(
-    omega = list(prior_normal(3, 2, lb = 0))
-  ),
-  chains  = 4L, iter = 2000L, warmup = 1000L, seed = 42L
-)
-summary(fit1)
-```
-
-### Multiple change-points (The List-of-Formulas API)
-
-For models with multiple structural breaks, `smoothbp` uses a "List-of-Formulas" API. You pass lists of equal length to `deltas`, `omega`, and `rho`. Each element in the list corresponds to the sub-model for that specific breakpoint.
-
-```{r fit-multi-bp}
-# Fit a model with 3 candidate breakpoints
-fit3 <- smoothbp(
-  formula = y ~ tau,
-  b0      = ~ 1 + (1 | subject),
-  b1      = ~ 1,
-  # Each segment gets its own formula (here, just an intercept)
-  deltas  = list(~ 1, ~ 1, ~ 1), 
-  omega   = list(~ 1, ~ 1, ~ 1),
-  rho     = list(~ 1, ~ 1, ~ 1),
-  data    = dat,
-  priors  = smoothbp_priors(
-    # Use the space_omega_priors helper to initialize the search
-    omega = space_omega_priors(K = 3, tau_min = 0, tau_max = 6)
-  )
-)
-```
-
-### Known Change-Points with `fixed()`
-
-If you are performing an intervention analysis (e.g., a Regression Discontinuity Design or a Stepped-Wedge trial), you may already know exactly where the change points should be. 
-
-By using the `fixed()` helper, you tell the model **not** to estimate the location or sharpness, but only the magnitude of the change ($\delta$). This is much faster and allows for direct hypothesis testing of the intervention effect.
-
-```{r fit-fixed}
-# Test for a hard kink at exactly tau = 3.0
-fit_fixed <- smoothbp_ss(
-  formula = y ~ tau,
-  omega   = list(fixed(3.0)),   # Location is known
-  rho     = list(fixed(100)),   # Sharpness is fixed (hard kink)
-  data    = dat
-)
-
-# The PIP tells us the probability that the intervention had an effect
-pip(fit_fixed)
-```
-
-> **Note**: `fixed()` can also accept a vector of the same length as your data, allowing for observation-specific change points (e.g., different intervention times per cluster).
-
-> **Tip**: If you are unsure how many change-points are present, use
-> `smoothbp_ss()` with spike-and-slab regularization — see
-> `vignette("spike-and-slab")`.
-
-### Progress and parallel chains
-
-```{r fit-parallel}
-fit1 <- smoothbp(
-  formula = y ~ tau,
-  b0      = ~ 1 + (1 | subject),
-  data    = dat,
-  chains  = 4L, iter = 2000L, warmup = 1000L, seed = 42L,
-  cores   = 4L    # run all 4 chains concurrently
-)
-```
-
-To make parallel the default for a project, add this to `.Rprofile`:
-
-```{r rprofile, eval=FALSE}
-options(smoothbp.cores = parallel::detectCores())
-```
-
----
-
-## Posterior summary
-
-`print()` displays results in labelled sections; `summary()` returns a
-data frame. The `effects` argument filters which parameters are shown:
-
-```{r summary}
-print(fit1)                                        # all sections (default)
-print(fit1, effects = "fixed")                     # population-level only
-summary(fit1, effects = "fixed")                   # same, as a data frame
-summary(fit1, effects = c("fixed", "ran_pars"))    # fixed + sigma_u, no u[j]
-```
-
-Parameter names follow the convention:
-
-| Name | Meaning |
-|------|---------|
-| `b0_(Intercept)` | Intercept (level at first change-point) |
-| `b1_(Intercept)` | Pre-change slope |
-| `delta1_(Intercept)` | Slope change at change-point 1 |
-| `omega1_(Intercept)` | Change-point 1 location |
-| `rho1_(Intercept)` | Change-point 1 sharpness |
-| `sigma` | Residual SD |
-| `sigma_u` | Between-group SD (random intercept) |
-
----
-
-## Diagnostics
-
-### Trace plots with mixing indicators
-
-```{r trace}
-plot(fit1)        # alias for trace_plot(fit1)
-trace_plot(fit1, type = "both")   # trace + density
-```
-
-Parameters with $\hat{R} > 1.05$ or bulk-ESS $< 100$ are flagged with a
-⚠ symbol and a red-tinted background. Thresholds are adjustable:
-
-```{r trace-strict}
-trace_plot(fit1, rhat_thresh = 1.01, ess_thresh = 400)
-```
-
-### Posterior predictive check
-
-```{r pp-check}
-pp_check(fit1)
-```
-
----
-
-## Prior specification
-
-`smoothbp_priors()` accepts either a single prior applied to all
-coefficients of a component, or a named list. For multi-breakpoint models,
-`omega` and `rho` accept a **list of priors** (one per breakpoint):
-
-```{r priors}
-smoothbp_priors(
-  b0    = prior_normal(0, 10),
-  b1    = prior_normal(0, 5),
-  omega = list(
-    prior_normal(2, 1),   # change-point 1
-    prior_normal(5, 1)    # change-point 2
-  ),
-  rho   = list(
-    prior_normal(4, 2, lb = 0),
-    prior_normal(4, 2, lb = 0)
-  ),
-  sigma = prior_invgamma(shape = 2, scale = 1)
-)
-```
-
-The `lb` and `ub` arguments impose hard bounds. `rho` should typically have `lb = 0` (sharpness must be positive). For `omega` and `deltas`, it is often better to **avoid hard bounds** unless they are physically necessary for your domain.
-
-> **Performance Tip**: `smoothbp` is significantly faster when `b1`, `deltas`, and `omega` are unconstrained. Without bounds, the sampler can use exact conjugate Gibbs updates for `b1` and `deltas`, and standard HMC for `omega`. Truncated priors require additional checks and rejection sampling steps.
-
-If you do use bounds for `omega`, ensure they cover the actual range of your time variable (e.g. if your time starts at -10, do not use `lb = 0`).
-
----
-
-## Breakpoint selection with spike-and-slab
-
-When the number of change-points is unknown, fit a model with $K$ potential
-breakpoints using `smoothbp_ss()`. Each slope change $\delta_k$ has a binary
-inclusion indicator $\gamma_k$; the posterior mean of $\gamma_k$ is the
-**posterior inclusion probability (PIP)** for that breakpoint.
-
-```{r ss-overview}
-fit_ss <- smoothbp_ss(
-  formula = y ~ tau,
-  b0      = ~ 1 + (1 | subject),
-  b1      = ~ 1,
-  deltas  = list(~ 1, ~ 1, ~ 1),   # 3 candidate breakpoints
-  omega   = list(~ 1, ~ 1, ~ 1),
-  rho     = list(~ 1, ~ 1, ~ 1),
-  data    = dat,
-  spike   = prior_spike_slab(pi = 0.1, learn_pi = TRUE),
-  chains  = 4L, iter = 2000L, warmup = 1000L, seed = 42L
-)
-
-# Posterior inclusion probabilities per breakpoint
-pip(fit_ss)
-#> gamma_delta1_(Intercept) gamma_delta2_(Intercept) gamma_delta3_(Intercept)
-#>                    0.987                    0.063                    0.041
-```
-
-A PIP near 1 indicates that breakpoint is supported by the data; a low PIP
-indicates the slope change is not needed.
-
-See `vignette("spike-and-slab")` for a full tutorial.
-
----
-
-## Hypothesis tests and evidence ratios
-
-`hypothesis()` evaluates directional hypotheses against the posterior draws.
-
-```{r hypothesis-directional}
-# Is the slope change at breakpoint 1 positive?
-smoothbp::hypothesis(fit1, "delta1_(Intercept) > 0")
-
-# Complex linear hypothesis: is the final slope (b1 + delta1) negative?
-smoothbp::hypothesis(fit1, "b1_(Intercept) + delta1_(Intercept) < 0")
-
-# Does the change-point fall before time 4?
-smoothbp::hypothesis(fit1, "omega1_(Intercept) < 4")
-```
-
-| Stars | ER | $P(H)$ |
-|-------|----|--------|
-| `***` | > 99 | > 0.99 |
-| `**` | > 19 | > 0.95 |
-| `*`  | > 3  | > 0.75 |
-
----
-
-## Model comparison
-
-### Leave-one-out cross-validation (LOO-IC)
-
-```{r loo}
-# Compare 0-BP (linear) vs 1-BP vs 3-BP models
-loo0 <- loo(fit0)
-loo1 <- loo(fit1)
-loo3 <- loo(fit3)
-
-loo::loo_compare(loo0, loo1, loo3)
-```
-
-### Bayes factors via bridge sampling
-
-```{r bridge-sampler}
-library(bridgesampling)
-bs0 <- bridge_sampler(fit0)
-bs1 <- bridge_sampler(fit1)
-bayes_factor(bs1, bs0)
-```
-
----
-
-## Extracting results
-
-### Fitted values
-
-```{r fitted-training}
-# Posterior mean + 95% CI at training observations
-fitted(fit1)
-
-# Full posterior draws matrix (n_draws × n_obs)
-draws_mat <- fitted(fit1, summary = FALSE)
-```
-
-### Working with `posterior` draws
-
-The `$draws` component of a `smoothbp` fit is a standard `draws_array` object from the `posterior` package. You can use any of the `posterior` tools to manipulate and summarize the draws.
-
-```{r draws-manip}
-library(posterior)
-
-# Convert to a data frame for use with ggplot2
-draws_df <- as_draws_df(fit1$draws)
-
-# Extract a specific parameter
-b1_draws <- draws_df$`b1_(Intercept)`
-
-# Compute custom summaries
-summarise_draws(fit1$draws, "mean", "sd", ~quantile(.x, c(0.1, 0.9)))
-```
-
-### Marginal predictions
-
-```{r fitted-marginal}
-# Population-level predictions at new time points
-newdata_marginal <- data.frame(tau = seq(0, 6, by = 0.1))
-fitted(fit1, newdata = newdata_marginal)
-```
-
-### Conditional predictions
-
-```{r fitted-conditional}
-# Subject-specific predictions
-fitted(fit1, newdata = data.frame(tau = seq(0, 6, by = 0.1), subject = "1"))
+# If the 'gt' package is installed, this returns a beautiful gt table.
+# Otherwise, it falls back to a clean knitr Markdown table.
+print(comparison_table)
 ```
