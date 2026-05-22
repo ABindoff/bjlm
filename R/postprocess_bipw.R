@@ -87,7 +87,8 @@ causal_effect <- function(fit, param, prob = 0.95) {
 
   if (requireNamespace("posterior", quietly = TRUE)) {
     draws <- posterior::subset_draws(fit$draws, variable = param)
-    draws_vec <- as.vector(posterior::draws_of(draws))
+    draws_mat <- posterior::as_draws_matrix(draws)
+    draws_vec <- as.numeric(draws_mat[, param])
   } else {
     stop("Package 'posterior' is required.")
   }
@@ -123,9 +124,9 @@ weight_diagnostics <- function(fit) {
   stopifnot(inherits(fit, "bipw_fit"))
 
   if (requireNamespace("posterior", quietly = TRUE)) {
-    w_draws <- as.vector(posterior::draws_of(
-      posterior::subset_draws(fit$draws, variable = "mean_weight")
-    ))
+    draws <- posterior::subset_draws(fit$draws, variable = "mean_weight")
+    draws_mat <- posterior::as_draws_matrix(draws)
+    w_draws <- as.numeric(draws_mat[, "mean_weight"])
   } else {
     stop("Package 'posterior' is required.")
   }

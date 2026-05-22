@@ -683,9 +683,16 @@ pub fn run_chain_bipw(
         );
 
         // Expand subject-level weights to observation-level
-        let weights_obs = expand_weights_to_obs(
-            &weights_subj, &outcome_data.group_b0, outcome_data.n,
-        );
+        // Cross-sectional: group_b0 is empty, weights map 1:1
+        // Longitudinal: expand via group indices
+        let weights_obs = if outcome_data.group_b0.is_empty() || outcome_data.n_groups_b0 == 0 {
+            // Cross-sectional: n_subjects == n_obs, use weights directly
+            weights_subj.clone()
+        } else {
+            expand_weights_to_obs(
+                &weights_subj, &outcome_data.group_b0, outcome_data.n,
+            )
+        };
 
         // === OUTCOME BLOCK (weighted) ===
         sample_linear_coefs_weighted(

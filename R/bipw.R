@@ -223,13 +223,15 @@ bipw <- function(
 
   # Build posterior draws object
   if (requireNamespace("posterior", quietly = TRUE)) {
-    draws_array <- posterior::as_draws_array(
-      array(
-        unlist(draws_list),
-        dim = c(nrow(draws_list[[1]]), chains, n_total),
-        dimnames = list(NULL, paste0("chain_", seq_len(chains)), all_names)
-      )
-    )
+    n_post <- nrow(draws_list[[1]])
+    # Build the 3D array correctly: dims are (iteration, chain, variable)
+    # We must fill it explicitly because unlist + array has wrong fill order
+    arr <- array(NA_real_, dim = c(n_post, chains, n_total),
+                 dimnames = list(NULL, paste0("chain_", seq_len(chains)), all_names))
+    for (c in seq_len(chains)) {
+      arr[, c, ] <- draws_list[[c]]
+    }
+    draws_array <- posterior::as_draws_array(arr)
   } else {
     draws_array <- draws_list
   }
