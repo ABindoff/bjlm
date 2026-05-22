@@ -346,7 +346,7 @@ fit.bjlm_compiled_model <- function(object, priors = NULL, ...) {
     priors$outcome$b1 <- prior_normal(mean = 0, sd = 0)
   }
 
-  bjlm(
+  fit_obj <- bjlm(
     outcome = if (object$zero_breakpoint) {
       # Dummy outcome formula: LHS ~ dummy_tau
       # We construct it dynamically
@@ -381,6 +381,16 @@ fit.bjlm_compiled_model <- function(object, priors = NULL, ...) {
     priors = priors,
     ...
   )
+
+  # Attach compilation metadata for reproducibility and flowchart generation
+  fit_obj$subject_var <- object$subject_var
+  fit_obj$merged_cols <- object$merged_cols
+  fit_obj$shared_cols <- object$shared_cols
+  fit_obj$zero_breakpoint <- object$zero_breakpoint
+  fit_obj$propensity_formula <- object$model$propensity$formula
+  fit_obj$outcome_formula <- object$model$outcome$formula
+
+  fit_obj
 }
 
 #' @export
@@ -538,3 +548,96 @@ print.bjlm_compiled_model <- function(x, ...) {
 
   writeLines(content, file_path)
 }
+
+#' Generate a Mermaid flowchart of model alignment and scoping
+#'
+#' Produces a Mermaid flowchart diagram showing how the propensity and
+#' outcome datasets are aligned, variable scoping, and any name collisions.
+#'
+#' @param x A `bjlm_compiled_model` or `bjlm_fit` object.
+#' @param ... Additional arguments.
+#'
+#' @return A character string of class `bjlm_flowchart` containing the Mermaid code.
+#' @export
+flowchart <- function(x, ...) {
+  UseMethod("flowchart")
+}
+
+#' @export
+flowchart.bjlm_compiled_model <- function(x, ...) {
+  .build_flowchart(x)
+}
+
+#' @export
+flowchart.bjlm_fit <- function(x, ...) {
+  .build_flowchart(x)
+}
+
+#' @export
+print.bjlm_flowchart <- function(x, ...) {
+  cat("```mermaid\n")
+  cat(x)
+  cat("```\n")
+  invisible(x)
+}
+
+.build_flowchart <- function(x) {
+  # Standardise attributes based on object class
+  if (inherits(x, "bjlm_compiled_model")) {
+    n_obs <- length(x$y)
+    n_sub <- x$n_subjects
+    subject_var <- x$subject_var
+    merged_cols <- x$merged_cols
+    shared_cols <- x$shared_cols
+    prop_fml <- x$model$propensity$formula
+    out_fml <- x$model$outcome$formula
+  } else if (inherits(x, "bjlm_fit")) {
+    n_obs <- x$n
+    n_sub <- x$n_subjects
+    subject_var <- x$subject_var
+    merged_cols <- x$merged_cols
+    shared_cols <- x$shared_cols
+    prop_fml <- x$propensity_formula
+    out_fml <- x$outcome_formula
+  } else {
+    stop("Must be a bjlm_compiled_model or bjlm_fit object.")
+  }
+
+  flowchart <- "graph TD\n"
+  flowchart <- paste0(flowchart, "    classDef prop fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px;\n")
+  flowchart <- paste0(flowchart, "    classDef out fill:#e3f2fd,stroke:#1565c0,stroke-width:1px;\n")
+  flowchart <- paste0(flowchart, "    classDef align fill:#fff3e0,stroke:#ef6c00,stroke-width:2px;\n")
+  flowchart <- paste0(flowchart, "    classDef collision fill:#ffebee,stroke:#c62828,stroke-width:1px;\n\n")
+
+  flowchart <- paste0(flowchart, "    subgraph \"Propensity Block (Subject-level)\"\n")
+  flowchart <- paste0(flowchart, "        PD[\"Propensity Data<br/>", n_sub, " subjects\"]:::prop\n")
+  flowchart <- paste0(flowchart, "        PF[\"Formula: ", deparse(prop_fml), "\"]:::prop\n")
+  flowchart <- paste0(flowchart, "        PD --> PF\n")
+  flowchart <- paste0(flowchart, "    end\n\n")
+
+  flowchart <- paste0(flowchart, "    subgraph \"Outcome Block (Observation-level)\"\n")
+  flowchart <- paste0(flowchart, "        OD[\"Outcome Data<br/>", n_obs, " observations\"]:::out\n")
+  flowchart <- paste0(flowchart, "        OF[\"Formula: ", deparse(out_fml), "\"]:::out\n")
+  flowchart <- paste0(flowchart, "        OD --> OF\n")
+  flowchart <- paste0(flowchart, "    end\n\n")
+
+  if (!is.null(subject_var)) {
+    flowchart <- paste0(flowchart, "    %% Alignment & Merging\n")
+    flowchart <- paste0(flowchart, "    PD -->|\"Align by subject ID: ", subject_var, "\"| OD:::align\n")
+    if (length(merged_cols) > 0) {
+      flowchart <- paste0(flowchart, "    PD -.->|\"Expand subject-level: ", paste(merged_cols, collapse = ", "), "\"| OD:::align\n")
+    }
+  } else {
+    flowchart <- paste0(flowchart, "    PD -->|\"Cross-sectional alignment<br/>(1:1 rows mapping)\"| OD:::align\n")
+  }
+
+  if (length(shared_cols) > 0) {
+    flowchart <- paste0(flowchart, "    %% Collision Scoping\n")
+    flowchart <- paste0(flowchart, "    SC[\"Shared variables: ", paste(shared_cols, collapse = ", "), "<br/>Independent Block-Scoping\"]:::collision\n")
+    flowchart <- paste0(flowchart, "    PF -.-> SC\n")
+    flowchart <- paste0(flowchart, "    OF -.-> SC\n")
+  }
+
+  structure(flowchart, class = "bjlm_flowchart")
+}
+

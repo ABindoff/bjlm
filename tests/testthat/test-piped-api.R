@@ -197,3 +197,57 @@ test_that("Piped API: dataset alignment, warning, and compile_report generation 
 
   expect_s3_class(fit_res, "bjlm_fit")
 })
+
+test_that("flowchart S3 methods extract and format Mermaid diagrams correctly", {
+  skip_if_not_installed("posterior")
+  
+  set.seed(123)
+  dat <- data.frame(
+    subject_id = rep(1:5, each = 3),
+    tau = rep(0:2, times = 5),
+    Trt = rep(rbinom(5, 1, 0.5), each = 3),
+    X_shared = rnorm(15),
+    Y = rnorm(15)
+  )
+  dat_subjects <- dat[!duplicated(dat$subject_id), ]
+  
+  spec <- bjlm_model() |>
+    propensity(Trt ~ X_shared, data = dat_subjects) |>
+    outcome(
+      formula = Y ~ tau,
+      b0 = ~ 1 + Trt + X_shared + (1 | subject_id),
+      b1 = ~ 1,
+      data = dat
+    )
+    
+  expect_warning(
+    compiled <- compile(spec),
+    "Shared covariate name"
+  )
+  
+  # 1. Check flowchart on compiled model
+  fc_comp <- flowchart(compiled)
+  expect_s3_class(fc_comp, "bjlm_flowchart")
+  expect_true(inherits(unclass(fc_comp), "character"))
+  expect_true(grepl("graph TD", fc_comp))
+  expect_true(grepl("Align by subject ID: subject_id", fc_comp))
+  expect_true(grepl("Shared variables:.*X_shared", fc_comp))
+  expect_output(print(fc_comp), "```mermaid")
+  
+  # 2. Check flowchart on fit object
+  fit_res <- compiled |> fit(
+    chains = 1L,
+    iter = 10L,
+    warmup = 5L,
+    seed = 123L,
+    verbose = FALSE,
+    cores = 1L
+  )
+  
+  fc_fit <- flowchart(fit_res)
+  expect_s3_class(fc_fit, "bjlm_flowchart")
+  expect_true(grepl("graph TD", fc_fit))
+  expect_true(grepl("Align by subject ID: subject_id", fc_fit))
+  expect_true(grepl("Shared variables:.*X_shared", fc_fit))
+})
+

@@ -267,7 +267,13 @@ bjlm <- function(
       warmup = warmup,
       priors = priors,
       outcome_priors = outcome_priors,
-      propensity_prior_sd = propensity_prior_sd
+      propensity_prior_sd = propensity_prior_sd,
+      subject_var = re_info$re_group,
+      merged_cols = character(0),
+      shared_cols = character(0),
+      zero_breakpoint = FALSE,
+      propensity_formula = propensity,
+      outcome_formula = outcome
     ),
     class = "bjlm_fit"
   )
