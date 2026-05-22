@@ -4,7 +4,8 @@
 
 In observational longitudinal studies (e.g., THBP), treatment/exposure
 assignment is non-random. Inverse probability weighting (IPW) creates a
-pseudo-population where confounders are balanced, enabling causal inference.
+pseudo-population where confounders are balanced, enabling causal inference
+**assuming no unmeasured confounding** (the strong ignorability assumption).
 
 The standard workflow is:
 
