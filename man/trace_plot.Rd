@@ -13,7 +13,7 @@ trace_plot(
 )
 }
 \arguments{
-\item{fit}{A \code{smoothbp_fit} object.}
+\item{fit}{A \code{smoothbp_fit} or \code{bipw_fit} object.}
 
 \item{pars}{Character vector of parameter names to include.  Defaults to
 all non-random-effect parameters.}
@@ -32,7 +32,7 @@ A \code{ggplot} object (or a named list of two when
 \code{type = "both"}).
 }
 \description{
-Produces per-parameter trace plots from a \code{smoothbp_fit} object.
+Produces per-parameter trace plots from a \code{smoothbp_fit} or \code{bipw_fit} object.
 Parameters with \eqn{\hat{R} > 1.05} are flagged with a light-red
 background and their panel labels include the \eqn{\hat{R}} value and a
 warning symbol.  Parameters with low bulk-ESS (< 100) are further annotated.

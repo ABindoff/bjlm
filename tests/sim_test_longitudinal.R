@@ -1,5 +1,5 @@
 # ============================================================
-# Simulation 2: Longitudinal piecewise trajectory with 
+# Simulation 2: Longitudinal piecewise trajectory with
 # confounding, random intercepts, and one breakpoint
 #
 # DGP:
@@ -122,7 +122,7 @@ fit <- bipw(
   warmup     = 2000L,
   seed       = 314L,
   verbose    = TRUE,
-  cores      = 1L,
+  cores      = 4L,
   step_om    = 0.02,
   step_rho   = 0.02,
   target_accept = 0.8
