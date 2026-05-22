@@ -102,10 +102,64 @@ where:
 * **$\delta_k$** is the change in slope at change-point $k$.
 * **$\rho_k$** is the transition sharpness.
 
-### Specifying a One-Breakpoint Longitudinal Model
+### Separate Datasets for Propensity and Outcome Models
+
+In longitudinal joint modeling, treatment allocation and propensity score covariates are typically **subject-level** properties (constant over time for each subject), while outcomes and time values are **observation-level** properties (varying over time). 
+
+A key strength of `bjlm` is that you do not need to repeat subject-level characteristics across observation rows. You can pass a subject-level data frame (one row per subject) to `propensity()`, and an observation-level data frame (multiple rows per subject) to `outcome()`. When you run `compile()`, `bjlm` automatically groups and aligns these datasets using the grouping variable specified in the outcome random intercepts (e.g. `(1 | id)`).
+
+Let's simulate this structure:
+
+```{r simulate-piecewise}
+# 1. Subject-level dataset (constant covariates and treatment)
+set.seed(42)
+n_subj <- 30
+id <- factor(1:n_subj)
+X1 <- rnorm(n_subj)
+pi_subj <- plogis(0.2 + 0.8 * X1)
+Trt <- rbinom(n_subj, 1, pi_subj)
+
+dat_subjects <- data.frame(id = id, X1 = X1, Trt = Trt)
+
+# 2. Observation-level dataset (repeated measures, 5 timepoints per subject)
+n_obs_per_subj <- 5
+tau_values <- seq(0, 4, length.out = n_obs_per_subj)
+
+obs_list <- lapply(1:n_subj, function(i) {
+  subj_id  <- id[i]
+  subj_trt <- Trt[i]
+  subj_x1  <- X1[i]
+  
+  # Piecewise outcome trajectory with a breakpoint at omega = 2.0
+  # Level intercept includes subject-specific random intercept u_i (SD = 0.5)
+  u_i     <- rnorm(1, mean = 0, sd = 0.5)
+  b0_i    <- 4.0 + 1.5 * subj_trt + 1.0 * subj_x1 + u_i
+  b1_i    <- -0.2
+  delta_i <- 0.8
+  omega_i <- 2.0
+  rho_i   <- 5.0
+  
+  Y <- vapply(tau_values, function(t) {
+    sig <- 1 / (1 + exp(-(t - omega_i) * rho_i))
+    b0_i + b1_i * (t - omega_i) + delta_i * (t - omega_i) * sig + rnorm(1, sd = 0.2)
+  }, double(1))
+  
+  data.frame(
+    id  = subj_id,
+    tau = tau_values,
+    Y   = Y
+  )
+})
+
+dat_observations <- do.call(rbind, obs_list)
+```
+
+### Specifying and Fitting the Longitudinal Model
+
+Now we build and compile the model, specifying the subject-level data frame for the propensity stage and the observation-level repeated measures data frame for the outcome stage:
 
 ```{r fit-piecewise}
-# Subject-level propensity and observation-level outcomes
+# Build and compile the joint model
 pw_model <- bjlm_model() |>
   propensity(Trt ~ X1, data = dat_subjects) |>
   outcome(
@@ -119,6 +173,7 @@ pw_model <- bjlm_model() |>
   ) |>
   compile()
 
+# Fit using the fast Rust sampler
 fit_pw <- fit(pw_model, chains = 4L, iter = 2000L, warmup = 1000L, cores = 4L)
 ```
 
