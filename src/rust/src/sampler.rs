@@ -781,7 +781,7 @@ pub fn run_chain_ss(
     (draws, n_div)
 }
 
-fn init_state(data: &ModelData, priors: &Priors, rng: &mut StdRng) -> State {
+pub fn init_state(data: &ModelData, priors: &Priors, rng: &mut StdRng) -> State {
     let jitter = Normal::new(0.0, 0.01).unwrap();
     let beta_b0 = DVector::from_iterator(data.x_b0.ncols(), (0..data.x_b0.ncols()).map(|i| {
         let m = priors.b0_mean[i];
