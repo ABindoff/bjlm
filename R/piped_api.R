@@ -354,7 +354,18 @@ fit.bjlm_compiled_model <- function(object, priors = NULL, ...) {
     } else {
       object$model$outcome$formula
     },
-    b0 = object$b0_formula,
+    b0 = if (object$zero_breakpoint) {
+      if (!is.null(object$subject_var)) {
+        fixed_chars <- deparse(object$b0_formula)
+        fixed_chars <- sub("^\\s*~\\s*", "", paste(fixed_chars, collapse = " "))
+        new_fml_str <- sprintf("~ %s + (1 | %s)", fixed_chars, object$subject_var)
+        stats::as.formula(new_fml_str, env = environment(object$b0_formula))
+      } else {
+        object$b0_formula
+      }
+    } else {
+      object$model$outcome$b0
+    },
     b1 = object$b1_formula,
     deltas = object$deltas,
     omega = object$omega,
