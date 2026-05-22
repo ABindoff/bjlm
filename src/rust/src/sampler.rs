@@ -304,11 +304,17 @@ fn sample_linear_coefs(data: &ModelData, priors: &Priors, state: &mut State, rng
     let mut x_full = DMatrix::<f64>::zeros(n, p_total);
     let mut prec_prior = DVector::<f64>::zeros(p_total);
     let mut mu_prior = DVector::<f64>::zeros(p_total);
+    let mut zero_var_indices = Vec::new();
 
     // b0
     x_full.view_mut((0, 0), (n, p_b0)).copy_from(&data.x_b0);
     for j in 0..p_b0 {
-        prec_prior[j] = 1.0 / (priors.b0_sd[j] * priors.b0_sd[j]);
+        if priors.b0_sd[j] == 0.0 {
+            prec_prior[j] = 1.0;
+            zero_var_indices.push((j, priors.b0_mean[j]));
+        } else {
+            prec_prior[j] = 1.0 / (priors.b0_sd[j] * priors.b0_sd[j]);
+        }
         mu_prior[j] = priors.b0_mean[j];
     }
 
@@ -335,8 +341,14 @@ fn sample_linear_coefs(data: &ModelData, priors: &Priors, state: &mut State, rng
     }
     x_full.view_mut((0, p_b0), (n, p_b1)).copy_from(&b1_design);
     for j in 0..p_b1 {
-        prec_prior[p_b0 + j] = 1.0 / (priors.b1_sd[j] * priors.b1_sd[j]);
-        mu_prior[p_b0 + j] = priors.b1_mean[j];
+        let idx = p_b0 + j;
+        if priors.b1_sd[j] == 0.0 {
+            prec_prior[idx] = 1.0;
+            zero_var_indices.push((idx, priors.b1_mean[j]));
+        } else {
+            prec_prior[idx] = 1.0 / (priors.b1_sd[j] * priors.b1_sd[j]);
+        }
+        mu_prior[idx] = priors.b1_mean[j];
     }
 
     // deltas
@@ -361,10 +373,22 @@ fn sample_linear_coefs(data: &ModelData, priors: &Priors, state: &mut State, rng
         }
         x_full.view_mut((0, offset), (n, pk)).copy_from(&d_design);
         for j in 0..pk {
-            prec_prior[offset + j] = 1.0 / (priors.delta_sd[k][j] * priors.delta_sd[k][j]);
-            mu_prior[offset + j] = priors.delta_mean[k][j];
+            let idx = offset + j;
+            if priors.delta_sd[k][j] == 0.0 {
+                prec_prior[idx] = 1.0;
+                zero_var_indices.push((idx, priors.delta_mean[k][j]));
+            } else {
+                prec_prior[idx] = 1.0 / (priors.delta_sd[k][j] * priors.delta_sd[k][j]);
+            }
+            mu_prior[idx] = priors.delta_mean[k][j];
         }
         offset += pk;
+    }
+
+    // Zero out columns in x_full for zero variance priors
+    for &(idx, _) in &zero_var_indices {
+        let mut col = x_full.column_mut(idx);
+        col.fill(0.0);
     }
 
     // Sufficient statistics
@@ -392,7 +416,10 @@ fn sample_linear_coefs(data: &ModelData, priors: &Priors, state: &mut State, rng
     // To sample from N(mean, P^-1) where P = L*L^T:
     // x = mean + (L^T)^-1 * z  =>  L^T * (x - mean) = z
     let y = cholesky.l().transpose().solve_upper_triangular(&z).expect("Failed to solve upper triangular system");
-    let theta_new = mean + y;
+    let mut theta_new = mean + y;
+    for &(idx, val) in &zero_var_indices {
+        theta_new[idx] = val;
+    }
 
     // Check bounds for rejection
     let mut ok = true;

@@ -1,22 +1,21 @@
-# tab_model.R
+# tab_bjlm.R
 #
-# Presents fixed effects from one or more smoothbp_fit objects as a formatted
-# table, with parameters on rows and models in columns — similar in spirit to
-# sjPlot::tab_model() for brmsfit objects.
+# Presents fixed effects from one or more bjlm_fit objects as a formatted
+# table, with parameters on rows and models in columns.
 #
 # Requires: gt (for the rendered table), dplyr (for tidy construction).
 # Falls back to knitr::kable() if gt is not installed.
 
 # ---------------------------------------------------------------------------
-#' Fixed-effects table for smoothbp_fit objects
+#' Fixed-effects table for bjlm_fit objects
 #'
-#' Collects posterior summaries from one or more `smoothbp_fit` objects and
+#' Collects posterior summaries from one or more `bjlm_fit` objects and
 #' displays them in a single table with parameters on rows and models in
-#' columns.  All parameters present in any model are shown; models that do not
+#' columns. All parameters present in any model are shown; models that do not
 #' include a given parameter display a dash.
 #'
-#' @param ... One or more `smoothbp_fit` or `smoothbp_ss_fit` objects.
-#' @param labels Character vector of column headers, one per model.  If `NULL`
+#' @param ... One or more `bjlm_fit` objects.
+#' @param labels Character vector of column headers, one per model. If `NULL`
 #'   (default) the deparsed call names are used.
 #' @param digits Integer; number of decimal places (default `2`).
 #' @param fmt Cell format: `"mean [CI]"` (default) shows mean and 95% credible
@@ -28,23 +27,22 @@
 #'
 #' @examples
 #' \dontrun{
-#' tab_smoothbp(m.ep.pw1, m.wo.pw1, m.la.pw1,
-#'              labels = c("Episodic", "Working", "Language"))
+#' tab_bjlm(fit1, fit2, labels = c("Model A", "Model B"))
 #' }
 #' @export
-tab_smoothbp <- function(...,
-                         labels    = NULL,
-                         digits    = 2,
-                         fmt       = c("mean [CI]", "mean (SD)"),
-                         show_rhat = FALSE) {
+tab_bjlm <- function(...,
+                     labels    = NULL,
+                     digits    = 2,
+                     fmt       = c("mean [CI]", "mean (SD)"),
+                     show_rhat = FALSE) {
 
   fmt    <- match.arg(fmt)
   models <- list(...)
   n      <- length(models)
 
-  if (n == 0L) stop("Supply at least one smoothbp_fit object.")
-  if (!all(sapply(models, inherits, what = "smoothbp_fit"))) {
-    stop("All positional arguments must be smoothbp_fit objects.")
+  if (n == 0L) stop("Supply at least one bjlm_fit object.")
+  if (!all(sapply(models, function(m) inherits(m, "bjlm_fit") || inherits(m, "bipw_fit")))) {
+    stop("All positional arguments must be bjlm_fit objects.")
   }
 
   # ---- Column labels --------------------------------------------------------
@@ -60,13 +58,12 @@ tab_smoothbp <- function(...,
   }
 
   # ---- Format one summary row into a single string -------------------------
-  # smoothbp_ss names CI columns "2.5%" / "97.5%"; smoothbp uses "Q2.5" / "Q97.5"
-  fmt_cell <- function(row, lo_col, hi_col) {
-    m  <- round(as.numeric(row[["mean"]]),  digits)
-    lo <- round(as.numeric(row[[lo_col]]),  digits)
-    hi <- round(as.numeric(row[[hi_col]]),  digits)
-    sd <- round(as.numeric(row[["SD"]]),    digits)
-    rh <- round(as.numeric(row[["Rhat"]]),  3)
+  fmt_cell <- function(s, i) {
+    m  <- round(as.numeric(s$mean[i]),  digits)
+    lo <- round(as.numeric(s$q_lo[i]),  digits)
+    hi <- round(as.numeric(s$q_hi[i]),  digits)
+    sd <- round(as.numeric(s$sd[i]),    digits)
+    rh <- round(as.numeric(s$rhat[i]),  3)
 
     cell <- if (fmt == "mean [CI]") {
       sprintf("%.*f [%.*f, %.*f]", digits, m, digits, lo, digits, hi)
@@ -77,14 +74,32 @@ tab_smoothbp <- function(...,
     cell
   }
 
-  # ---- Extract and format fixed effects from each model --------------------
+  # ---- Extract and format parameters silently from each model --------------
+  if (!requireNamespace("posterior", quietly = TRUE)) {
+    stop("Package 'posterior' is required for tab_bjlm. Install it with install.packages('posterior').")
+  }
+
   cols <- lapply(models, function(fit) {
-    s      <- summary(fit, effects = "fixed")
-    lo_col <- if ("2.5%"  %in% names(s)) "2.5%"  else "Q2.5"
-    hi_col <- if ("97.5%" %in% names(s)) "97.5%" else "Q97.5"
-    vals   <- vapply(seq_len(nrow(s)),
-                     function(i) fmt_cell(s[i, ], lo_col, hi_col),
-                     character(1))
+    draws <- fit$draws
+    param_names <- c(fit$outcome_names, fit$propensity_names)
+    
+    # Exclude random effects u_... if present to keep table focus on fixed effects
+    param_names <- param_names[!grepl("^u_", param_names)]
+    
+    if (length(param_names) == 0) return(character(0))
+    
+    sub <- posterior::subset_draws(draws, variable = param_names)
+    s <- posterior::summarise_draws(sub,
+      mean = mean,
+      sd = stats::sd,
+      q_lo = ~ stats::quantile(.x, probs = 0.025, names = FALSE),
+      q_hi = ~ stats::quantile(.x, probs = 0.975, names = FALSE),
+      rhat = posterior::rhat
+    )
+    
+    vals <- vapply(seq_len(nrow(s)),
+                   function(i) fmt_cell(s, i),
+                   character(1))
     stats::setNames(vals, s$variable)
   })
 
@@ -98,7 +113,7 @@ tab_smoothbp <- function(...,
   }
 
   # ---- Parse "block_term" variable names -----------------------------------
-  # e.g. "delta1_(Intercept)" -> block = "delta1", term = "(Intercept)"
+  # e.g. "b0_(Intercept)" -> block = "b0", term = "(Intercept)"
   tbl$block <- sub("_.*", "", tbl$Parameter)
   tbl$term  <- sub("^[^_]+_", "", tbl$Parameter)
   solo      <- tbl$block == tbl$term
@@ -106,9 +121,11 @@ tab_smoothbp <- function(...,
 
   # Map block prefixes to pretty labels
   pretty_block <- function(b) {
-    if (b == "b0") return("\u03B2\u2080 \u2013 Intercept and covariates")
-    if (b == "b1") return("\u03B2\u2081 \u2013 Pre-transition slope")
-    if (b == "sigma") return("\u03C3 \u2013 Residual SD")
+    if (b == "alpha") return("\u03B1 \u2013 Propensity score coefficients")
+    if (b == "b0") return("\u03B2\u2080 \u2013 Outcome intercept and covariates")
+    if (b == "b1") return("\u03B2\u2081 \u2013 Outcome initial slope")
+    if (b == "sigma") return("\u03C3 \u2013 Residual standard deviation")
+    if (b == "sigma_u") return("\u03C3_u \u2013 Subject random intercept SD")
     if (grepl("^delta([0-9]+)$", b)) {
        k <- sub("delta", "", b)
        return(sprintf("\u0394\u03B2 %s \u2013 Slope change at BP%s", k, k))

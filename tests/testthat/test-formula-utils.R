@@ -1,6 +1,6 @@
 test_that(".parse_re extracts random-effect group correctly", {
   fml <- ~ 1 + age + sex + (1 | subject)
-  result <- smoothbp:::.parse_re(fml)
+  result <- bjlm:::.parse_re(fml)
 
   expect_equal(result$re_group, "subject")
   # Fixed formula should not contain the RE term
@@ -12,13 +12,13 @@ test_that(".parse_re extracts random-effect group correctly", {
 
 test_that(".parse_re returns NULL re_group when no RE present", {
   fml <- ~ 1 + age
-  result <- smoothbp:::.parse_re(fml)
+  result <- bjlm:::.parse_re(fml)
   expect_null(result$re_group)
 })
 
 test_that(".parse_re errors on multiple RE terms", {
   fml <- ~ 1 + (1 | a) + (1 | b)
-  expect_error(smoothbp:::.parse_re(fml), regexp = "at most one")
+  expect_error(bjlm:::.parse_re(fml), regexp = "at most one")
 })
 
 test_that(".build_design_matrices returns correct dimensions", {
@@ -30,7 +30,7 @@ test_that(".build_design_matrices returns correct dimensions", {
     grp = rep(c("A", "B"), each = n / 2),
     sub = rep(1:10, times = 3)
   )
-  dm <- smoothbp:::.build_design_matrices(
+  dm <- bjlm:::.build_design_matrices(
     b0_fml    = ~ 1 + grp + (1 | sub),
     b1_fml    = ~ 1 + grp,
     deltas_fml = list(~ 1),

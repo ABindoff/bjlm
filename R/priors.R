@@ -17,7 +17,7 @@ prior_normal <- function(mean = 0, sd = 1, lb = -Inf, ub = Inf) {
 
 #' Fix a parameter at a specific value
 #'
-#' Used within `omega` or `rho` lists in [smoothbp()] to specify that a
+#' Used within `omega` or `rho` lists in \code{\link{bjlm}} to specify that a
 #' parameter is fixed and should not be estimated.
 #'
 #' @param value The fixed value(s) (numeric scalar or vector).
@@ -205,7 +205,7 @@ space_omega_priors <- function(K, tau_min, tau_max) {
 
 #' Specify a spike-and-slab prior for variable selection
 #'
-#' Used with [smoothbp_ss()] to place a point-mass spike at zero on selected
+#' Used with spike-and-slab models to place a point-mass spike at zero on selected
 #' coefficients.
 #'
 #' @param pi Prior inclusion probability. Default `0.5`.
@@ -244,3 +244,56 @@ print.smoothbp_spike_slab <- function(x, ...) {
   }
   invisible(x)
 }
+
+#' Collect priors for both outcome and propensity models in a joint BJLM model
+#'
+#' @param outcome An object of class \code{smoothbp_priors} specifying priors
+#'   for the outcome model. See \code{\link{smoothbp_priors}} for details.
+#' @param propensity An object of class \code{smoothbp_prior} (of normal family)
+#'   specifying the prior for the propensity coefficients. Default is \code{prior_normal(0, 2.5)}.
+#'
+#' @return A \code{bjlm_priors} list.
+#' @export
+bjlm_priors <- function(
+    outcome = smoothbp_priors(),
+    propensity = prior_normal(0, 2.5)
+) {
+  stopifnot(
+    "outcome must be a smoothbp_priors object" = inherits(outcome, "smoothbp_priors"),
+    "propensity must be a normal smoothbp_prior" = inherits(propensity, "smoothbp_prior") && propensity$family == "normal"
+  )
+  structure(
+    list(outcome = outcome, propensity = propensity),
+    class = "bjlm_priors"
+  )
+}
+
+#' Alias for smoothbp_priors
+#' @export
+bjlm_outcome_priors <- smoothbp_priors
+
+#' @export
+print.bjlm_priors <- function(x, ...) {
+  cat("bjlm priors:\n")
+  cat("  propensity model:\n")
+  cat("    ")
+  print(x$propensity)
+  cat("  outcome model:\n")
+  print(x$outcome)
+  invisible(x)
+}
+
+#' Collect priors for both outcome and propensity models (deprecated)
+#'
+#' Deprecated: use \code{\link{bjlm_priors}} instead.
+#'
+#' @export
+bipw_priors <- function(
+    outcome = smoothbp_priors(),
+    propensity = prior_normal(0, 2.5)
+) {
+  .Deprecated("bjlm_priors")
+  bjlm_priors(outcome = outcome, propensity = propensity)
+}
+
+

@@ -1,13 +1,13 @@
-#' Summary for bipw_fit objects
+#' Summary for bjlm_fit objects
 #'
-#' @param object A \code{bipw_fit} object.
+#' @param object A \code{bjlm_fit} object.
 #' @param model Which model to summarise: \code{"outcome"}, \code{"propensity"},
 #'   or \code{"both"} (default).
 #' @param prob Probability mass for credible interval (default: 0.95).
 #' @param ... Additional arguments (ignored).
 #'
 #' @export
-summary.bipw_fit <- function(object, model = c("both", "outcome", "propensity"), prob = 0.95, ...) {
+summary.bjlm_fit <- function(object, model = c("both", "outcome", "propensity"), prob = 0.95, ...) {
   model <- match.arg(model)
   alpha <- 1 - prob
 
@@ -50,12 +50,12 @@ summary.bipw_fit <- function(object, model = c("both", "outcome", "propensity"),
   invisible(results)
 }
 
-#' Print method for bipw_fit
-#' @param x A \code{bipw_fit} object.
+#' Print method for bjlm_fit
+#' @param x A \code{bjlm_fit} object.
 #' @param ... Additional arguments (ignored).
 #' @export
-print.bipw_fit <- function(x, ...) {
-  cat("Joint Bayesian IPW model (bipw)\n")
+print.bjlm_fit <- function(x, ...) {
+  cat("Bayesian Joint Longitudinal Model (bjlm)\n")
   cat(sprintf("  Observations: %d (%d subjects)\n", x$n, x$n_subjects))
   cat(sprintf("  Breakpoints: %d\n", x$n_breakpoints))
   cat(sprintf("  Chains: %d, Iter: %d (warmup: %d)\n", x$chains, x$iter, x$warmup))
@@ -71,7 +71,7 @@ print.bipw_fit <- function(x, ...) {
 #' Computes the average treatment effect (ATE) or treatment effect on the treated
 #' (ATT) from the posterior draws, including credible intervals.
 #'
-#' @param fit A \code{bipw_fit} object.
+#' @param fit A \code{bjlm_fit} object.
 #' @param param Character string identifying the treatment effect parameter.
 #'   This should be the name of the parameter capturing the treatment effect
 #'   in the outcome model (e.g., \code{"b1_GroupExperimental"}).
@@ -82,7 +82,7 @@ print.bipw_fit <- function(x, ...) {
 #'
 #' @export
 causal_effect <- function(fit, param, prob = 0.95) {
-  stopifnot(inherits(fit, "bipw_fit"))
+  stopifnot(inherits(fit, "bjlm_fit") || inherits(fit, "bipw_fit"))
   alpha <- 1 - prob
 
   if (requireNamespace("posterior", quietly = TRUE)) {
@@ -112,16 +112,16 @@ causal_effect <- function(fit, param, prob = 0.95) {
   invisible(result)
 }
 
-#' Weight diagnostics for bipw_fit
+#' Weight diagnostics for bjlm_fit
 #'
 #' Reports summary statistics of the IPW weights across posterior draws,
 #' including checks for positivity violations.
 #'
-#' @param fit A \code{bipw_fit} object.
+#' @param fit A \code{bjlm_fit} object.
 #'
 #' @export
 weight_diagnostics <- function(fit) {
-  stopifnot(inherits(fit, "bipw_fit"))
+  stopifnot(inherits(fit, "bjlm_fit") || inherits(fit, "bipw_fit"))
 
   if (requireNamespace("posterior", quietly = TRUE)) {
     draws <- posterior::subset_draws(fit$draws, variable = "mean_weight")
@@ -139,3 +139,19 @@ weight_diagnostics <- function(fit) {
 
   invisible(w_draws)
 }
+
+# Legacy backwards-compatibility methods
+#' @export
+summary.bipw_fit <- function(object, ...) {
+  .Deprecated("summary.bjlm_fit")
+  class(object) <- "bjlm_fit"
+  summary(object, ...)
+}
+
+#' @export
+print.bipw_fit <- function(x, ...) {
+  .Deprecated("print.bjlm_fit")
+  class(x) <- "bjlm_fit"
+  print(x, ...)
+}
+

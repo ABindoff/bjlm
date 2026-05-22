@@ -1,8 +1,8 @@
-#' Fit a joint Bayesian IPW model
+#' Fit a joint Bayesian Joint Longitudinal Model (BJLM)
 #'
 #' Fits a joint propensity-weighted piecewise regression model using
 #' Pólya-Gamma augmented Gibbs sampling for the propensity model and
-#' a weighted smoothbp outcome model. Implements the "cut posterior"
+#' a weighted outcome model. Implements the "cut posterior"
 #' (modular Bayes) approach to prevent outcome-to-propensity feedback.
 #'
 #' @param outcome A two-sided formula of the form \code{y ~ tau}, where
@@ -19,10 +19,13 @@
 #'   \code{"stabilised_ate"} (default), \code{"ate"}, \code{"att"}, or \code{"stabilised_att"}.
 #' @param max_weight Numeric. Trimming threshold for extreme weights (default: 20).
 #' @param data A data frame containing all variables.
-#' @param outcome_priors A list of priors for the outcome model parameters.
+#' @param priors A \code{\link{bjlm_priors}} object specifying priors for both
+#'   outcome and propensity models (optional). If supplied, takes precedence
+#'   over \code{outcome_priors} and \code{propensity_prior_sd}.
+#' @param outcome_priors A list of priors for the outcome model parameters (legacy).
 #'   See \code{\link{smoothbp_priors}} for details.
 #' @param propensity_prior_sd Numeric. Standard deviation for the isotropic normal
-#'   prior on propensity model coefficients (default: 2.5, weakly informative for logistic).
+#'   prior on propensity model coefficients (legacy, default: 2.5).
 #' @param chains Integer. Number of MCMC chains (default: 4).
 #' @param iter Integer. Total number of iterations per chain (default: 5000).
 #' @param warmup Integer. Number of warmup iterations (default: half of \code{iter}).
@@ -32,18 +35,10 @@
 #' @param step_om,step_rho Initial HMC step sizes for omega and rho parameters.
 #' @param target_accept Target acceptance rate for HMC (default: 0.8).
 #'
-#' @return An object of class \code{"bipw_fit"} containing:
-#'   \describe{
-#'     \item{outcome_draws}{Posterior draws for outcome model parameters.}
-#'     \item{propensity_draws}{Posterior draws for propensity model coefficients.}
-#'     \item{weight_draws}{Posterior draws for mean weights (diagnostic).}
-#'     \item{outcome_names}{Parameter names for the outcome model.}
-#'     \item{propensity_names}{Parameter names for the propensity model.}
-#'     \item{call}{The matched call.}
-#'   }
+#' @return An object of class \code{"bjlm_fit"} containing posterior draws and metadata.
 #'
 #' @export
-bipw <- function(
+bjlm <- function(
     outcome,
     b0, b1,
     deltas = list(),
@@ -53,6 +48,7 @@ bipw <- function(
     weights = c("stabilised_ate", "ate", "att", "stabilised_att"),
     max_weight = 20,
     data,
+    priors = NULL,
     outcome_priors = NULL,
     propensity_prior_sd = 2.5,
     chains = 4L,
@@ -86,7 +82,6 @@ bipw <- function(
   prop_covariate_names <- prop_vars[-1]
 
   # Propensity model is subject-level, so we need to identify unique subjects
-  # Use the random effect grouping variable from b0 if available
   re_info <- .parse_re(b0)
   if (!is.null(re_info$re_group)) {
     group_var <- re_info$re_group
@@ -94,12 +89,13 @@ bipw <- function(
     group_indices <- as.integer(group_factor) - 1L
     n_groups <- nlevels(group_factor)
 
-    # Extract subject-level data (first occurrence of each subject)
+    # Extract subject-level data (first occurrence of each subject) and align with levels(group_factor)
     first_idx <- !duplicated(data[[group_var]])
     subject_data <- data[first_idx, , drop = FALSE]
+    subject_data <- subject_data[match(levels(group_factor), subject_data[[group_var]]), , drop = FALSE]
     n_subjects <- nrow(subject_data)
   } else {
-    # Cross-sectional: each observation is a subject
+    # Cross-sectional
     group_indices <- rep(-1L, n)
     n_groups <- 0L
     subject_data <- data
@@ -109,20 +105,18 @@ bipw <- function(
   treatment <- subject_data[[treatment_name]]
   stopifnot("Treatment variable must be binary (0/1)" = all(treatment %in% c(0, 1)))
 
-  # Build propensity design matrix (subject-level)
+  # Build propensity design matrix
   prop_formula <- reformulate(prop_covariate_names)
   x_prop <- model.matrix(prop_formula, data = subject_data)
   p_prop <- ncol(x_prop)
   prop_names <- paste0("alpha_", colnames(x_prop))
 
-  # ---- Build outcome design matrices (same as smoothbp) ----
+  # ---- Build outcome design matrices ----
   b0_fixed_formula <- re_info$fixed
   x_b0 <- model.matrix(b0_fixed_formula, data = data)
-
   x_b1 <- model.matrix(b1, data = data)
 
   n_bp <- length(deltas)
-
   x_deltas_list <- lapply(deltas, function(f) model.matrix(f, data = data))
   x_om_list <- lapply(omega, function(f) model.matrix(f, data = data))
   x_rho_list <- lapply(rho, function(f) model.matrix(f, data = data))
@@ -133,10 +127,31 @@ bipw <- function(
   p_om <- if (n_bp > 0) sapply(x_om_list, ncol) else -1L
   p_rho <- if (n_bp > 0) sapply(x_rho_list, ncol) else -1L
 
-  # ---- Build outcome priors (reuse smoothbp infrastructure) ----
-  if (is.null(outcome_priors)) {
-    outcome_priors <- .default_bipw_priors(p_b0, p_b1, n_bp, p_deltas, p_om, p_rho)
+  # ---- Resolve priors ----
+  if (!is.null(priors)) {
+    if (inherits(priors, "bjlm_priors") || inherits(priors, "bipw_priors")) {
+      outcome_priors <- priors$outcome
+      propensity_prior_sd <- priors$propensity$sd
+    } else {
+      stop("`priors` must be an object of class `bjlm_priors` created by bjlm_priors().")
+    }
   }
+
+  if (is.null(outcome_priors)) {
+    outcome_priors <- smoothbp_priors()
+  }
+
+  # Expand outcome priors into vectors
+  dm_meta <- list(
+    col_names_b0 = colnames(x_b0),
+    col_names_b1 = colnames(x_b1),
+    col_names_deltas = if (n_bp > 0) lapply(x_deltas_list, colnames) else list(),
+    col_names_om = if (n_bp > 0) lapply(x_om_list, colnames) else list(),
+    col_names_rho = if (n_bp > 0) lapply(x_rho_list, colnames) else list(),
+    X_om = if (n_bp > 0) x_om_list else list(),
+    X_rho = if (n_bp > 0) x_rho_list else list()
+  )
+  pv <- .build_prior_vectors(outcome_priors, dm_meta)
 
   # ---- Parameter names ----
   b0_names <- paste0("b0_", colnames(x_b0))
@@ -154,7 +169,7 @@ bipw <- function(
   outcome_names <- c(b0_names, re_names, b1_names, delta_names, om_names, rho_names, "sigma", "sigma_u")
 
   # ---- Call Rust sampler ----
-  raw <- run_bipw(
+  raw <- run_bjlm(
     y = y,
     tau = tau,
     x_b0 = as.double(x_b0), p_b0 = as.integer(p_b0),
@@ -167,30 +182,30 @@ bipw <- function(
     p_rho = as.integer(p_rho),
     group_b0 = if (n_groups > 0) group_indices else -1L,
     n_groups_b0 = as.integer(n_groups),
-    prior_mean_b0 = outcome_priors$b0_mean,
-    prior_sd_b0 = outcome_priors$b0_sd,
-    prior_lb_b0 = outcome_priors$b0_lb,
-    prior_ub_b0 = outcome_priors$b0_ub,
-    prior_mean_b1 = outcome_priors$b1_mean,
-    prior_sd_b1 = outcome_priors$b1_sd,
-    prior_lb_b1 = outcome_priors$b1_lb,
-    prior_ub_b1 = outcome_priors$b1_ub,
-    prior_mean_deltas = if (n_bp > 0) outcome_priors$delta_mean else list(-1),
-    prior_sd_deltas = if (n_bp > 0) outcome_priors$delta_sd else list(-1),
-    prior_lb_deltas = if (n_bp > 0) outcome_priors$delta_lb else list(-1),
-    prior_ub_deltas = if (n_bp > 0) outcome_priors$delta_ub else list(-1),
-    prior_mean_om = if (n_bp > 0) outcome_priors$om_mean else list(-1),
-    prior_sd_om = if (n_bp > 0) outcome_priors$om_sd else list(-1),
-    prior_lb_om = if (n_bp > 0) outcome_priors$om_lb else list(-1),
-    prior_ub_om = if (n_bp > 0) outcome_priors$om_ub else list(-1),
-    prior_mean_rho = if (n_bp > 0) outcome_priors$rho_mean else list(-1),
-    prior_sd_rho = if (n_bp > 0) outcome_priors$rho_sd else list(-1),
-    prior_lb_rho = if (n_bp > 0) outcome_priors$rho_lb else list(-1),
-    prior_ub_rho = if (n_bp > 0) outcome_priors$rho_ub else list(-1),
-    sigma_shape = outcome_priors$sigma_shape,
-    sigma_scale = outcome_priors$sigma_scale,
-    sigma_u_shape = outcome_priors$sigma_u_shape,
-    sigma_u_scale = outcome_priors$sigma_u_scale,
+    prior_mean_b0 = pv$b0$mean,
+    prior_sd_b0 = pv$b0$sd,
+    prior_lb_b0 = pv$b0$lb,
+    prior_ub_b0 = pv$b0$ub,
+    prior_mean_b1 = pv$b1$mean,
+    prior_sd_b1 = pv$b1$sd,
+    prior_lb_b1 = pv$b1$lb,
+    prior_ub_b1 = pv$b1$ub,
+    prior_mean_deltas = if (n_bp > 0) lapply(pv$deltas, `[[`, "mean") else list(-1),
+    prior_sd_deltas = if (n_bp > 0) lapply(pv$deltas, `[[`, "sd") else list(-1),
+    prior_lb_deltas = if (n_bp > 0) lapply(pv$deltas, `[[`, "lb") else list(-1),
+    prior_ub_deltas = if (n_bp > 0) lapply(pv$deltas, `[[`, "ub") else list(-1),
+    prior_mean_om = if (n_bp > 0) lapply(pv$om, `[[`, "mean") else list(-1),
+    prior_sd_om = if (n_bp > 0) lapply(pv$om, `[[`, "sd") else list(-1),
+    prior_lb_om = if (n_bp > 0) lapply(pv$om, `[[`, "lb") else list(-1),
+    prior_ub_om = if (n_bp > 0) lapply(pv$om, `[[`, "ub") else list(-1),
+    prior_mean_rho = if (n_bp > 0) lapply(pv$rho, `[[`, "mean") else list(-1),
+    prior_sd_rho = if (n_bp > 0) lapply(pv$rho, `[[`, "sd") else list(-1),
+    prior_lb_rho = if (n_bp > 0) lapply(pv$rho, `[[`, "lb") else list(-1),
+    prior_ub_rho = if (n_bp > 0) lapply(pv$rho, `[[`, "ub") else list(-1),
+    sigma_shape = outcome_priors$sigma$shape,
+    sigma_scale = outcome_priors$sigma$scale,
+    sigma_u_shape = outcome_priors$sigma_u$shape,
+    sigma_u_scale = outcome_priors$sigma_u$scale,
     x_prop = as.double(x_prop), p_prop = as.integer(p_prop),
     treatment = as.double(treatment),
     n_subjects = as.integer(n_subjects),
@@ -211,7 +226,7 @@ bipw <- function(
   # ---- Post-process draws ----
   n_outcome <- length(outcome_names)
   n_alpha <- p_prop
-  n_total <- n_outcome + n_alpha + 1  # +1 for mean_weight
+  n_total <- n_outcome + n_alpha + 1
 
   all_names <- c(outcome_names, prop_names, "mean_weight")
 
@@ -221,11 +236,8 @@ bipw <- function(
     mat
   })
 
-  # Build posterior draws object
   if (requireNamespace("posterior", quietly = TRUE)) {
     n_post <- nrow(draws_list[[1]])
-    # Build the 3D array correctly: dims are (iteration, chain, variable)
-    # We must fill it explicitly because unlist + array has wrong fill order
     arr <- array(NA_real_, dim = c(n_post, chains, n_total),
                  dimnames = list(NULL, paste0("chain_", seq_len(chains)), all_names))
     for (c in seq_len(chains)) {
@@ -252,45 +264,24 @@ bipw <- function(
       treatment_name = treatment_name,
       chains = chains,
       iter = iter,
-      warmup = warmup
+      warmup = warmup,
+      priors = priors,
+      outcome_priors = outcome_priors,
+      propensity_prior_sd = propensity_prior_sd
     ),
-    class = "bipw_fit"
+    class = "bjlm_fit"
   )
 }
 
-# ---- Internal helpers ----
-
-#' Default priors for bipw (mirrors smoothbp defaults)
-#' @noRd
-.default_bipw_priors <- function(p_b0, p_b1, n_bp, p_deltas, p_om, p_rho) {
-  priors <- list(
-    b0_mean = rep(0, p_b0),
-    b0_sd = rep(5, p_b0),
-    b0_lb = rep(-Inf, p_b0),
-    b0_ub = rep(Inf, p_b0),
-    b1_mean = rep(0, p_b1),
-    b1_sd = rep(2, p_b1),
-    b1_lb = rep(-Inf, p_b1),
-    b1_ub = rep(Inf, p_b1),
-    sigma_shape = 1,
-    sigma_scale = 1,
-    sigma_u_shape = 1,
-    sigma_u_scale = 1
-  )
-
-  if (n_bp > 0) {
-    priors$delta_mean <- lapply(p_deltas, function(p) rep(0, p))
-    priors$delta_sd <- lapply(p_deltas, function(p) rep(2, p))
-    priors$delta_lb <- lapply(p_deltas, function(p) rep(-Inf, p))
-    priors$delta_ub <- lapply(p_deltas, function(p) rep(Inf, p))
-    priors$om_mean <- lapply(p_om, function(p) rep(0, p))
-    priors$om_sd <- lapply(p_om, function(p) rep(5, p))
-    priors$om_lb <- lapply(p_om, function(p) rep(-Inf, p))
-    priors$om_ub <- lapply(p_om, function(p) rep(Inf, p))
-    priors$rho_mean <- lapply(p_rho, function(p) rep(1, p))
-    priors$rho_sd <- lapply(p_rho, function(p) rep(2, p))
-    priors$rho_lb <- lapply(p_rho, function(p) rep(0, p))
-    priors$rho_ub <- lapply(p_rho, function(p) rep(Inf, p))
-  }
-  priors
+#' Fit a joint Bayesian IPW model (deprecated)
+#'
+#' Fits a joint model using the deprecated bipw interface. Please use \code{\link{bjlm}} instead.
+#'
+#' @export
+bipw <- function(...) {
+  .Deprecated("bjlm")
+  fit <- bjlm(...)
+  class(fit) <- c("bipw_fit", class(fit))
+  fit
 }
+

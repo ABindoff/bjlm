@@ -8,14 +8,14 @@ mod sampler_re;
 mod polya_gamma;
 mod propensity;
 mod weights;
-mod sampler_bipw;
+mod sampler_bjlm;
 
 use model::{ModelData, Priors, SpikeSlabConfig};
 use sampler::{run_chain, run_chain_ss};
 use sampler_re::{run_chain_re, run_chain_re_ss};
 use propensity::{PropensityData, PropensityPriors};
 use weights::WeightType;
-use sampler_bipw::{BipwConfig, run_chain_bipw};
+use sampler_bjlm::{BjlmConfig, run_chain_bjlm};
 
 // Helper: build DMatrix from a flat column-major slice + dimensions
 fn flat_to_dmatrix(data: &[f64], nrow: usize, ncol: usize) -> DMatrix<f64> {
@@ -571,7 +571,7 @@ fn run_mcmc_re_ss(
 /// @noRd
 /// @keywords internal
 #[extendr]
-fn run_bipw(
+fn run_bjlm(
     // Outcome data
     y: &[f64],
     tau: &[f64],
@@ -687,7 +687,7 @@ fn run_bipw(
 
     let prop_priors = PropensityPriors::isotropic(p_pr, prop_prior_sd);
 
-    let config = BipwConfig {
+    let config = BjlmConfig {
         weight_type: WeightType::from_i32(weight_type),
         max_weight,
     };
@@ -703,7 +703,7 @@ fn run_bipw(
         pool.install(|| {
             (0..n_chains).into_par_iter().map(|c| {
                 let seed = base_seed.wrapping_add(c as u64 * 1_000_003);
-                run_chain_bipw(
+                run_chain_bjlm(
                     &outcome_data, &outcome_priors, &prop_data, &prop_priors, &config,
                     n_iter, n_warmup, step_om, step_rho, target_accept,
                     seed, false, c, n_chains, &|_,_,_,_,_| {},
@@ -713,7 +713,7 @@ fn run_bipw(
     } else {
         (0..n_chains).map(|c| {
             let seed = base_seed.wrapping_add(c as u64 * 1_000_003);
-            run_chain_bipw(
+            run_chain_bjlm(
                 &outcome_data, &outcome_priors, &prop_data, &prop_priors, &config,
                 n_iter, n_warmup, step_om, step_rho, target_accept,
                 seed, verbose, c, n_chains, &|_,_,_,_,_| {},
@@ -732,10 +732,10 @@ fn run_bipw(
 }
 
 extendr_module! {
-    mod smoothbp;
+    mod bjlm;
     fn run_mcmc;
     fn run_mcmc_ss;
     fn run_mcmc_re;
     fn run_mcmc_re_ss;
-    fn run_bipw;
+    fn run_bjlm;
 }

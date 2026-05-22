@@ -13,6 +13,6 @@ fixed(value)
 A \code{smoothbp_fixed} object.
 }
 \description{
-Used within \code{omega} or \code{rho} lists in \code{\link[=smoothbp]{smoothbp()}} to specify that a
+Used within \code{omega} or \code{rho} lists in \code{\link{bjlm}} to specify that a
 parameter is fixed and should not be estimated.
 }

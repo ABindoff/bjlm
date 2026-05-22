@@ -6,13 +6,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         # nolint start\n\
         \n\
         #' @usage NULL\n\
-        #' @useDynLib smoothbp, .registration = TRUE\n\
+        #' @useDynLib bjlm, .registration = TRUE\n\
         NULL\n\
         \n\
     ";
     let footer = "# nolint end\n";
-    let wrappers = smoothbp::get_smoothbp_metadata()
-        .make_r_wrappers(true, "smoothbp")
+    let wrappers = bjlm::get_bjlm_metadata()
+        .make_r_wrappers(true, "bjlm")
         .map_err(|e| format!("failed to generate wrappers: {e}"))?;
     std::fs::write(wrapper_path, format!("{header}{wrappers}{footer}"))
         .map_err(|e| format!("failed to write {wrapper_path}: {e}"))?;

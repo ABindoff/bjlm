@@ -35,6 +35,29 @@ plot.smoothbp_fit <- function(x, type = "trace", pars = NULL, ...) {
 #'   \code{type = "both"}.
 #' @export
 plot.bipw_fit <- function(x, type = "trace", pars = NULL, ...) {
+  .Deprecated("plot.bjlm_fit")
+  if (is.null(pars)) {
+    all_pars <- posterior::variables(x$draws)
+    pars <- all_pars[!grepl("^u\\[", all_pars)]
+  }
+  trace_plot(x, pars = pars, type = type, ...)
+}
+
+#' Trace and density plots for a bjlm_fit
+#'
+#' A thin wrapper around \code{\link{trace_plot}} for the standard
+#' \code{plot()} interface.
+#'
+#' @param x   A \code{bjlm_fit} object.
+#' @param type One of \code{"trace"} (default), \code{"density"}, or
+#'   \code{"both"}.
+#' @param pars Character vector of parameter names.  Defaults to all
+#'   non-random-effect parameters.
+#' @param ...  Passed to \code{\link{trace_plot}}.
+#' @return A \code{ggplot} object, or a named list of two when
+#'   \code{type = "both"}.
+#' @export
+plot.bjlm_fit <- function(x, type = "trace", pars = NULL, ...) {
   if (is.null(pars)) {
     all_pars <- posterior::variables(x$draws)
     pars <- all_pars[!grepl("^u\\[", all_pars)]
@@ -137,8 +160,8 @@ trace_plot <- function(
     rhat_thresh = 1.05,
     ess_thresh  = 100
 ) {
-  if (!inherits(fit, c("smoothbp_fit", "bipw_fit"))) {
-    stop("`fit` must be a smoothbp_fit or bipw_fit object.")
+  if (!inherits(fit, c("smoothbp_fit", "bipw_fit", "bjlm_fit"))) {
+    stop("`fit` must be a smoothbp_fit, bipw_fit, or bjlm_fit object.")
   }
   if (!type %in% c("trace", "density", "both")) {
     stop('`type` must be one of "trace", "density", or "both".')

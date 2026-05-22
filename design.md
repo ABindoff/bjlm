@@ -690,6 +690,162 @@ Y <- 5 + 2.0*T + 1.5*X1 + 0.5*X2 + rnorm(n)
 
 ---
 
+## Declarative Piped API, Continuous Gaussian Processes, and GLM Families
+
+As observational studies transition from simple cross-sectional or perfectly balanced longitudinal panels to complex, irregular, and misaligned longitudinal data structures (e.g., the Tasmanian Healthy Brain Project), the statistical and software interfaces must scale. We propose a three-part next-generation architecture to handle:
+1. **Misaligned, Multi-Table Data:** An R-side piped, block-based declarative API.
+2. **Temporal Discrepancy:** Continuous-time latent Gaussian Process (`gp()`) confounders.
+3. **Non-Gaussian Likelihoods:** Swappable GLM families for both propensity and outcome blocks.
+
+---
+
+### 1. The Piped, Block-Based Declarative R API
+
+#### Rationale
+Traditional regression and causal modeling in R requires all variables to reside in a single, wide or long data frame. However, in modern clinical and observational studies:
+- **Treatment assignment and demographics** (e.g., baseline genotype, education level, group assignment) reside in a subject-level table.
+- **Outcome measurements** (e.g., cognitive assessments, biomarkers) are measured at different, often irregular, times and reside in an observation-level table.
+- **Time-varying confounders** (e.g., blood pressure, physical activity) are measured on their own schedules.
+
+Forcing these mismatched datasets into a single long data frame results in massive row duplication, alignment errors, and code complexity. Furthermore, it obscures the structural independence of the propensity and outcome models.
+
+#### Piped Pipeline Design
+We propose a declarative API using the native R pipe operator (`|>`). Each submodel is specified as an independent structural block, taking its own dataset, formula, and likelihood family:
+
+```r
+model <- bipw_model() |>
+  # 1. Propensity / Treatment block
+  add_propensity(
+    formula = Group ~ age_s + education_s + sex,
+    data = demographic_df,
+    family = binomial("logit")
+  ) |>
+  # 2. Latent continuous-time confounder block
+  add_latent_gp(
+    name = "confounder_gp",
+    time = "age_s",
+    subject = "subject",
+    kernel = "se"
+  ) |>
+  # 3. Piecewise outcome block
+  add_outcome(
+    formula = score ~ tau,
+    b0 = ~ 1 + Group + age_s + gp(confounder_gp) + (1 | subject),
+    b1 = ~ 1 + Group,
+    deltas = list(~ 1 + Group),
+    omega = list(~ 1 + Group),
+    rho = list(~ 1),
+    data = outcome_df,
+    family = gaussian("identity")
+  ) |>
+  # 4. Alignment & compilation
+  compile() |>
+  # 5. Fit via Rust sampler
+  fit(chains = 4, iter = 5000, warmup = 3000, seed = 42)
+```
+
+#### Compilation & Type Checking
+The `.compile()` step acts as a static analyzer before passing data to the Rust engine:
+1. **Subject Alignment:** It verifies that `subject` identifiers in all data frames map to a common master pool, throwing clear compilation errors for unmatched IDs.
+2. **Bayesian Cut Check:** It strictly enforces that no outcome variables appear in the propensity formulas or GP submodels, ensuring the mathematical isolation of the propensity score estimation.
+3. **Weight Mapping:** It automatically compiles subject-level propensity parameters into observation-level weights ($sw_{it}$) for the outcome model based on the matching subject and time vectors.
+
+---
+
+### 2. Continuous-Time Latent Gaussian Processes (gp)
+
+#### The Problem: Temporal Misalignment
+In observational studies, time-varying confounders and treatments are rarely measured at the exact same moment as the outcome. For example, a subject might have physical activity $X_{it}$ recorded at age 62, 67, and 71, but cognitive assessments $Y_{it}$ at age 60, 64, and 68. 
+
+Using ad-hoc methods like "last observation carried forward" (LOCF) or linear interpolation introduces severe measurement error and bias into the propensity scores and subsequent weights.
+
+#### The Solution: Latent continuous-time GPs
+We model time-varying confounders and propensity scores as continuous-time processes using Gaussian Processes (GPs). A latent subject-level GP confounder $Z_i(t)$ is defined as:
+$$
+Z_i(t) \sim \mathcal{GP}(0, \mathcal{K}_\theta(t, t'))
+$$
+where $\mathcal{K}_\theta$ is a covariance kernel (e.g., Squared Exponential or Matérn 3/2) parameterized by length-scale $\ell$ and variance $\sigma_f^2$.
+
+```mermaid
+graph LR
+    subgraph Propensity Stage [Propensity Block (Demographics + Treatment)]
+        A["Demographics (demographic_df)"] --> B["Propensity Model"]
+        C["Confounder Obs (irregular times t)"] --> D["GP Interpolation Z_i(t)"]
+        D -->|e_i(t)| B
+    end
+    
+    subgraph Outcome Stage [Outcome Block (Irregular times t')]
+        D -.->|Posterior Draws of Z_i(t')| E["Outcome Model (outcome_df)"]
+        F["Outcome Obs Y_it'"] --> E
+    end
+    
+    style Propensity Stage fill:#eaf,stroke:#333,stroke-width:2px
+    style Outcome Stage fill:#afe,stroke:#333,stroke-width:2px
+```
+
+#### Maintaining the Bayesian Cut with Latent GPs
+To prevent the outcome model from influencing the latent confounder trajectory (which would introduce outcome feedback bias), we partition the GP sampling using a **one-way Bayesian Cut**:
+1. **Propensity Stage:** The GP hyperparameters ($\ell, \sigma_f^2, \sigma_n^2$) and latent states $Z_i(t)$ are sampled using **only** the propensity/covariate dataset. The Rust sampler uses Elliptical Slice Sampling (ESS) to draw from the joint posterior of the latent states:
+   $$
+   p(\mathbf{Z}_i | \mathbf{X}_{prop}, \mathbf{T})
+   $$
+2. **Outcome Stage:** During each MCMC iteration, the current draw of the continuous latent function $Z_i(t)$ is evaluated at the exact outcome measurement times $t'_{outcome}$:
+   $$
+   Z_i(t'_{outcome})
+   $$
+   This continuous value acts as a time-varying covariate in the outcome model, with **zero feedback** back to the GP parameters.
+
+---
+
+### 3. Swappable GLM Families & IWLS Proposals
+
+To support count, proportion, and overdispersed cognitive scores (as detailed in `family_extension_plan.md`), the Rust engine must support non-Gaussian likelihoods.
+
+#### Supported Families
+We define a unified `Family` trait in the Rust core supporting the following distributions:
+- `gaussian(link = "identity")`
+- `poisson(link = "log")`
+- `negbinomial(link = "log")` (for overdispersed error counts)
+- `binomial(link = "logit")` (for proportion correct trials)
+- `beta_binomial(link = "logit")` (for overdispersed proportion trials)
+
+#### Rust Implementation: IWLS Proposals
+Non-Gaussian families do not have conjugate posteriors, making exact Gibbs updates for regression coefficients ($\boldsymbol{\beta}, \boldsymbol{\alpha}$) impossible. Rather than falling back to slow Metropolis-Hastings (MH) random walks, we implement **Iteratively Weighted Least Squares (IWLS) proposals** in a Metropolis-within-Gibbs step.
+
+At each iteration, we calculate:
+1. **Working Response:**
+   $$
+   z_i = \eta_i + \frac{y_i - \mu_i}{d\mu_i/d\eta_i}
+   $$
+2. **Fisher Weights:**
+   $$
+   w_i = \frac{(d\mu_i/d\eta_i)^2}{\text{Var}(y_i)}
+   $$
+3. **Weighted Precision Matrix:**
+   $$
+   \mathbf{P}_{IWLS} = \mathbf{X}^\top \mathbf{W} \mathbf{X} + \mathbf{B}^{-1}
+   $$
+4. **Candidate Draw:** Propose $\boldsymbol{\beta}^* \sim \mathcal{N}(\mathbf{P}_{IWLS}^{-1} \mathbf{rhs}, \mathbf{P}_{IWLS}^{-1})$ using the existing Cholesky solver, where $\mathbf{rhs} = \mathbf{X}^\top \mathbf{W} \mathbf{z} + \mathbf{B}^{-1}\mathbf{b}$.
+5. **MH Acceptance:** Accept $\boldsymbol{\beta}^*$ with probability $\alpha = \min(1, \exp(R))$, where $R$ corrects for the difference between the true log-likelihood and the normal proposal approximation:
+   $$
+   R = (\log p(\mathbf{Y}|\boldsymbol{\beta}^*) - \log p(\mathbf{Y}|\boldsymbol{\beta})) + (\log q(\boldsymbol{\beta}|\boldsymbol{\beta}^*) - \log q(\boldsymbol{\beta}^*|\boldsymbol{\beta}))
+   $$
+
+For the `gaussian()` family, the weights $w_i = 1/\sigma^2$, the proposal is exact, and the acceptance probability reduces to $1$, recovering the original conjugate Gibbs sampler.
+
+#### Numerical Stability in Link Functions
+To prevent float overflow (`f64::INFINITY`) in extreme states:
+- **Log Link:** $\mu_i = \exp(\min(\eta_i, 700.0))$
+- **Logit Link:** $\mu_i = \text{sigmoid}(\eta_i)$, where:
+  $$
+  \text{sigmoid}(x) = \begin{cases}
+    \frac{1}{1 + \exp(-x)} & x \ge 0 \\
+    \frac{\exp(x)}{1 + \exp(x)} & x < 0
+  \end{cases}
+  $$
+
+---
+
 ## Key References
 
 1. **Polson, Scott, Windle (2013).** Bayesian Inference for Logistic Models

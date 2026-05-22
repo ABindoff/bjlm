@@ -27,6 +27,6 @@ prior_spike_slab(
 A \code{smoothbp_spike_slab} object.
 }
 \description{
-Used with \code{\link[=smoothbp_ss]{smoothbp_ss()}} to place a point-mass spike at zero on selected
+Used with spike-and-slab models to place a point-mass spike at zero on selected
 coefficients.
 }

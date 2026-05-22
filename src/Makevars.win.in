@@ -2,8 +2,8 @@ TARGET = $(subst 64,x86_64,$(subst 32,i686,$(WIN)))-pc-windows-gnu
 
 TARGET_DIR = ./rust/target
 LIBDIR = $(TARGET_DIR)/$(TARGET)/@LIBDIR@
-STATLIB = $(LIBDIR)/libsmoothbp.a
-PKG_LIBS = -L$(LIBDIR) -lsmoothbp -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll
+STATLIB = $(LIBDIR)/libbjlm.a
+PKG_LIBS = -L$(LIBDIR) -lbjlm -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll
 
 all: $(SHLIB) rust_clean
 
@@ -12,9 +12,10 @@ all: $(SHLIB) rust_clean
 $(SHLIB): $(STATLIB)
 
 # Place cargo home in LOCALAPPDATA to avoid paths with spaces/dashes
-CARGOTMP = $(subst \,/,$(LOCALAPPDATA))/.smoothbp_cargo_tmp
+CARGOTMP = $(subst \,/,$(LOCALAPPDATA))/.bjlm_cargo_tmp
 
 $(STATLIB):
+	mkdir -p "$(CARGOTMP)"
 	mkdir -p $(TARGET_DIR)/libgcc_mock
 	touch $(TARGET_DIR)/libgcc_mock/libgcc_eh.a
 

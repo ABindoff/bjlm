@@ -1,17 +1,15 @@
-Package: smoothbp
-Title: Hierarchical Piecewise Regression with Smoothed Change-Points
+Package: bjlm
+Title: Bayesian Joint Longitudinal Modelling
 Version: 0.2.0
 Authors@R:
     person("Aidan D", "Bindoff", , "aidan.bindoff@utas.edu.au", role = c("aut", "cre"),
            comment = c(ORCID = "0000-0002-0943-2702"))
-Description: Fits Bayesian hierarchical piecewise regression models with 
-    multiple logistic-smoothed change-points. Non-linear parameters (change-point 
-    locations and transition sharpness) and linear parameters can each be 
-    conditioned on covariates and factors via flexible design matrices. 
-    A random-intercept structure is supported for any parameter. Spike-and-slab 
-    regularization is supported for selecting the number of breakpoints. 
-    Posterior inference uses a Metropolis-within-Gibbs sampler implemented 
-    in Rust for speed.
+Description: Fits Bayesian joint longitudinal propensity-weighted and piecewise 
+    change-point models using Pólya-Gamma augmented Gibbs sampling and 
+    weighted MCMC. Implements a modular "cut posterior" to prevent 
+    outcome-to-propensity feedback. Provides a premium piped declarative API 
+    for subject alignment, demographic and longitudinal outcome merging, 
+    prior construction, and highly efficient zero-breakpoint mixed-effects models.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
@@ -41,5 +39,5 @@ Suggests:
     rjags
 Config/testthat/edition: 3
 VignetteBuilder: knitr
-URL: https://github.com/ABindoff/smoothbp
-BugReports: https://github.com/ABindoff/smoothbp/issues
+URL: https://github.com/ABindoff/bjlm
+BugReports: https://github.com/ABindoff/bjlm/issues

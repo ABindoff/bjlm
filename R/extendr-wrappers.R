@@ -2,7 +2,7 @@
 # nolint start
 
 #' @usage NULL
-#' @useDynLib smoothbp, .registration = TRUE
+#' @useDynLib bjlm, .registration = TRUE
 NULL
 
 #' @noRd
@@ -23,6 +23,6 @@ run_mcmc_re_ss <- function(y, tau, x_b0, p_b0, x_b1, p_b1, x_deltas, p_deltas, x
 
 #' @noRd
 #' @keywords internal
-run_bipw <- function(y, tau, x_b0, p_b0, x_b1, p_b1, x_deltas, p_deltas, x_om, p_om, x_rho, p_rho, group_b0, n_groups_b0, prior_mean_b0, prior_sd_b0, prior_lb_b0, prior_ub_b0, prior_mean_b1, prior_sd_b1, prior_lb_b1, prior_ub_b1, prior_mean_deltas, prior_sd_deltas, prior_lb_deltas, prior_ub_deltas, prior_mean_om, prior_sd_om, prior_lb_om, prior_ub_om, prior_mean_rho, prior_sd_rho, prior_lb_rho, prior_ub_rho, sigma_shape, sigma_scale, sigma_u_shape, sigma_u_scale, x_prop, p_prop, treatment, n_subjects, prop_prior_sd, weight_type, max_weight, step_om, step_rho, target_accept, chains, iter, warmup, seed, verbose, n_cores) .Call(wrap__run_bipw, y, tau, x_b0, p_b0, x_b1, p_b1, x_deltas, p_deltas, x_om, p_om, x_rho, p_rho, group_b0, n_groups_b0, prior_mean_b0, prior_sd_b0, prior_lb_b0, prior_ub_b0, prior_mean_b1, prior_sd_b1, prior_lb_b1, prior_ub_b1, prior_mean_deltas, prior_sd_deltas, prior_lb_deltas, prior_ub_deltas, prior_mean_om, prior_sd_om, prior_lb_om, prior_ub_om, prior_mean_rho, prior_sd_rho, prior_lb_rho, prior_ub_rho, sigma_shape, sigma_scale, sigma_u_shape, sigma_u_scale, x_prop, p_prop, treatment, n_subjects, prop_prior_sd, weight_type, max_weight, step_om, step_rho, target_accept, chains, iter, warmup, seed, verbose, n_cores)
+run_bjlm <- function(y, tau, x_b0, p_b0, x_b1, p_b1, x_deltas, p_deltas, x_om, p_om, x_rho, p_rho, group_b0, n_groups_b0, prior_mean_b0, prior_sd_b0, prior_lb_b0, prior_ub_b0, prior_mean_b1, prior_sd_b1, prior_lb_b1, prior_ub_b1, prior_mean_deltas, prior_sd_deltas, prior_lb_deltas, prior_ub_deltas, prior_mean_om, prior_sd_om, prior_lb_om, prior_ub_om, prior_mean_rho, prior_sd_rho, prior_lb_rho, prior_ub_rho, sigma_shape, sigma_scale, sigma_u_shape, sigma_u_scale, x_prop, p_prop, treatment, n_subjects, prop_prior_sd, weight_type, max_weight, step_om, step_rho, target_accept, chains, iter, warmup, seed, verbose, n_cores) .Call(wrap__run_bjlm, y, tau, x_b0, p_b0, x_b1, p_b1, x_deltas, p_deltas, x_om, p_om, x_rho, p_rho, group_b0, n_groups_b0, prior_mean_b0, prior_sd_b0, prior_lb_b0, prior_ub_b0, prior_mean_b1, prior_sd_b1, prior_lb_b1, prior_ub_b1, prior_mean_deltas, prior_sd_deltas, prior_lb_deltas, prior_ub_deltas, prior_mean_om, prior_sd_om, prior_lb_om, prior_ub_om, prior_mean_rho, prior_sd_rho, prior_lb_rho, prior_ub_rho, sigma_shape, sigma_scale, sigma_u_shape, sigma_u_scale, x_prop, p_prop, treatment, n_subjects, prop_prior_sd, weight_type, max_weight, step_om, step_rho, target_accept, chains, iter, warmup, seed, verbose, n_cores)
 
 # nolint end

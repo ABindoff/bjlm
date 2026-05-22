@@ -18,6 +18,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "bjlm"
+version = "0.1.0"
+dependencies = [
+ "extendr-api",
+ "nalgebra",
+ "rand",
+ "rand_distr",
+ "rayon",
+]
+
+[[package]]
 name = "bytemuck"
 version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -342,17 +353,6 @@ dependencies = [
  "num-traits",
  "paste",
  "wide",
-]
-
-[[package]]
-name = "smoothbp"
-version = "0.1.0"
-dependencies = [
- "extendr-api",
- "nalgebra",
- "rand",
- "rand_distr",
- "rayon",
 ]
 
 [[package]]
