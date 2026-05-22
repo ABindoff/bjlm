@@ -76,8 +76,8 @@ bipw <- function(
   outcome_vars <- all.vars(outcome)
   y_name <- outcome_vars[1]
   tau_name <- outcome_vars[2]
-  y <- data[[y_name]]
-  tau <- data[[tau_name]]
+  y <- as.double(data[[y_name]])
+  tau <- as.double(data[[tau_name]])
   n <- length(y)
 
   # ---- Parse propensity formula ----
@@ -88,8 +88,8 @@ bipw <- function(
   # Propensity model is subject-level, so we need to identify unique subjects
   # Use the random effect grouping variable from b0 if available
   re_info <- .parse_re(b0)
-  if (!is.null(re_info$re_var)) {
-    group_var <- re_info$re_var
+  if (!is.null(re_info$re_group)) {
+    group_var <- re_info$re_group
     group_factor <- as.factor(data[[group_var]])
     group_indices <- as.integer(group_factor) - 1L
     n_groups <- nlevels(group_factor)
@@ -116,7 +116,7 @@ bipw <- function(
   prop_names <- paste0("alpha_", colnames(x_prop))
 
   # ---- Build outcome design matrices (same as smoothbp) ----
-  b0_fixed_formula <- .strip_re(b0)
+  b0_fixed_formula <- re_info$fixed
   x_b0 <- model.matrix(b0_fixed_formula, data = data)
 
   x_b1 <- model.matrix(b1, data = data)
@@ -259,29 +259,6 @@ bipw <- function(
 }
 
 # ---- Internal helpers ----
-
-#' Parse random effects from a formula like ~ 1 + x + (1 | group)
-#' @noRd
-.parse_re <- function(formula) {
-  # Check for (1 | group) pattern
-  terms_str <- deparse(formula)
-  re_match <- regmatches(terms_str, regexpr("\\(1\\s*\\|\\s*(\\w+)\\)", terms_str, perl = TRUE))
-  if (length(re_match) == 0 || re_match == "") {
-    return(list(re_var = NULL))
-  }
-  re_var <- gsub(".*\\|\\s*(\\w+)\\).*", "\\1", re_match)
-  list(re_var = re_var)
-}
-
-#' Strip random effects from a formula
-#' @noRd
-.strip_re <- function(formula) {
-  terms_str <- deparse(formula)
-  cleaned <- gsub("\\+?\\s*\\(1\\s*\\|\\s*\\w+\\)\\s*\\+?", "", terms_str)
-  cleaned <- gsub("\\s+\\+\\s+$", "", cleaned)
-  cleaned <- gsub("^\\s+\\+\\s+", "", cleaned)
-  as.formula(cleaned)
-}
 
 #' Default priors for bipw (mirrors smoothbp defaults)
 #' @noRd
