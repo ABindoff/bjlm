@@ -14,3 +14,7 @@
 ^cran-comments\.md$
 ^pip_plot\.png$
 ^scratch$
+^tests/diagnostic\.R$
+^tests/sim_test_ate\.R$
+^tests/sim_test_longitudinal\.R$
+^design\.md$

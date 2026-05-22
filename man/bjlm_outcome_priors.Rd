@@ -15,6 +15,23 @@ bjlm_outcome_priors(
   sigma_re_om = prior_invgamma(1, 1)
 )
 }
+\arguments{
+\item{b0}{Prior(s) for \code{b0} regression coefficients.}
+
+\item{b1}{Prior(s) for \code{b1} regression coefficients.}
+
+\item{deltas}{Prior(s) for slope change coefficients (one list per segment).}
+
+\item{omega}{Prior(s) for \code{omega} coefficients (one list per segment).}
+
+\item{rho}{Prior(s) for \code{rho} coefficients (one list per segment).}
+
+\item{sigma}{\code{prior_invgamma()} for residual SD.}
+
+\item{sigma_u}{\code{prior_invgamma()} for random-effect SD.}
+
+\item{sigma_re_om}{\code{prior_invgamma()} for random-effect SD on omega.}
+}
 \description{
 Alias for smoothbp_priors
 }

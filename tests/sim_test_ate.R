@@ -35,8 +35,8 @@ cat(sprintf("  OLS ATE: %.3f (SE: %.3f)\n",
 
 cat(sprintf("  True ATE: 2.000\n\n"))
 
-cat("=== Fitting bipw model (4 chains x 4000 iter) ===\n")
-fit <- bipw(
+cat("=== Fitting bjlm model (4 chains x 4000 iter) ===\n")
+fit <- bjlm(
   outcome    = Y ~ tau,
   b0         = ~ 1 + Trt + X1 + X2,
   b1         = ~ 1,
@@ -53,7 +53,7 @@ fit <- bipw(
   cores      = 1L
 )
 
-cat("\n=== bipw model ===\n")
+cat("\n=== bjlm model ===\n")
 print(fit)
 
 cat("\n=== Outcome model ===\n")

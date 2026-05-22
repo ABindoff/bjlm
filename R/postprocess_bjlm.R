@@ -82,7 +82,7 @@ print.bjlm_fit <- function(x, ...) {
 #'
 #' @export
 causal_effect <- function(fit, param, prob = 0.95) {
-  stopifnot(inherits(fit, "bjlm_fit") || inherits(fit, "bipw_fit"))
+  stopifnot(inherits(fit, "bjlm_fit"))
   alpha <- 1 - prob
 
   if (requireNamespace("posterior", quietly = TRUE)) {
@@ -121,7 +121,7 @@ causal_effect <- function(fit, param, prob = 0.95) {
 #'
 #' @export
 weight_diagnostics <- function(fit) {
-  stopifnot(inherits(fit, "bjlm_fit") || inherits(fit, "bipw_fit"))
+  stopifnot(inherits(fit, "bjlm_fit"))
 
   if (requireNamespace("posterior", quietly = TRUE)) {
     draws <- posterior::subset_draws(fit$draws, variable = "mean_weight")
@@ -140,18 +140,5 @@ weight_diagnostics <- function(fit) {
   invisible(w_draws)
 }
 
-# Legacy backwards-compatibility methods
-#' @export
-summary.bipw_fit <- function(object, ...) {
-  .Deprecated("summary.bjlm_fit")
-  class(object) <- "bjlm_fit"
-  summary(object, ...)
-}
 
-#' @export
-print.bipw_fit <- function(x, ...) {
-  .Deprecated("print.bjlm_fit")
-  class(x) <- "bjlm_fit"
-  print(x, ...)
-}
 

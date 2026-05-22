@@ -21,5 +21,6 @@ round_df <- function(df, digits = 3) {
   df
 }
 
-#' @importFrom stats dnorm fitted rnorm setNames terms
+#' @importFrom stats dnorm fitted rnorm setNames terms binomial gaussian model.matrix quantile reformulate sd
+#' @importFrom utils head
 NULL

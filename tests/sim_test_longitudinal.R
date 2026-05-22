@@ -87,11 +87,11 @@ cat("\n=== Naive analysis ===\n")
 # Won't recover delta_Trt correctly due to confounding
 cat("  (Naive analysis not straightforward for piecewise models, skipping)\n")
 
-# --- bipw ---
-cat("\n=== Fitting bipw model ===\n")
+# --- bjlm ---
+cat("\n=== Fitting bjlm model ===\n")
 cat("  (4 chains x 4000 iter, 1 breakpoint, random intercepts)\n\n")
 
-fit <- bipw(
+fit <- bjlm(
   outcome    = score ~ tau,
   b0         = ~ 1 + X1 + (1 | subject),
   b1         = ~ 1,

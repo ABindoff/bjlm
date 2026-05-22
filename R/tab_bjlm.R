@@ -41,7 +41,7 @@ tab_bjlm <- function(...,
   n      <- length(models)
 
   if (n == 0L) stop("Supply at least one bjlm_fit object.")
-  if (!all(sapply(models, function(m) inherits(m, "bjlm_fit") || inherits(m, "bipw_fit")))) {
+  if (!all(sapply(models, function(m) inherits(m, "bjlm_fit")))) {
     stop("All positional arguments must be bjlm_fit objects.")
   }
 

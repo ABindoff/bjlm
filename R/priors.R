@@ -269,8 +269,24 @@ bjlm_priors <- function(
 }
 
 #' Alias for smoothbp_priors
+#'
+#' @inheritParams smoothbp_priors
 #' @export
-bjlm_outcome_priors <- smoothbp_priors
+bjlm_outcome_priors <- function(
+    b0      = prior_normal(0, 10),
+    b1      = prior_normal(0, 2),
+    deltas  = prior_normal(0, 2),
+    omega   = prior_normal(3, 2, lb = 0),
+    rho     = prior_normal(3, 2, lb = 0),
+    sigma   = prior_invgamma(1, 1),
+    sigma_u = prior_invgamma(1, 1),
+    sigma_re_om = prior_invgamma(1, 1)
+) {
+  smoothbp_priors(
+    b0 = b0, b1 = b1, deltas = deltas, omega = omega, rho = rho,
+    sigma = sigma, sigma_u = sigma_u, sigma_re_om = sigma_re_om
+  )
+}
 
 #' @export
 print.bjlm_priors <- function(x, ...) {
@@ -282,18 +298,3 @@ print.bjlm_priors <- function(x, ...) {
   print(x$outcome)
   invisible(x)
 }
-
-#' Collect priors for both outcome and propensity models (deprecated)
-#'
-#' Deprecated: use \code{\link{bjlm_priors}} instead.
-#'
-#' @export
-bipw_priors <- function(
-    outcome = smoothbp_priors(),
-    propensity = prior_normal(0, 2.5)
-) {
-  .Deprecated("bjlm_priors")
-  bjlm_priors(outcome = outcome, propensity = propensity)
-}
-
-

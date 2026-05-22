@@ -1,6 +1,6 @@
 #' Simulate data from the smooth change-point model
 #'
-#' Generates synthetic data from the model used by \code{\link{smoothbp}},
+#' Generates synthetic data from the model used by \code{\link{bjlm}},
 #' including optional between-subject random intercepts.  True parameter values
 #' are stored as the \code{"true_params"} attribute so they can be compared
 #' against posterior estimates.

@@ -1,4 +1,4 @@
-# Diagnostic: inspect bipw output structure and raw draws
+# Diagnostic: inspect bjlm output structure and raw draws
 
 set.seed(42)
 n <- 300
@@ -9,8 +9,8 @@ Y <- 5 + 2.0 * Trt + 1.5 * X1 + 0.5 * X2 + rnorm(n)
 
 dat <- data.frame(Y = Y, tau = rep(0, n), Trt = Trt, X1 = X1, X2 = X2)
 
-cat("=== bipw short run (200 iter, 1 chain) ===\n")
-fit <- bipw(
+cat("=== bjlm short run (200 iter, 1 chain) ===\n")
+fit <- bjlm(
   outcome    = Y ~ tau,
   b0         = ~ 1 + Trt + X1 + X2,
   b1         = ~ 1,

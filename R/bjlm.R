@@ -129,7 +129,7 @@ bjlm <- function(
 
   # ---- Resolve priors ----
   if (!is.null(priors)) {
-    if (inherits(priors, "bjlm_priors") || inherits(priors, "bipw_priors")) {
+    if (inherits(priors, "bjlm_priors")) {
       outcome_priors <- priors$outcome
       propensity_prior_sd <- priors$propensity$sd
     } else {
@@ -273,15 +273,4 @@ bjlm <- function(
   )
 }
 
-#' Fit a joint Bayesian IPW model (deprecated)
-#'
-#' Fits a joint model using the deprecated bipw interface. Please use \code{\link{bjlm}} instead.
-#'
-#' @export
-bipw <- function(...) {
-  .Deprecated("bjlm")
-  fit <- bjlm(...)
-  class(fit) <- c("bipw_fit", class(fit))
-  fit
-}
 

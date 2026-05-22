@@ -175,12 +175,6 @@ hypothesis.bjlm_fit <- function(object, hypotheses, ci = 0.95, ...) {
   )
 }
 
-#' @export
-hypothesis.bipw_fit <- function(object, hypotheses, ci = 0.95, ...) {
-  .Deprecated("hypothesis.bjlm_fit")
-  class(object) <- "bjlm_fit"
-  hypothesis(object, hypotheses, ci, ...)
-}
 
 # ---------------------------------------------------------------------------
 # Internal: evaluate one hypothesis string

@@ -22,9 +22,7 @@ Imports:
     posterior,
     ggplot2,
     stats,
-    bridgesampling,
-    loo,
-    bayesplot
+    bridgesampling
 Suggests:
     testthat (>= 3.0.0),
     withr,
@@ -36,7 +34,9 @@ Suggests:
     gt,
     tidyr,
     scales,
-    rjags
+    rjags,
+    loo,
+    bayesplot
 Config/testthat/edition: 3
 VignetteBuilder: knitr
 URL: https://github.com/ABindoff/bjlm

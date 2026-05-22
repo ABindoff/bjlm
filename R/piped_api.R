@@ -178,6 +178,9 @@ compile <- function(model) {
   }
 
   # ---- Align datasets ----
+  shared_cols <- character(0)
+  merged_cols <- character(0)
+  
   if (!is.null(subject_var)) {
     # Longitudinal alignment: match subject-level propensity rows with outcome levels
     stopifnot("Subject variable must be present in outcome data" = subject_var %in% names(out_data))
@@ -195,6 +198,36 @@ compile <- function(model) {
     }
     subject_data <- prop_data[idx_match, , drop = FALSE]
     n_subjects <- nrow(subject_data)
+    
+    # Check for name collisions and merge subject-level columns from prop_data to out_data
+    out_idx_match <- match(out_data[[subject_var]], prop_data[[subject_var]])
+    prop_cols <- setdiff(names(prop_data), subject_var)
+    
+    shared_cols <- intersect(prop_cols, names(out_data))
+    if (length(shared_cols) > 0 && !identical(prop_data, out_data)) {
+      warning(sprintf(
+        "Shared covariate name(s) detected: %s. Scoping is independent: the propensity model uses the subject-level version, and the outcome model uses the observation-level version.",
+        paste(paste0("'", shared_cols, "'"), collapse = ", ")
+      ), call. = FALSE)
+    }
+    
+    for (col in prop_cols) {
+      if (!col %in% names(out_data)) {
+        out_data[[col]] <- prop_data[[col]][out_idx_match]
+        merged_cols <- c(merged_cols, col)
+      }
+    }
+    
+    if (length(merged_cols) > 0) {
+      message(sprintf(
+        "Expanded subject-level covariate(s) into outcome dataset: %s",
+        paste(paste0("'", merged_cols, "'"), collapse = ", ")
+      ))
+    }
+    
+    # Save the updated out_data back to model$outcome
+    model$outcome$data <- out_data
+    
   } else {
     # Cross-sectional alignment: 1:1 mapping
     group_indices <- rep(-1L, nrow(out_data))
@@ -203,6 +236,16 @@ compile <- function(model) {
     n_subjects <- nrow(prop_data)
     if (nrow(out_data) != nrow(prop_data)) {
       stop("For cross-sectional models (no random intercept), outcome and propensity datasets must have the same number of rows.")
+    }
+    
+    # Check for name collisions in cross-sectional
+    prop_cols <- setdiff(names(prop_data), subject_var)
+    shared_cols <- intersect(prop_cols, names(out_data))
+    if (length(shared_cols) > 0 && !identical(prop_data, out_data)) {
+      warning(sprintf(
+        "Shared covariate name(s) detected: %s. Scoping is independent: the propensity model uses the subject-level version, and the outcome model uses the observation-level version.",
+        paste(paste0("'", shared_cols, "'"), collapse = ", ")
+      ), call. = FALSE)
     }
   }
 
@@ -258,9 +301,20 @@ compile <- function(model) {
     treatment_name = prop_vars[1],
     prop_covariate_names = prop_vars[-1],
     shortcut_priors = shortcut_priors,
-    zero_breakpoint = model$outcome$zero_breakpoint
+    zero_breakpoint = model$outcome$zero_breakpoint,
+    subject_var = subject_var,
+    merged_cols = merged_cols,
+    shared_cols = shared_cols
   )
   class(compiled) <- "bjlm_compiled_model"
+  
+  # Write compile report
+  tryCatch({
+    .write_compile_report(compiled, "compile_report.md")
+  }, error = function(e) {
+    warning("Could not write compile_report.md: ", e$message, call. = FALSE)
+  })
+  
   compiled
 }
 
@@ -373,4 +427,103 @@ print.bjlm_compiled_model <- function(x, ...) {
   }
   
   invisible(x)
+}
+
+.write_compile_report <- function(compiled, file_path = "compile_report.md") {
+  model <- compiled$model
+  n_obs <- length(compiled$y)
+  n_sub <- compiled$n_subjects
+  subject_var <- compiled$subject_var
+  merged_cols <- compiled$merged_cols
+  shared_cols <- compiled$shared_cols
+
+  # Dynamic Mermaid flowchart
+  flowchart <- "graph TD\n"
+  flowchart <- paste0(flowchart, "    classDef prop fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px;\n")
+  flowchart <- paste0(flowchart, "    classDef out fill:#e3f2fd,stroke:#1565c0,stroke-width:1px;\n")
+  flowchart <- paste0(flowchart, "    classDef align fill:#fff3e0,stroke:#ef6c00,stroke-width:2px;\n")
+  flowchart <- paste0(flowchart, "    classDef collision fill:#ffebee,stroke:#c62828,stroke-width:1px;\n\n")
+
+  flowchart <- paste0(flowchart, "    subgraph \"Propensity Block (Subject-level)\"\n")
+  flowchart <- paste0(flowchart, "        PD[\"Propensity Data<br/>", n_sub, " subjects\"]:::prop\n")
+  flowchart <- paste0(flowchart, "        PF[\"Formula: ", deparse(model$propensity$formula), "\"]:::prop\n")
+  flowchart <- paste0(flowchart, "        PD --> PF\n")
+  flowchart <- paste0(flowchart, "    end\n\n")
+
+  flowchart <- paste0(flowchart, "    subgraph \"Outcome Block (Observation-level)\"\n")
+  flowchart <- paste0(flowchart, "        OD[\"Outcome Data<br/>", n_obs, " observations\"]:::out\n")
+  flowchart <- paste0(flowchart, "        OF[\"Formula: ", deparse(model$outcome$formula), "\"]:::out\n")
+  flowchart <- paste0(flowchart, "        OD --> OF\n")
+  flowchart <- paste0(flowchart, "    end\n\n")
+
+  if (!is.null(subject_var)) {
+    flowchart <- paste0(flowchart, "    %% Alignment & Merging\n")
+    flowchart <- paste0(flowchart, "    PD -->|\"Align by subject ID: ", subject_var, "\"| OD:::align\n")
+    if (length(merged_cols) > 0) {
+      flowchart <- paste0(flowchart, "    PD -.->|\"Expand subject-level: ", paste(merged_cols, collapse = ", "), "\"| OD:::align\n")
+    }
+  } else {
+    flowchart <- paste0(flowchart, "    PD -->|\"Cross-sectional alignment<br/>(1:1 rows mapping)\"| OD:::align\n")
+  }
+
+  if (length(shared_cols) > 0) {
+    flowchart <- paste0(flowchart, "    %% Collision Scoping\n")
+    flowchart <- paste0(flowchart, "    SC[\"Shared variables: ", paste(shared_cols, collapse = ", "), "<br/>Independent Block-Scoping\"]:::collision\n")
+    flowchart <- paste0(flowchart, "    PF -.-> SC\n")
+    flowchart <- paste0(flowchart, "    OF -.-> SC\n")
+  }
+
+  content <- c(
+    "# BJLM Model Compilation & Alignment Report",
+    "",
+    "This diagnostic report was automatically generated during model compilation to provide complete transparency on how datasets are aligned, variables are scoped, and dimensions are verified.",
+    "",
+    "## 1. Model Summary",
+    "",
+    sprintf("- **Model Type:** %s", if (compiled$zero_breakpoint) "Standard regression (zero-breakpoint speed shortcut)" else "Piecewise change-point model"),
+    sprintf("- **Total Observations (Outcome):** %d", n_obs),
+    sprintf("- **Total Subjects:** %d", n_sub),
+    sprintf("- **Grouping Variable (Random Intercept):** %s", if (is.null(subject_var)) "None (Cross-Sectional)" else subject_var),
+    "",
+    "## 2. Alignment Flowchart",
+    "",
+    "```mermaid",
+    flowchart,
+    "```",
+    "",
+    "## 3. Variable Resolution Log",
+    ""
+  )
+
+  if (length(shared_cols) > 0) {
+    content <- c(content, 
+      "### [WARNING] Shared Covariate Names Detected",
+      "",
+      sprintf("The following covariate(s) are present in **both** propensity and outcome datasets: **%s**.", paste(paste0("`", shared_cols, "`"), collapse = ", ")),
+      "",
+      "> [!IMPORTANT]",
+      "> **Transparency Resolution Rule:**",
+      "> Scoping is kept strictly independent. The outcome model uses the version in the outcome dataset, while the propensity model uses the version in the propensity dataset. This is correct if they represent different observations (e.g. baseline vs. time-varying measurements of the same covariate).",
+      ""
+    )
+  } else {
+    content <- c(content,
+      "### Variable Names Scoping",
+      "No shared covariate names were detected across datasets. Scoping is clean and separate.",
+      ""
+    )
+  }
+
+  if (length(merged_cols) > 0) {
+    content <- c(content,
+      "### [INFO] Subject-Level Covariates Expanded",
+      "",
+      sprintf("The following subject-level covariate(s) from the propensity dataset were automatically expanded and aligned to the observation-level outcome dataset: **%s**.", paste(paste0("`", merged_cols, "`"), collapse = ", ")),
+      "",
+      "This ensures all outcome formulas (which run at the observation-level) can resolve these covariates with correct dimensions matching the total number of longitudinal observations.",
+      ""
+    )
+  }
+
+  writeLines(content, file_path)
 }

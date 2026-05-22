@@ -7,6 +7,6 @@
 # * https://testthat.r-lib.org/articles/special-files.html
 
 library(testthat)
-library(smoothbp)
+library(bjlm)
 
-test_check("smoothbp")
+test_check("bjlm")
