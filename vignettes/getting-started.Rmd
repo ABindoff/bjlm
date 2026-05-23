@@ -94,7 +94,7 @@ X_true_trt <- sin(tau_trt / 2)
 # Treatment probability depends on the time-varying confounder
 pi_trt <- plogis(-0.5 + 2.0 * X_true_trt)
 Trt <- rbinom(n_subj, 1, pi_trt)
-dat_treatment <- data.frame(id = factor(id_trt), tau_trt = tau_trt, Trt = Trt)
+dat_treatment <- data.frame(id = factor(id_trt), tau_trt = tau_trt, Trt = Trt, X_gp = 0) # X_gp placeholder
 
 # 3. Simulate Outcome (Measured longitudinally at yet another set of times)
 tau_out <- runif(n_subj * 5, 0, 10)
@@ -103,7 +103,7 @@ id_out  <- rep(1:n_subj, each = 5)
 X_true_out <- sin(tau_out / 2)
 # Outcome confounded by Trt and X
 Y <- 2.0 + 1.5 * rep(Trt, each = 5) + 0.8 * X_true_out + rnorm(n_subj * 5, sd = 0.5)
-dat_outcome <- data.frame(id = factor(id_out), tau_out = tau_out, Y = Y)
+dat_outcome <- data.frame(id = factor(id_out), tau_out = tau_out, Y = Y, X_gp = 0) # X_gp placeholder
 ```
 
 ### Specifying and Fitting the Model
@@ -116,7 +116,7 @@ gp_model <- bjlm_model() |>
   propensity(Trt ~ X_gp, data = dat_treatment) |>
   
   # Declare the GP for X_obs across time tau
-  latent_gp(name = "X_gp", time = "tau_cov", subject = "id", kernel = "se") |>
+  latent_gp(name = "X_gp", time = "tau_out", subject = "id", kernel = "se") |>
   
   # Outcome block queries X_gp at tau_out. 
   # We include a random subject intercept (1 | id).
