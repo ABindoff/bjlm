@@ -435,8 +435,8 @@ plot_gp <- function(fit, subjects = NULL, n_subjects = 5, ...) {
   gp_cols <- grep("^gp_", col_names, value = TRUE)
   
   if (length(gp_cols) == 0) {
-    stop("No latent Gaussian Process draws found in this fitted model. ",
-         "Please ensure you specified a latent_gp() block in your bjlm_model() pipeline.")
+    warning("No latent Gaussian Process draws found in this fitted model. ",
+         "The GP sampler is currently a work-in-progress. Returning skeleton plot.", call. = FALSE)
   }
   
   # Skeleton implementation
