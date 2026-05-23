@@ -283,6 +283,10 @@ lfo_cv <- function(object, t_var = NULL, t_grid = NULL, min_tau = NULL, k_thresh
     }
   }
   
+  # 8. Consolidate results
+  eval_indices <- which(object$data[[t_var]] > min_tau)
+  elpd_lfo <- sum(elpd_pointwise[eval_indices], na.rm = TRUE)
+  
   # Calculate approximate SE of total ELPD
   # Assuming independent pointwise observations (standard for cross-validation approximations)
   elpd_se <- sqrt(length(eval_indices) * stats::var(elpd_pointwise[eval_indices], na.rm = TRUE))
