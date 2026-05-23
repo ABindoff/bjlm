@@ -2,6 +2,8 @@ use extendr_api::prelude::*;
 use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
 
+pub mod gp;
+
 mod model;
 mod sampler;
 mod sampler_re;
@@ -90,6 +92,7 @@ fn run_mcmc(
         n_breakpoints: n_bp,
         n,
         re_mask_om: Vec::new(),
+        latent_gps: Vec::new(),
     };
 
     let priors = Priors {
@@ -222,6 +225,7 @@ fn run_mcmc_ss(
         n_breakpoints: n_bp,
         n,
         re_mask_om: Vec::new(),
+        latent_gps: Vec::new(),
     };
 
     let priors = Priors {
@@ -358,6 +362,7 @@ fn run_mcmc_re(
         n_breakpoints: n_bp,
         n,
         re_mask_om: re_mask_om.iter().map(|r| r.1.as_integer_vector().unwrap().iter().map(|&v| v != 0).collect()).collect(),
+        latent_gps: Vec::new(),
     };
 
     let priors = Priors {
@@ -493,6 +498,7 @@ fn run_mcmc_re_ss(
         n_breakpoints: n_bp,
         n,
         re_mask_om: re_mask_om.iter().map(|r| r.1.as_integer_vector().unwrap().iter().map(|&v| v != 0).collect()).collect(),
+        latent_gps: Vec::new(),
     };
 
     let priors = Priors {
@@ -594,6 +600,7 @@ fn run_bjlm(
     sigma_u_scale: f64,
     // Propensity data
     x_prop: &[f64], p_prop: i32,
+    latent_gps: List,
     treatment: &[f64],
     n_subjects: i32,
     // Propensity priors
@@ -640,6 +647,32 @@ fn run_bjlm(
         n_breakpoints: n_bp,
         n,
         re_mask_om: Vec::new(),
+        latent_gps: {
+            let mut gps = Vec::new();
+            for (_, robj) in latent_gps.iter() {
+                let gp_list = robj.as_list().unwrap();
+                let mut gp = crate::model::GpData {
+                    name: gp_list.dollar("name").unwrap().as_str().unwrap().to_string(),
+                    obs_time: gp_list.dollar("obs_time").unwrap().as_real_vector().unwrap(),
+                    obs_val: gp_list.dollar("obs_val").unwrap().as_real_vector().unwrap(),
+                    obs_group: gp_list.dollar("obs_group").unwrap().as_integer_vector().unwrap().into_iter().map(|g| g as usize).collect(),
+                    
+                    trt_time: gp_list.dollar("trt_time").unwrap().as_real_vector().unwrap(),
+                    trt_group: gp_list.dollar("trt_group").unwrap().as_integer_vector().unwrap().into_iter().map(|g| g as usize).collect(),
+                    
+                    out_time: gp_list.dollar("out_time").unwrap().as_real_vector().unwrap(),
+                    out_group: gp_list.dollar("out_group").unwrap().as_integer_vector().unwrap().into_iter().map(|g| g as usize).collect(),
+                    
+                    p_b0_idx: gp_list.dollar("p_b0_idx").unwrap().as_integer_vector().unwrap()[0],
+                    p_b1_idx: gp_list.dollar("p_b1_idx").unwrap().as_integer_vector().unwrap()[0],
+                    p_prop_idx: gp_list.dollar("p_prop_idx").unwrap().as_integer_vector().unwrap()[0],
+                    subjects: Vec::new(),
+                };
+                gp.process(n_subj);
+                gps.push(gp);
+            }
+            gps
+        },
     };
 
     let outcome_priors = Priors {

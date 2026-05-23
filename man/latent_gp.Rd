@@ -4,14 +4,32 @@
 \alias{latent_gp}
 \title{Add a latent Gaussian Process (GP) confounder to a BJLM model}
 \usage{
-latent_gp(model, name, time, subject, kernel = "se")
+latent_gp(
+  model,
+  name,
+  data,
+  obs_var,
+  time_var,
+  time_trt_var,
+  time_out_var,
+  subject,
+  kernel = "se"
+)
 }
 \arguments{
 \item{model}{A \code{bjlm_model} object.}
 
 \item{name}{Character name of the GP confounder.}
 
-\item{time}{Name of the time variable in the outcome dataset.}
+\item{data}{A data frame containing the observed covariate data.}
+
+\item{obs_var}{The column name of the noisy continuous observations in \code{data}.}
+
+\item{time_var}{The column name of the time variable in \code{data}.}
+
+\item{time_trt_var}{The column name of the time variable in the propensity data.}
+
+\item{time_out_var}{The column name of the time variable in the outcome data.}
 
 \item{subject}{Name of the subject grouping variable.}
 

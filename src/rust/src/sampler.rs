@@ -4,7 +4,7 @@ use rand::SeedableRng;
 use rand::Rng;
 use rand_distr::{Normal, Gamma, Distribution};
 
-use crate::model::{ModelData, Priors, State, SpikeSlabConfig, log_truncated_normal_prior, sigmoid};
+use crate::model::{ModelData, Priors, State, SpikeSlabConfig, log_truncated_normal_prior, sigmoid, GpState};
 
 // ---------------------------------------------------------------------------
 // LinearCache: precomputed parts of the mean function for segment HMC steps.
@@ -840,11 +840,29 @@ pub fn init_state(data: &ModelData, priors: &Priors, rng: &mut StdRng) -> State 
         gamma_deltas.push(vec![true; data.x_deltas[k].ncols()]);
     }
 
+    let mut gp_states = Vec::new();
+    for gp in &data.latent_gps {
+        let mut subj_x = Vec::new();
+        for subj in &gp.subjects {
+            subj_x.push(vec![0.0; subj.times.len()]);
+        }
+        gp_states.push(GpState {
+            x: subj_x,
+            rho: 1.0,
+            alpha: 1.0,
+            sigma_x: 0.5,
+            step_alpha: 0.1,
+            step_rho: 0.1,
+            step_sigma: 0.1,
+        });
+    }
+
     State {
         beta_b0, u_b0, beta_b1, beta_deltas, beta_om, beta_rho,
         sigma: 1.0, sigma_u: 1.0,
         gamma_b1: vec![true; data.x_b1.ncols()],
         gamma_deltas, pi: 0.5,
         sigma_re_om: vec![1.0; data.n_breakpoints],
+        gp_states,
     }
 }

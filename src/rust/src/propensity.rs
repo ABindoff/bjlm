@@ -85,17 +85,33 @@ pub fn sample_propensity(
     data: &PropensityData,
     priors: &PropensityPriors,
     state: &mut PropensityState,
+    outcome_data: &crate::model::ModelData,
+    outcome_state: &crate::model::State,
     rng: &mut StdRng,
 ) {
     let n = data.n_subjects;
     let p = data.p_prop;
+
+    // Helper to get x_prop(i, j) with GP injected
+    let get_x = |i: usize, j: usize| -> f64 {
+        for (gp_idx, gp) in outcome_data.latent_gps.iter().enumerate() {
+            if gp.p_prop_idx == j as i32 {
+                let subj = &gp.subjects[i];
+                let gp_x = &outcome_state.gp_states[gp_idx].x[i];
+                if !subj.trt_indices.is_empty() {
+                    return gp_x[subj.trt_indices[0]];
+                }
+            }
+        }
+        data.x_prop[(i, j)]
+    };
 
     // Step 1: Sample PG latent variables
     //   ω_i | α ~ PG(1, X_i' α)
     for i in 0..n {
         let mut psi = 0.0;
         for j in 0..p {
-            psi += data.x_prop[(i, j)] * state.alpha[j];
+            psi += get_x(i, j) * state.alpha[j];
         }
         state.omega_pg[i] = sample_pg1(psi, rng);
     }
@@ -113,10 +129,10 @@ pub fn sample_propensity(
         let wi = state.omega_pg[i];
         let ki = data.treatment[i] - 0.5;
         for j in 0..p {
-            let xij = data.x_prop[(i, j)];
+            let xij = get_x(i, j);
             xtk[j] += xij * ki;
             for l in j..p {
-                let v = xij * wi * data.x_prop[(i, l)];
+                let v = xij * wi * get_x(i, l);
                 xtox[(j, l)] += v;
                 if l != j {
                     xtox[(l, j)] += v;
@@ -151,7 +167,7 @@ pub fn sample_propensity(
     for i in 0..n {
         let mut eta = 0.0;
         for j in 0..p {
-            eta += data.x_prop[(i, j)] * state.alpha[j];
+            eta += get_x(i, j) * state.alpha[j];
         }
         state.pi[i] = crate::model::sigmoid(eta);
     }

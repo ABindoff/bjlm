@@ -100,18 +100,27 @@ outcome <- function(
 #'
 #' @param model A `bjlm_model` object.
 #' @param name Character name of the GP confounder.
-#' @param time Name of the time variable in the outcome dataset.
+#' @param data A data frame containing the observed covariate data.
+#' @param obs_var The column name of the noisy continuous observations in `data`.
+#' @param time_var The column name of the time variable in `data`.
+#' @param time_trt_var The column name of the time variable in the propensity data.
+#' @param time_out_var The column name of the time variable in the outcome data.
 #' @param subject Name of the subject grouping variable.
 #' @param kernel Kernel function to use. Currently supports `"se"` (Squared Exponential).
 #'
 #' @return The modified `bjlm_model` object.
 #' @export
-latent_gp <- function(model, name, time, subject, kernel = "se") {
+latent_gp <- function(model, name, data, obs_var, time_var, time_trt_var, time_out_var, subject, kernel = "se") {
   if (!inherits(model, "bjlm_model")) stop("First argument must be a bjlm_model object.")
+  if (missing(data) || is.null(data)) stop("Must provide 'data' argument for latent_gp (containing noisy covariate observations).")
   
   gp <- list(
     name = name,
-    time = time,
+    data = data,
+    obs_var = obs_var,
+    time_var = time_var,
+    time_trt_var = time_trt_var,
+    time_out_var = time_out_var,
     subject = subject,
     kernel = kernel
   )
@@ -158,7 +167,7 @@ compile <- function(model) {
   
   subject_var <- re_info$re_group
 
-  # ---- GP Validation ----
+  # ---- GP Validation & Placeholders ----
   if (length(model$latent_gps) > 0) {
     gp_names <- sapply(model$latent_gps, `[[`, "name")
     if (any(duplicated(gp_names))) {
@@ -168,11 +177,24 @@ compile <- function(model) {
       if (!is.null(subject_var) && gp$subject != subject_var) {
         stop(sprintf("GP subject variable '%s' does not match the random intercept subject variable '%s'.", gp$subject, subject_var))
       }
-      if (!gp$time %in% names(out_data)) {
-        stop(sprintf("GP time variable '%s' not found in outcome data.", gp$time))
+      
+      # Validate columns in gp$data
+      if (!gp$time_var %in% names(gp$data)) {
+        stop(sprintf("GP time variable '%s' not found in covariate data.", gp$time_var))
       }
-      if (!gp$subject %in% names(out_data)) {
-        stop(sprintf("GP subject variable '%s' not found in outcome data.", gp$subject))
+      if (!gp$obs_var %in% names(gp$data)) {
+        stop(sprintf("GP obs variable '%s' not found in covariate data.", gp$obs_var))
+      }
+      if (!gp$subject %in% names(gp$data)) {
+        stop(sprintf("GP subject variable '%s' not found in covariate data.", gp$subject))
+      }
+      
+      # Inject placeholders into propensity and outcome data to satisfy model.matrix
+      if (!gp$name %in% names(prop_data)) {
+        prop_data[[gp$name]] <- 0.0
+      }
+      if (!gp$name %in% names(out_data)) {
+        out_data[[gp$name]] <- 0.0
       }
     }
   }
@@ -225,8 +247,9 @@ compile <- function(model) {
       ))
     }
     
-    # Save the updated out_data back to model$outcome
+    # Save the updated out_data and prop_data back to model
     model$outcome$data <- out_data
+    model$propensity$data <- prop_data
     
   } else {
     # Cross-sectional alignment: 1:1 mapping
@@ -378,6 +401,7 @@ fit.bjlm_compiled_model <- function(object, priors = NULL, ...) {
     } else {
       object$model$outcome$data
     },
+    latent_gps = object$model$latent_gps,
     priors = priors,
     ...
   )
@@ -430,8 +454,8 @@ print.bjlm_model <- function(x, ...) {
   if (length(x$latent_gps) > 0) {
     cat("Latent Gaussian Processes:\n")
     for (gp in x$latent_gps) {
-      cat(sprintf("  - %s (time=%s, subject=%s, kernel=%s)\n", 
-                  gp$name, gp$time, gp$subject, gp$kernel))
+      cat(sprintf("  - %s (time=%s, obs=%s, subject=%s, kernel=%s)\n", 
+                  gp$name, gp$time_var, gp$obs_var, gp$subject, gp$kernel))
     }
   }
   

@@ -69,7 +69,10 @@ fit_basic <- fit(basic_model, chains = 2, iter = 1000)
 
 In realistic clinical or observational data, time-varying covariates, treatment allocation, and outcomes rarely align. A patient might have a lab test on Tuesday, receive treatment on Thursday, and have an outcome measured next Monday.
 
-`bjlm` uses Gaussian Processes to impute a smooth, subject-specific trajectory for the confounder. The propensity model then queries this trajectory at the exact time of treatment.
+### Why use a Gaussian Process instead of Linear Interpolation?
+While it may seem simpler to just linearly interpolate a covariate between its observed time points, linear interpolation assumes we know the unobserved values with 100% certainty. In reality, medical and physiological covariates can fluctuate non-linearly between measurements. A Gaussian Process solves this by providing a distribution of possible trajectories. Crucially, the GP quantifies **uncertainty** during the periods between observations. Because `bjlm` fits the GP jointly with the propensity and outcome models, this uncertainty naturally propagates through the inverse-probability weights into the final treatment effect estimate. This prevents the model from being over-confident and ensures your credible intervals maintain proper coverage.
+
+`bjlm` uses Gaussian Processes to impute this smooth, subject-specific trajectory for the confounder. The propensity model then queries this trajectory at the exact time of treatment.
 
 ### Simulating Time-Mismatched Longitudinal Data
 

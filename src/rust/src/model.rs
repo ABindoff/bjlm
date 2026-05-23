@@ -22,6 +22,95 @@ pub struct ModelData {
     pub n_breakpoints: usize,
     /// Indicates if a coefficient in x_om[k] is a random effect (hierarchical)
     pub re_mask_om: Vec<Vec<bool>>,
+    /// List of latent GP data configurations
+    pub latent_gps: Vec<GpData>,
+}
+
+pub struct GpData {
+    pub name: String,
+    pub obs_time: Vec<f64>,
+    pub obs_val: Vec<f64>,
+    pub obs_group: Vec<usize>,
+    
+    pub trt_time: Vec<f64>,
+    pub trt_group: Vec<usize>,
+    
+    pub out_time: Vec<f64>,
+    pub out_group: Vec<usize>,
+    
+    pub p_b0_idx: i32,
+    pub p_b1_idx: i32,
+    pub p_prop_idx: i32,
+    
+    // Processed data per subject
+    pub subjects: Vec<GpSubjectData>,
+}
+
+pub struct GpSubjectData {
+    pub times: Vec<f64>,
+    pub obs_indices: Vec<usize>, // maps local obs to times[]
+    pub obs_global: Vec<usize>,  // global indices in obs_val[]
+    pub trt_indices: Vec<usize>,
+    pub trt_global: Vec<usize>,
+    pub out_indices: Vec<usize>,
+    pub out_global: Vec<usize>,
+}
+
+impl GpData {
+    pub fn process(&mut self, n_subjects: usize) {
+        self.subjects.clear();
+        let mut obs_by_subj = vec![Vec::new(); n_subjects];
+        let mut trt_by_subj = vec![Vec::new(); n_subjects];
+        let mut out_by_subj = vec![Vec::new(); n_subjects];
+        
+        for (i, &g) in self.obs_group.iter().enumerate() { obs_by_subj[g].push((i, self.obs_time[i])); }
+        for (i, &g) in self.trt_group.iter().enumerate() { trt_by_subj[g].push((i, self.trt_time[i])); }
+        for (i, &g) in self.out_group.iter().enumerate() { out_by_subj[g].push((i, self.out_time[i])); }
+        
+        for s in 0..n_subjects {
+            let mut all_times = Vec::new();
+            for &(_, t) in &obs_by_subj[s] { all_times.push(t); }
+            for &(_, t) in &trt_by_subj[s] { all_times.push(t); }
+            for &(_, t) in &out_by_subj[s] { all_times.push(t); }
+            
+            // Sort and deduplicate
+            all_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            all_times.dedup();
+            
+            let find_idx = |t: f64| all_times.iter().position(|&x| (x - t).abs() < 1e-8).unwrap();
+            
+            let mut obs_indices = vec![0; obs_by_subj[s].len()];
+            let mut obs_global = vec![0; obs_by_subj[s].len()];
+            for (local_idx, &(global_idx, t)) in obs_by_subj[s].iter().enumerate() {
+                obs_indices[local_idx] = find_idx(t);
+                obs_global[local_idx] = global_idx;
+            }
+            
+            let mut trt_indices = vec![0; trt_by_subj[s].len()];
+            let mut trt_global = vec![0; trt_by_subj[s].len()];
+            for (local_idx, &(global_idx, t)) in trt_by_subj[s].iter().enumerate() {
+                trt_indices[local_idx] = find_idx(t);
+                trt_global[local_idx] = global_idx;
+            }
+            
+            let mut out_indices = vec![0; out_by_subj[s].len()];
+            let mut out_global = vec![0; out_by_subj[s].len()];
+            for (local_idx, &(global_idx, t)) in out_by_subj[s].iter().enumerate() {
+                out_indices[local_idx] = find_idx(t);
+                out_global[local_idx] = global_idx;
+            }
+            
+            self.subjects.push(GpSubjectData {
+                times: all_times,
+                obs_indices,
+                obs_global,
+                trt_indices,
+                trt_global,
+                out_indices,
+                out_global,
+            });
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +199,22 @@ pub struct State {
     pub pi: f64,
     /// Learned standard deviation for omega random effects at each breakpoint
     pub sigma_re_om: Vec<f64>,
+    /// States for latent Gaussian Processes
+    pub gp_states: Vec<GpState>,
+}
+
+#[derive(Clone)]
+pub struct GpState {
+    /// Latent GP values for each subject at all their evaluation points
+    pub x: Vec<Vec<f64>>,
+    pub rho: f64,
+    pub alpha: f64,
+    pub sigma_x: f64,
+    
+    // MH adaptation
+    pub step_alpha: f64,
+    pub step_rho: f64,
+    pub step_sigma: f64,
 }
 
 impl State {
@@ -132,6 +237,7 @@ impl State {
         if hierarchical {
             n += self.sigma_re_om.len();
         }
+        n += self.gp_states.len() * 3; // alpha, rho, sigma_x per GP
         n
     }
 
@@ -160,6 +266,13 @@ impl State {
         if hierarchical {
             for &s in &self.sigma_re_om { v.push(s); }
         }
+        
+        for gp in &self.gp_states {
+            v.push(gp.alpha);
+            v.push(gp.rho);
+            v.push(gp.sigma_x);
+        }
+        
         v
     }
 

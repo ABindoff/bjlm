@@ -11,6 +11,7 @@ bjlm(
   deltas = list(),
   omega = list(),
   rho = list(),
+  latent_gps = list(),
   propensity,
   weights = c("stabilised_ate", "ate", "att", "stabilised_att"),
   max_weight = 20,

@@ -22,6 +22,295 @@ use crate::sampler::init_state;
 // This is the "cut posterior" approach (Plummer 2015).
 // ---------------------------------------------------------------------------
 
+// ========================== GP Sampler ==========================
+
+fn sample_gp_state(
+    outcome_data: &ModelData,
+    prop_data: &PropensityData,
+    outcome_state: &mut State,
+    prop_state: &PropensityState,
+    weights_obs: &[f64],
+    rng: &mut StdRng,
+) {
+    let n = outcome_data.n;
+    
+    // Compute base mu excluding ALL GPs (since data.x_b0 has 0s for GP columns)
+    let mut mu_base = outcome_state.means(outcome_data);
+    
+    // Add contributions of ALL GPs to get mu_full
+    for (gp_idx, gp) in outcome_data.latent_gps.iter().enumerate() {
+        if gp.p_b0_idx >= 0 {
+            let col = gp.p_b0_idx as usize;
+            let beta = outcome_state.beta_b0[col];
+            for s in 0..gp.subjects.len() {
+                let subj = &gp.subjects[s];
+                let gp_x = &outcome_state.gp_states[gp_idx].x[s];
+                for i in 0..subj.out_indices.len() {
+                    let gidx = subj.out_global[i];
+                    mu_base[gidx] += beta * gp_x[subj.out_indices[i]];
+                }
+            }
+        }
+        if gp.p_b1_idx >= 0 {
+            let col = gp.p_b1_idx as usize;
+            let beta = outcome_state.beta_b1[col];
+            if outcome_state.gamma_b1[col] {
+                // b1 is interacted with time
+                let center = if outcome_data.n_breakpoints > 0 {
+                    outcome_state.omega_vec(0, &outcome_data.x_om[0])
+                } else {
+                    DVector::zeros(n)
+                };
+                for s in 0..gp.subjects.len() {
+                    let subj = &gp.subjects[s];
+                    let gp_x = &outcome_state.gp_states[gp_idx].x[s];
+                    for i in 0..subj.out_indices.len() {
+                        let gidx = subj.out_global[i];
+                        let t_val = if outcome_data.n_breakpoints > 0 {
+                            outcome_data.tau[gidx] - center[gidx]
+                        } else {
+                            outcome_data.tau[gidx]
+                        };
+                        mu_base[gidx] += beta * t_val * gp_x[subj.out_indices[i]];
+                    }
+                }
+            }
+        }
+    }
+    
+    // Same for propensity eta
+    let mut eta_base = DVector::zeros(prop_data.n_subjects);
+    for i in 0..prop_data.n_subjects {
+        let mut eta = 0.0;
+        for j in 0..prop_data.p_prop {
+            // data.x_prop has 0s for GPs, so this excludes ALL GPs
+            eta += prop_data.x_prop[(i, j)] * prop_state.alpha[j];
+        }
+        eta_base[i] = eta;
+    }
+    for (gp_idx, gp) in outcome_data.latent_gps.iter().enumerate() {
+        if gp.p_prop_idx >= 0 {
+            let col = gp.p_prop_idx as usize;
+            let beta = prop_state.alpha[col];
+            for s in 0..gp.subjects.len() {
+                let subj = &gp.subjects[s];
+                let gp_x = &outcome_state.gp_states[gp_idx].x[s];
+                if !subj.trt_indices.is_empty() {
+                    eta_base[s] += beta * gp_x[subj.trt_indices[0]];
+                }
+            }
+        }
+    }
+
+    // Now update each GP conditionally
+    let inv_sig2_y = 1.0 / (outcome_state.sigma * outcome_state.sigma);
+    
+    for (gp_idx, gp) in outcome_data.latent_gps.iter().enumerate() {
+        let alpha = outcome_state.gp_states[gp_idx].alpha;
+        let rho = outcome_state.gp_states[gp_idx].rho;
+        let sigma_x = outcome_state.gp_states[gp_idx].sigma_x;
+        let inv_sig2_x = 1.0 / (sigma_x * sigma_x);
+        
+        let beta_b0 = if gp.p_b0_idx >= 0 { outcome_state.beta_b0[gp.p_b0_idx as usize] } else { 0.0 };
+        let beta_b1 = if gp.p_b1_idx >= 0 && outcome_state.gamma_b1[gp.p_b1_idx as usize] {
+            outcome_state.beta_b1[gp.p_b1_idx as usize]
+        } else { 0.0 };
+        let beta_prop = if gp.p_prop_idx >= 0 { prop_state.alpha[gp.p_prop_idx as usize] } else { 0.0 };
+        
+        let center = if outcome_data.n_breakpoints > 0 {
+            Some(outcome_state.omega_vec(0, &outcome_data.x_om[0]))
+        } else {
+            None
+        };
+        
+        for s in 0..gp.subjects.len() {
+            let subj = &gp.subjects[s];
+            let nt = subj.times.len();
+            if nt == 0 { continue; }
+            
+            let cov = crate::gp::compute_cov_matrix(&subj.times, alpha, rho, 1e-6);
+            let mut prec = cov.try_inverse().unwrap_or_else(|| DMatrix::identity(nt, nt) * 1e6);
+            let mut rhs = DVector::zeros(nt);
+            
+            // 1. GP Observations
+            for i in 0..subj.obs_indices.len() {
+                let tidx = subj.obs_indices[i];
+                let gidx = subj.obs_global[i];
+                prec[(tidx, tidx)] += inv_sig2_x;
+                rhs[tidx] += gp.obs_val[gidx] * inv_sig2_x;
+            }
+            
+            // 2. Outcome Likelihood
+            for i in 0..subj.out_indices.len() {
+                let tidx = subj.out_indices[i];
+                let gidx = subj.out_global[i];
+                let w = weights_obs[gidx];
+                
+                let t_val = if let Some(c) = &center {
+                    outcome_data.tau[gidx] - c[gidx]
+                } else {
+                    outcome_data.tau[gidx]
+                };
+                
+                let eff_beta = beta_b0 + beta_b1 * t_val;
+                if eff_beta != 0.0 {
+                    // mu_without = mu_full - eff_beta * current_gp_x
+                    let mu_without = mu_base[gidx] - eff_beta * outcome_state.gp_states[gp_idx].x[s][tidx];
+                    let r = outcome_data.y[gidx] - mu_without;
+                    
+                    let p_add = w * inv_sig2_y * eff_beta * eff_beta;
+                    prec[(tidx, tidx)] += p_add;
+                    rhs[tidx] += w * inv_sig2_y * eff_beta * r;
+                }
+            }
+            
+            // 3. Propensity Likelihood
+            if beta_prop != 0.0 && !subj.trt_indices.is_empty() {
+                let tidx = subj.trt_indices[0];
+                let omega = prop_state.omega_pg[s];
+                let trt = prop_data.treatment[s];
+                let kappa = trt - 0.5;
+                
+                let eta_without = eta_base[s] - beta_prop * outcome_state.gp_states[gp_idx].x[s][tidx];
+                
+                let p_add = omega * beta_prop * beta_prop;
+                prec[(tidx, tidx)] += p_add;
+                rhs[tidx] += beta_prop * (kappa - omega * eta_without);
+            }
+            
+            // Sample from N(prec^-1 * rhs, prec^-1)
+            let chol = prec.cholesky().unwrap_or_else(|| {
+                // fallback to identity if numerical issues
+                DMatrix::identity(nt, nt).cholesky().unwrap()
+            });
+            let mean = chol.solve(&rhs);
+            
+            let normal = Normal::new(0.0, 1.0).unwrap();
+            let z = DVector::from_iterator(nt, (0..nt).map(|_| normal.sample(rng)));
+            let v = chol.l().transpose().solve_upper_triangular(&z).unwrap();
+            
+            let new_x = mean + v;
+            
+            // Update mu_base and eta_base with the new GP values!
+            for i in 0..subj.out_indices.len() {
+                let tidx = subj.out_indices[i];
+                let gidx = subj.out_global[i];
+                let t_val = if let Some(c) = &center {
+                    outcome_data.tau[gidx] - c[gidx]
+                } else {
+                    outcome_data.tau[gidx]
+                };
+                let eff_beta = beta_b0 + beta_b1 * t_val;
+                let old_val = outcome_state.gp_states[gp_idx].x[s][tidx];
+                let new_val = new_x[tidx];
+                mu_base[gidx] += eff_beta * (new_val - old_val);
+            }
+            
+            if beta_prop != 0.0 && !subj.trt_indices.is_empty() {
+                let tidx = subj.trt_indices[0];
+                let old_val = outcome_state.gp_states[gp_idx].x[s][tidx];
+                let new_val = new_x[tidx];
+                eta_base[s] += beta_prop * (new_val - old_val);
+            }
+            
+            outcome_state.gp_states[gp_idx].x[s] = new_x.iter().cloned().collect();
+    }
+}
+}
+
+fn sample_gp_hyperparameters(
+    outcome_data: &ModelData,
+    outcome_state: &mut State,
+    rng: &mut StdRng,
+    adapting: bool,
+) {
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    let target_accept = 0.44;
+
+    for (gp_idx, gp) in outcome_data.latent_gps.iter().enumerate() {
+        let mut alpha = outcome_state.gp_states[gp_idx].alpha;
+        let mut rho = outcome_state.gp_states[gp_idx].rho;
+        let mut sigma_x = outcome_state.gp_states[gp_idx].sigma_x;
+        let mut step_alpha = outcome_state.gp_states[gp_idx].step_alpha;
+        let mut step_rho = outcome_state.gp_states[gp_idx].step_rho;
+        let mut step_sigma = outcome_state.gp_states[gp_idx].step_sigma;
+
+        let compute_ll = |a: f64, r: f64, s: f64| -> f64 {
+            let mut ll = 0.0;
+            let inv_s2 = 1.0 / (s * s);
+            for s_idx in 0..gp.subjects.len() {
+                let subj = &gp.subjects[s_idx];
+                let nt = subj.times.len();
+                if nt == 0 { continue; }
+                
+                let cov = crate::gp::compute_cov_matrix(&subj.times, a, r, 1e-6);
+                let chol = cov.cholesky().unwrap_or_else(|| {
+                    DMatrix::identity(nt, nt).cholesky().unwrap()
+                });
+                
+                let x = DVector::from_column_slice(&outcome_state.gp_states[gp_idx].x[s_idx]);
+                let y = chol.l().solve_lower_triangular(&x).unwrap();
+                let quad = y.dot(&y);
+                let log_det: f64 = chol.l().diagonal().iter().map(|v| v.ln()).sum::<f64>() * 2.0;
+                ll -= 0.5 * quad + 0.5 * log_det;
+                
+                for i in 0..subj.obs_indices.len() {
+                    let tidx = subj.obs_indices[i];
+                    let gidx = subj.obs_global[i];
+                    let val = gp.obs_val[gidx];
+                    let err = val - x[tidx];
+                    ll -= 0.5 * err * err * inv_s2 + s.ln();
+                }
+            }
+            ll -= 0.5 * a.ln().powi(2) + a.ln();
+            ll -= 0.5 * r.ln().powi(2) + r.ln();
+            ll -= 0.5 * (s.ln() + 1.0).powi(2) + s.ln();
+            ll
+        };
+
+        let mut current_ll = compute_ll(alpha, rho, sigma_x);
+
+        // Alpha
+        let log_alpha_new = alpha.ln() + step_alpha * normal.sample(rng);
+        let alpha_new = log_alpha_new.exp();
+        let ll_new = compute_ll(alpha_new, rho, sigma_x);
+        let accept_prob = (ll_new - current_ll).exp().min(1.0);
+        if rng.gen::<f64>() < accept_prob {
+            alpha = alpha_new;
+            current_ll = ll_new;
+        }
+        if adapting { step_alpha *= (1.0 + 0.1 * (accept_prob - target_accept)).max(1e-4); }
+
+        // Rho
+        let log_rho_new = rho.ln() + step_rho * normal.sample(rng);
+        let rho_new = log_rho_new.exp();
+        let ll_new = compute_ll(alpha, rho_new, sigma_x);
+        let accept_prob = (ll_new - current_ll).exp().min(1.0);
+        if rng.gen::<f64>() < accept_prob {
+            rho = rho_new;
+            current_ll = ll_new;
+        }
+        if adapting { step_rho *= (1.0 + 0.1 * (accept_prob - target_accept)).max(1e-4); }
+
+        // Sigma_x
+        let log_sigma_new = sigma_x.ln() + step_sigma * normal.sample(rng);
+        let sigma_new = log_sigma_new.exp();
+        let ll_new = compute_ll(alpha, rho, sigma_new);
+        let accept_prob = (ll_new - current_ll).exp().min(1.0);
+        if rng.gen::<f64>() < accept_prob {
+            sigma_x = sigma_new;
+        }
+        if adapting { step_sigma *= (1.0 + 0.1 * (accept_prob - target_accept)).max(1e-4); }
+
+        outcome_state.gp_states[gp_idx].alpha = alpha;
+        outcome_state.gp_states[gp_idx].rho = rho;
+        outcome_state.gp_states[gp_idx].sigma_x = sigma_x;
+        outcome_state.gp_states[gp_idx].step_alpha = step_alpha;
+        outcome_state.gp_states[gp_idx].step_rho = step_rho;
+        outcome_state.gp_states[gp_idx].step_sigma = step_sigma;
+    }
+}
+
 // ========================== Weighted Gibbs steps ==========================
 
 fn sample_sigma_weighted(
@@ -73,6 +362,21 @@ fn sample_linear_coefs_weighted(
 
     // b0
     x_full.view_mut((0, 0), (n, p_b0)).copy_from(&data.x_b0);
+    // Overwrite GP columns in x_b0 part of x_full
+    for (gp_idx, gp) in data.latent_gps.iter().enumerate() {
+        if gp.p_b0_idx >= 0 {
+            let col = gp.p_b0_idx as usize;
+            for s in 0..data.latent_gps[gp_idx].subjects.len() {
+                let subj = &gp.subjects[s];
+                let gp_x = &state.gp_states[gp_idx].x[s];
+                for i in 0..subj.out_indices.len() {
+                    let global_idx = subj.out_global[i];
+                    x_full[(global_idx, col)] = gp_x[subj.out_indices[i]];
+                }
+            }
+        }
+    }
+
     for j in 0..p_b0 {
         if priors.b0_sd[j] == 0.0 {
             prec_prior[j] = 1.0;
@@ -85,6 +389,21 @@ fn sample_linear_coefs_weighted(
 
     // b1
     let mut b1_design = data.x_b1.clone();
+    // Overwrite GP columns in b1_design
+    for (gp_idx, gp) in data.latent_gps.iter().enumerate() {
+        if gp.p_b1_idx >= 0 {
+            let col = gp.p_b1_idx as usize;
+            for s in 0..data.latent_gps[gp_idx].subjects.len() {
+                let subj = &gp.subjects[s];
+                let gp_x = &state.gp_states[gp_idx].x[s];
+                for i in 0..subj.out_indices.len() {
+                    let global_idx = subj.out_global[i];
+                    b1_design[(global_idx, col)] = gp_x[subj.out_indices[i]];
+                }
+            }
+        }
+    }
+    
     if data.n_breakpoints > 0 {
         let om1 = state.omega_vec(0, &data.x_om[0]);
         for i in 0..n {
@@ -701,7 +1020,7 @@ pub fn run_chain_bjlm(
         }
 
         // === PROPENSITY BLOCK (cut-feedback) ===
-        sample_propensity(prop_data, prop_priors, &mut prop_state, &mut rng);
+        sample_propensity(prop_data, prop_priors, &mut prop_state, outcome_data, &outcome_state, &mut rng);
 
         // === COMPUTE WEIGHTS ===
         let weights_subj = compute_weights(
@@ -720,6 +1039,14 @@ pub fn run_chain_bjlm(
                 &weights_subj, &outcome_data.group_b0, outcome_data.n,
             )
         };
+
+        // === GP BLOCK ===
+        sample_gp_state(
+            outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng,
+        );
+        sample_gp_hyperparameters(
+            outcome_data, &mut outcome_state, &mut rng, iter < n_warmup,
+        );
 
         // === OUTCOME BLOCK (weighted) ===
         sample_linear_coefs_weighted(

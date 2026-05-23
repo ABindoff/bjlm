@@ -44,6 +44,7 @@ bjlm <- function(
     deltas = list(),
     omega = list(),
     rho = list(),
+    latent_gps = list(),
     propensity,
     weights = c("stabilised_ate", "ate", "att", "stabilised_att"),
     max_weight = 20,
@@ -166,7 +167,52 @@ bjlm <- function(
   rho_names <- if (n_bp > 0) {
     unlist(lapply(seq_len(n_bp), function(k) paste0("rho", k, "_", colnames(x_rho_list[[k]]))))
   } else character(0)
-  outcome_names <- c(b0_names, re_names, b1_names, delta_names, om_names, rho_names, "sigma", "sigma_u")
+  gp_hyper_names <- character(0)
+  if (length(latent_gps) > 0) {
+    gp_hyper_names <- unlist(lapply(latent_gps, function(gp) {
+      paste0(gp$name, c("_alpha", "_rho", "_sigma_x"))
+    }))
+  }
+  outcome_names <- c(b0_names, re_names, b1_names, delta_names, om_names, rho_names, "sigma", "sigma_u", gp_hyper_names)
+
+  # ---- Process Latent GPs ----
+  gp_list <- list()
+  if (length(latent_gps) > 0) {
+    gp_list <- lapply(latent_gps, function(gp) {
+      
+      p_b0_idx <- match(gp$name, colnames(x_b0)) - 1L
+      if (is.na(p_b0_idx)) p_b0_idx <- -1L
+      
+      p_b1_idx <- match(gp$name, colnames(x_b1)) - 1L
+      if (is.na(p_b1_idx)) p_b1_idx <- -1L
+      
+      p_prop_idx <- match(gp$name, colnames(x_prop)) - 1L
+      if (is.na(p_prop_idx)) p_prop_idx <- -1L
+      
+      # Coerce subject variable in GP data to match the factor levels of the outcome subject variable
+      gp_data <- gp$data
+      gp_data[[gp$subject]] <- factor(gp_data[[gp$subject]], levels = levels(group_factor))
+      # Drop missing subjects
+      gp_data <- gp_data[!is.na(gp_data[[gp$subject]]), , drop = FALSE]
+      
+      list(
+        name = gp$name,
+        obs_time = as.double(gp_data[[gp$time_var]]),
+        obs_val = as.double(gp_data[[gp$obs_var]]),
+        obs_group = as.integer(gp_data[[gp$subject]]) - 1L,
+        
+        trt_time = as.double(subject_data[[gp$time_trt_var]]),
+        trt_group = as.integer(factor(subject_data[[group_var]], levels = levels(group_factor))) - 1L,
+        
+        out_time = as.double(data[[gp$time_out_var]]),
+        out_group = as.integer(factor(data[[group_var]], levels = levels(group_factor))) - 1L,
+        
+        p_b0_idx = as.integer(p_b0_idx),
+        p_b1_idx = as.integer(p_b1_idx),
+        p_prop_idx = as.integer(p_prop_idx)
+      )
+    })
+  }
 
   # ---- Call Rust sampler ----
   raw <- run_bjlm(
@@ -207,6 +253,7 @@ bjlm <- function(
     sigma_u_shape = outcome_priors$sigma_u$shape,
     sigma_u_scale = outcome_priors$sigma_u$scale,
     x_prop = as.double(x_prop), p_prop = as.integer(p_prop),
+    latent_gps = gp_list,
     treatment = as.double(treatment),
     n_subjects = as.integer(n_subjects),
     prop_prior_sd = propensity_prior_sd,
