@@ -19,6 +19,9 @@ src/rust/vendor/
 vignettes/*.html
 vignettes/*.R
 .positai
+compile_report.md
+tests/testthat/compile_report.md
+scratch/
 
 # Paper draft (work in progress, not part of the R package)
 paper/
