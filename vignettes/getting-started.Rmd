@@ -13,24 +13,27 @@ knitr::opts_chunk$set(collapse = TRUE, comment = "#>", eval = FALSE)
 
 ## Overview
 
-**`bjlm`** (Bayesian Joint Longitudinal Modelling) is a standalone, high-performance R package designed for joint longitudinal and causal analysis. It simultaneously estimates:
-1. A **Propensity Score Model** ($p(Trt \mid X)$) capturing subject-level treatment allocation.
+**`bjlm`** (Bayesian Joint Longitudinal Modelling) is a high-performance R package designed for joint longitudinal and causal analysis. It natively resolves one of the most challenging problems in observational data: **time-mismatched observations**. 
+
+Often, covariates, treatment allocations, and outcomes are measured at entirely different time points. `bjlm` handles this seamlessly by modeling time-varying confounders as continuous-time **Gaussian Processes (GP)**. It simultaneously estimates:
+1. A **Propensity Score Model** ($p(Trt \mid X_{gp})$) evaluating the probability of treatment based on the interpolated GP state of the covariates at the exact time of treatment.
 2. A **Weighted Outcome Model** ($p(Y \mid \tau, \text{Trt}, \dots)$) incorporating subject-specific inverse probability weights (IPW) to correct for confounding.
 
-By performing joint estimation, `bjlm` automatically propagates the uncertainty of the propensity weights into the causal effect posterior, preventing the underestimation of credible intervals common in two-stage statistical methods. Under the hood, a fast, multithreaded sampler written in Rust handles the MCMC execution.
+By performing joint estimation, `bjlm` automatically propagates the uncertainty of the missing data and the propensity weights into the causal effect posterior, preventing the underestimation of credible intervals common in two-stage statistical methods. Under the hood, a fast, multithreaded sampler written in Rust handles the MCMC execution.
 
 ---
 
 ## The Next-Generation Piped API
 
-The package features an elegant, block-based declarative builder API that leverages R's native pipe operator (`|>`). It isolates treatment, GP, and outcome models dynamically into individual blocks:
+The package features an elegant, block-based declarative builder API that leverages R's native pipe operator (`|>`):
 
 ```R
 library(bjlm)
 
 fit <- bjlm_model() |>
-  propensity(Trt ~ X1 + X2, data = df_subject) |>
-  outcome(Y ~ X1 + Trt, data = df_obs) |>
+  propensity(Trt ~ X_gp, data = dat_treatment) |>
+  latent_gp(name = "X_gp", time = "tau", subject = "id", kernel = "se") |>
+  outcome(Y ~ tau + Trt, data = dat_outcome) |>
   compile() |>
   fit()
 ```
@@ -38,200 +41,165 @@ fit <- bjlm_model() |>
 ### Pipelines and Modular Steps
 
 * **`bjlm_model()`**: Initializes an empty model specification builder.
-* **`propensity(model, formula, data, family = binomial("logit"))`**: Stages the treatment assignment model (LHS must be binary `0`/`1`).
-* **`outcome(model, formula, b0, b1, deltas, omega, rho, data, family = gaussian("identity"))`**: Stages the outcome model. Can fit standard linear regressions or piecewise change-point models.
-* **`latent_gp(model, name, time, subject, kernel = "se")`**: Optionally registers continuous-time latent Gaussian Process confounders (can add multiple GPs sequentially).
-* **`compile(model)`**: Performs alignment across subject-level and observation-level data, validates GP structures, and enforces the **strict Bayesian Cut** (which prevents outcome feedback into the propensity model).
-* **`fit(compiled_model, priors = NULL, ...)`**: Compiles priors and runs the fast Rust sampler.
+* **`propensity(model, formula, data)`**: Stages the treatment assignment model (LHS must be binary `0`/`1`).
+* **`latent_gp(model, name, time, subject, kernel = "se")`**: Registers continuous-time latent Gaussian Process confounders.
+* **`outcome(model, formula, b0, b1, deltas, omega, rho, data)`**: Stages the outcome model. Can fit standard linear regressions or piecewise change-point models.
+* **`compile(model)`**: Validates GP structures, aligns time-points, and enforces the strict Bayesian Cut to prevent outcome-to-propensity feedback.
+* **`fit(compiled_model, ...)`**: Compiles priors and runs the fast Rust sampler.
 
 ---
 
-## 1. Quick Start: Standard Regression (Zero-Breakpoint Speed Shortcut)
+## 1. Quick Start: Standard Cross-Sectional IPW
 
-If you wish to fit a standard linear model without any breakpoints, simply omit the piecewise parameters (`b0`, `b1`, etc.) from the `outcome()` block. The compiler automatically triggers the **zero-breakpoint speed shortcut**, which bypasses sigmoid calculations entirely for maximum performance.
+For simple cross-sectional data where variables are measured concurrently, `bjlm` acts as a fast Marginal Structural Model (MSM) / Inverse Probability Weighting (IPW) estimator. You can omit the `latent_gp` block entirely:
 
-### Simulating Confounded Data
+```r
+# Simple standard linear regression shortcut (cross-sectional)
+basic_model <- bjlm_model() |>
+  propensity(Trt ~ X1 + X2, data = df_cross_sectional) |>
+  outcome(Y ~ X1 + Trt, data = df_cross_sectional) |>
+  compile()
 
-Here, we simulate cross-sectional data where treatment `Trt` is confounded by `X1`:
+fit_basic <- fit(basic_model, chains = 2, iter = 1000)
+```
 
-```{r simulate-data}
+---
+
+## 2. Joint Longitudinal Modelling with Continuous-Time Confounders
+
+In realistic clinical or observational data, time-varying covariates, treatment allocation, and outcomes rarely align. A patient might have a lab test on Tuesday, receive treatment on Thursday, and have an outcome measured next Monday.
+
+`bjlm` uses Gaussian Processes to impute a smooth, subject-specific trajectory for the confounder. The propensity model then queries this trajectory at the exact time of treatment.
+
+### Simulating Time-Mismatched Longitudinal Data
+
+Let's simulate a scenario where a time-varying covariate $X$, treatment $Trt$, and outcome $Y$ are measured at different, mismatched time points:
+
+```{r simulate-mismatched}
 set.seed(42)
-n <- 300
+n_subj <- 30
 
-# Confounder X1
-X1 <- rnorm(n)
+# 1. Simulate the GP confounder (Covariate X measured at random times)
+tau_cov <- runif(n_subj * 4, 0, 10)
+id_cov  <- rep(1:n_subj, each = 4)
+# Subject-specific smooth trajectories
+X_obs <- sin(tau_cov / 2) + rnorm(n_subj * 4, sd = 0.2)
+dat_covariates <- data.frame(id = factor(id_cov), tau = tau_cov, X_obs = X_obs)
 
-# Confounded treatment probability
-pi_true <- plogis(0.5 + 0.8 * X1)
-Trt <- rbinom(n, 1, pi_true)
+# 2. Simulate Treatment Allocation (Measured at a single specific time per subject)
+tau_trt <- runif(n_subj, 2, 8)
+id_trt  <- 1:n_subj
+# True unobserved confounder state at treatment time
+X_true_trt <- sin(tau_trt / 2)
+# Treatment probability depends on the time-varying confounder
+pi_trt <- plogis(-0.5 + 2.0 * X_true_trt)
+Trt <- rbinom(n_subj, 1, pi_trt)
+dat_treatment <- data.frame(id = factor(id_trt), tau_trt = tau_trt, Trt = Trt)
 
-# Outcome confounded by X1, with true treatment effect (ATE) of 2.0
-Y <- 5.0 + 2.0 * Trt + 1.5 * X1 + rnorm(n)
-
-dat <- data.frame(Y = Y, Trt = Trt, X1 = X1)
+# 3. Simulate Outcome (Measured longitudinally at yet another set of times)
+tau_out <- runif(n_subj * 5, 0, 10)
+id_out  <- rep(1:n_subj, each = 5)
+# True unobserved confounder state at outcome time
+X_true_out <- sin(tau_out / 2)
+# Outcome confounded by Trt and X
+Y <- 2.0 + 1.5 * rep(Trt, each = 5) + 0.8 * X_true_out + rnorm(n_subj * 5, sd = 0.5)
+dat_outcome <- data.frame(id = factor(id_out), tau_out = tau_out, Y = Y)
 ```
 
 ### Specifying and Fitting the Model
 
-```{r fit-linear}
-# Build and compile the joint model
-linear_model <- bjlm_model() |>
-  propensity(Trt ~ X1, data = dat) |>
-  outcome(Y ~ X1 + Trt, data = dat) |>
-  compile()
+We construct a joint model where `X_obs` informs the `latent_gp`. The GP generates a continuous state `X_gp` which is dynamically queried by the propensity and outcome formulas. 
 
-# Fit using the fast Rust sampler
-fit_linear <- fit(linear_model, chains = 2L, iter = 1000L, warmup = 500L)
-```
-
----
-
-## 2. Advanced: Piecewise Change-Point Models
-
-For repeated-measures or longitudinal data where the trajectory changes slope at one or more unknown time thresholds, `bjlm` supports smoothed piecewise change-point models:
-
-$$
-\mu_i = b0_i + b1_i(\tau_i - \omega_{1i}) + \sum_{k=1}^{K} \delta_{ki}(\tau_i - \omega_{ki})\, \sigma\!\left[(\tau_i - \omega_{ki})\rho_{ki}\right]
-$$
-
-where:
-* **$\tau$** is the time variable.
-* **$b0$** is the level at the first breakpoint.
-* **$b1$** is the pre-change slope.
-* **$\omega_k$** represents the location of the $k$-th change-point.
-* **$\delta_k$** is the change in slope at change-point $k$.
-* **$\rho_k$** is the transition sharpness.
-
-### Separate Datasets for Propensity and Outcome Models
-
-In longitudinal joint modeling, treatment allocation and propensity score covariates are typically **subject-level** properties (constant over time for each subject), while outcomes and time values are **observation-level** properties (varying over time). 
-
-A key strength of `bjlm` is that you do not need to repeat subject-level characteristics across observation rows. You can pass a subject-level data frame (one row per subject) to `propensity()`, and an observation-level data frame (multiple rows per subject) to `outcome()`. When you run `compile()`, `bjlm` automatically groups and aligns these datasets using the grouping variable specified in the outcome random intercepts (e.g. `(1 | id)`).
-
-Let's simulate this structure:
-
-```{r simulate-piecewise}
-# 1. Subject-level dataset (constant covariates and treatment)
-set.seed(42)
-n_subj <- 30
-id <- factor(1:n_subj)
-X1 <- rnorm(n_subj)
-pi_subj <- plogis(0.2 + 0.8 * X1)
-Trt <- rbinom(n_subj, 1, pi_subj)
-
-dat_subjects <- data.frame(id = id, X1 = X1, Trt = Trt)
-
-# 2. Observation-level dataset (repeated measures, 5 timepoints per subject)
-n_obs_per_subj <- 5
-tau_values <- seq(0, 4, length.out = n_obs_per_subj)
-
-obs_list <- lapply(1:n_subj, function(i) {
-  subj_id  <- id[i]
-  subj_trt <- Trt[i]
-  subj_x1  <- X1[i]
+```{r fit-gp-model}
+gp_model <- bjlm_model() |>
+  # Treatment block queries X_gp at tau_trt
+  propensity(Trt ~ X_gp, data = dat_treatment) |>
   
-  # Piecewise outcome trajectory with a breakpoint at omega = 2.0
-  # Level intercept includes subject-specific random intercept u_i (SD = 0.5)
-  u_i     <- rnorm(1, mean = 0, sd = 0.5)
-  b0_i    <- 4.0 + 1.5 * subj_trt + 1.0 * subj_x1 + u_i
-  b1_i    <- -0.2
-  delta_i <- 0.8
-  omega_i <- 2.0
-  rho_i   <- 5.0
+  # Declare the GP for X_obs across time tau
+  latent_gp(name = "X_gp", time = "tau_cov", subject = "id", kernel = "se") |>
   
-  Y <- vapply(tau_values, function(t) {
-    sig <- 1 / (1 + exp(-(t - omega_i) * rho_i))
-    b0_i + b1_i * (t - omega_i) + delta_i * (t - omega_i) * sig + rnorm(1, sd = 0.2)
-  }, double(1))
-  
-  data.frame(
-    id  = subj_id,
-    tau = tau_values,
-    Y   = Y
-  )
-})
-
-dat_observations <- do.call(rbind, obs_list)
-```
-
-### Specifying and Fitting the Longitudinal Model
-
-Now we build and compile the model, specifying the subject-level data frame for the propensity stage and the observation-level repeated measures data frame for the outcome stage:
-
-```{r fit-piecewise}
-# Build and compile the joint model
-pw_model <- bjlm_model() |>
-  propensity(Trt ~ X1, data = dat_subjects) |>
+  # Outcome block queries X_gp at tau_out. 
+  # We include a random subject intercept (1 | id).
   outcome(
-    formula = Y ~ tau,               # Outcome Y and time variable tau
-    b0      = ~ 1 + Trt + (1 | id),  # Level with subject random intercept
-    b1      = ~ 1,                   # Initial slope
-    deltas  = list(~ 1),             # Slope change parameter
-    omega   = list(~ 1),             # Unknown change-point location
-    rho     = list(~ 1),             # Transition sharpness
-    data    = dat_observations
+    formula = Y ~ tau_out,
+    b0 = ~ 1 + Trt + X_gp + (1 | id),
+    b1 = ~ 1,
+    data = dat_outcome
   ) |>
   compile()
 
 # Fit using the fast Rust sampler
-fit_pw <- fit(pw_model, chains = 4L, iter = 2000L, warmup = 1000L, cores = 4L)
+fit_long <- fit(gp_model, chains = 4, iter = 2000, cores = 4)
 ```
 
 ---
 
 ## 3. Post-Processing & Diagnostics
 
-`bjlm` includes a premium suite of post-processing and diagnostic methods tailored to joint longitudinal estimation:
+`bjlm` includes a premium suite of post-processing and diagnostic methods tailored to joint longitudinal estimation, allowing you to visualise everything from raw data fits to unobserved confounder trajectories.
 
-### A. Print and Summary Methods
-The `summary()` method extracts MCMC stats as a structured data frame, while `print()` produces a formatted terminal layout.
+### Print and Summary
 
-```{r postprocess}
-# Print high-level diagnostics and metadata
-print(fit_linear)
+The `print()` method gives a terminal-friendly overview, while `summary()` provides posterior mean, standard deviation, and R-hat statistics.
 
-# Obtain posterior means, SDs, and Rhat values
-summary(fit_linear, model = "both")
+```{r summary}
+print(fit_long)
+summary(fit_long, model = "both")
 ```
 
-### B. Weight Diagnostics
-Since weights are calculated at every MCMC iteration, you can inspect stabilised weight distributions and max trimming thresholds directly:
+### Predictive Fit
 
-```{r weight-diagnostics}
-weight_diagnostics(fit_linear)
+Extract point estimates and credible intervals for the fitted outcome trajectory using `fitted()`.
+
+```{r fitted}
+fitted_draws <- fitted(fit_long, summary = TRUE)
+head(fitted_draws)
 ```
 
-### C. Causal Effects
-Extract and print average treatment effects (ATE) or treatment effects on the treated (ATT):
+### Visualising Model Predictions
 
-```{r causal-effect}
-# Get credible intervals for the treatment coefficient
-causal_effect(fit_linear, param = "b0_Trt")
+Use `plot_predictions()` to overlay posterior fitted trajectories (with 95% credible intervals) on top of the raw data. 
+
+```{r plot-predictions}
+# Plot population-level or subject-specific fits
+plot_predictions(fit_long, type = "subject", n_subjects = 4)
 ```
 
-### D. Trace and Density Plots
-Inspect MCMC chain convergence and parameter densities:
+### Visualising Gaussian Processes
 
-```{r plotting}
-# Plot posterior trace-lines and density distributions
-plot(fit_linear)
+The true power of `bjlm` is the continuous-time imputation. You can visualise the inferred, unobserved GP trajectories for individual subjects using `plot_gp()`:
+
+```{r plot-gp}
+# Inspect the inferred continuous-time confounder paths
+plot_gp(fit_long, n_subjects = 4)
+```
+
+### Propensity and Weight Diagnostics
+
+Understand treatment assignment overlap and inverse probability weight distributions using `plot_propensity()`.
+
+```{r plot-propensity}
+# Density overlap of propensity scores and distribution of weights
+plot_propensity(fit_long, type = "both")
 ```
 
 ---
 
-## 4. Side-by-Side Model Comparison Tables
+## 4. Leave-Future-Out Cross Validation
 
-The package provides `tab_bjlm()` to generate professional, CRAN-standard fixed-effects comparison tables across multiple fitted models. It aligns parameters across rows and displays models side-by-side:
+For longitudinal models, standard leave-one-out cross validation often underestimates true predictive error because it attempts to predict past data using future data.
 
-```{r compare-table}
-# Generate comparison table
-comparison_table <- tab_bjlm(
-  fit_linear, 
-  fit_pw, 
-  labels = c("Linear IPW Model", "Piecewise IPW Model")
-)
+`bjlm` natively supports **Leave-Future-Out Cross Validation (LFO-CV)**. By sequentially predicting time $t+1$ using only data up to time $t$, LFO-CV provides a rigorous assessment of the model's forward-predictive capability. It uses Pareto Smoothed Importance Sampling (PSIS) to approximate the refits, making it incredibly fast.
 
-# If the 'gt' package is installed, this returns a beautiful gt table.
-# Otherwise, it falls back to a clean knitr Markdown table.
-print(comparison_table)
+```{r lfo-cv}
+# Perform LFO-CV, starting the forward-validation from time tau = 2.0
+lfo_res <- lfo_cv(fit_long, min_tau = 2.0)
+
+# Print the Expected Log Predictive Density (ELPD) summary
+print(lfo_res)
+
+# Plot the PSIS Pareto k diagnostic values to assess reliability
+plot(lfo_res)
 ```
+
+High Pareto $k$ values ($k > 0.7$) in the diagnostic plot indicate points where the importance sampling approximation struggles, but `lfo_cv()` will automatically issue warnings when this occurs so you can trust the results.
