@@ -119,7 +119,16 @@ gp_model <- bjlm_model() |>
   propensity(Trt ~ X_gp, data = dat_treatment) |>
   
   # Declare the GP for X_obs across time tau
-  latent_gp(name = "X_gp", time = "tau_out", subject = "id", kernel = "se") |>
+  latent_gp(
+    name = "X_gp",
+    data = dat_covariates,
+    time_var = "tau",
+    obs_var = "X_obs",
+    time_trt_var = "tau_trt",
+    time_out_var = "tau_out",
+    subject = "id",
+    kernel = "se"
+  ) |>
   
   # Outcome block queries X_gp at tau_out. 
   # We include a random subject intercept (1 | id).
@@ -215,7 +224,16 @@ LFO-CV is especially useful for model selection. Let's fit a competing model tha
 # Fit a competing model omitting the Treatment effect from the outcome
 bad_model <- bjlm_model() |>
   propensity(Trt ~ X_gp, data = dat_treatment) |>
-  latent_gp(name = "X_gp", time = "tau_out", subject = "id", kernel = "se") |>
+  latent_gp(
+    name = "X_gp",
+    data = dat_covariates,
+    time_var = "tau",
+    obs_var = "X_obs",
+    time_trt_var = "tau_trt",
+    time_out_var = "tau_out",
+    subject = "id",
+    kernel = "se"
+  ) |>
   outcome(
     formula = Y ~ tau_out,
     b0 = ~ 1 + X_gp + (1 | id), # Incorrectly omitting Trt
