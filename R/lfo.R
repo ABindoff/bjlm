@@ -283,20 +283,27 @@ lfo_cv <- function(object, t_var = NULL, t_grid = NULL, min_tau = NULL, k_thresh
     }
   }
   
-  # 8. Consolidate results
-  eval_indices <- which(object$data[[t_var]] > min_tau)
-  elpd_lfo <- sum(elpd_pointwise[eval_indices], na.rm = TRUE)
+  # Calculate approximate SE of total ELPD
+  # Assuming independent pointwise observations (standard for cross-validation approximations)
+  elpd_se <- sqrt(length(eval_indices) * stats::var(elpd_pointwise[eval_indices], na.rm = TRUE))
   
+  estimates <- matrix(NA_real_, nrow = 1, ncol = 2)
+  rownames(estimates) <- c("elpd_loo")  # Named elpd_loo for compatibility with loo::loo_compare
+  colnames(estimates) <- c("Estimate", "SE")
+  estimates["elpd_loo", "Estimate"] <- elpd_lfo
+  estimates["elpd_loo", "SE"] <- elpd_se
+
   pointwise_df <- data.frame(
     observation = eval_indices,
     tau = object$data[[t_var]][eval_indices],
-    elpd = elpd_pointwise[eval_indices]
+    elpd_loo = elpd_pointwise[eval_indices]
   )
   colnames(pointwise_df)[2] <- t_var
   
   res <- list(
+    estimates = estimates,
     elpd_lfo = elpd_lfo,
-    pointwise = pointwise_df,
+    pointwise = as.matrix(pointwise_df),
     diagnostics = diagnostics,
     t_var = t_var,
     t_grid = t_grid,
@@ -304,7 +311,7 @@ lfo_cv <- function(object, t_var = NULL, t_grid = NULL, min_tau = NULL, k_thresh
     min_idx = min_idx,
     k_threshold = k_threshold
   )
-  class(res) <- "bjlm_lfo"
+  class(res) <- c("bjlm_lfo", "loo")
   res
 }
 

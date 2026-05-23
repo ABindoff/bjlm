@@ -226,12 +226,8 @@ fit_bad <- fit(bad_model, chains = 4, iter = 2000, cores = 4)
 # Run LFO-CV on the competing model
 lfo_bad <- lfo_cv(fit_bad, min_tau = 2.0)
 
-# Compare ELPD (Expected Log Predictive Density)
-cat("True Model ELPD: ", lfo_res$estimates["elpd_lfo", "Estimate"], "\n")
-cat("Bad Model ELPD:  ", lfo_bad$estimates["elpd_lfo", "Estimate"], "\n")
-
-# If the 'loo' package is loaded, you can formally compare them:
-# loo::loo_compare(list(True_Model = lfo_res, Bad_Model = lfo_bad))
+# Formally compare the true model and the bad model using the loo package:
+loo::loo_compare(list(True_Model = lfo_res, Bad_Model = lfo_bad))
 ```
 
-As expected, the true model (which correctly specifies the outcome generating process) will yield a significantly higher ELPD score!
+As expected, the true model (which correctly specifies the outcome generating process) will yield a significantly higher ELPD score, demonstrating LFO-CV's ability to select the better forward-predicting model!
