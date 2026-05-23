@@ -389,6 +389,13 @@ fit.bjlm_compiled_model <- function(object, priors = NULL, ...) {
   fit_obj$zero_breakpoint <- object$zero_breakpoint
   fit_obj$propensity_formula <- object$model$propensity$formula
   fit_obj$outcome_formula <- object$model$outcome$formula
+  
+  # Attach individual parameter formulas for prediction and plotting S3 methods
+  fit_obj$b0_formula <- object$b0_formula
+  fit_obj$b1_formula <- object$b1_formula
+  fit_obj$deltas <- object$deltas
+  fit_obj$omega <- object$omega
+  fit_obj$rho <- object$rho
 
   fit_obj
 }
@@ -640,4 +647,228 @@ print.bjlm_flowchart <- function(x, ...) {
 
   structure(flowchart, class = "bjlm_flowchart")
 }
+
+#' @export
+fitted.bjlm_fit <- function(object, newdata = NULL, summary = TRUE, ...) {
+  .build_predictions(object, newdata, summary, ...)
+}
+
+#' @export
+fitted.smoothbp_fit <- function(object, newdata = NULL, summary = TRUE, ...) {
+  .build_predictions(object, newdata, summary, ...)
+}
+
+.build_predictions_dm <- function(object, data) {
+  b0_fml <- object$b0_formula
+  b1_fml <- object$b1_formula
+  deltas_fml <- object$deltas
+  omega_fml <- object$omega
+  rho_fml <- object$rho
+  
+  X_b0 <- stats::model.matrix(b0_fml, data = data)
+  X_b1 <- stats::model.matrix(b1_fml, data = data)
+  
+  n_bp <- length(deltas_fml)
+  X_deltas <- if (n_bp > 0) lapply(deltas_fml, function(f) stats::model.matrix(f, data = data)) else list()
+  X_om     <- if (n_bp > 0) lapply(omega_fml,  function(f) stats::model.matrix(f, data = data)) else list()
+  X_rho    <- if (n_bp > 0) lapply(rho_fml,    function(f) stats::model.matrix(f, data = data)) else list()
+  
+  subject_var <- object$subject_var
+  n_groups_b0 <- object$n_subjects
+  
+  if (!is.null(subject_var) && subject_var %in% names(data)) {
+    group_levels <- levels(as.factor(object$data[[subject_var]]))
+    gfac <- factor(data[[subject_var]], levels = group_levels)
+    group_b0 <- ifelse(is.na(gfac), -1L, as.integer(gfac) - 1L)
+  } else {
+    group_b0 <- rep(-1L, nrow(data))
+  }
+  
+  list(
+    X_b0 = X_b0,
+    X_b1 = X_b1,
+    X_deltas = X_deltas,
+    X_om = X_om,
+    X_rho = X_rho,
+    group_b0 = group_b0,
+    n_groups_b0 = n_groups_b0
+  )
+}
+
+.build_predictions <- function(object, newdata = NULL, summary = TRUE, ...) {
+  if (is.null(newdata)) {
+    data <- object$data
+  } else {
+    data <- newdata
+  }
+
+  outcome_vars <- all.vars(object$outcome_formula)
+  y_name <- outcome_vars[1]
+  tau_name <- outcome_vars[2]
+  tau <- as.double(data[[tau_name]])
+
+  dm <- .build_predictions_dm(object, data)
+
+  n <- length(tau)
+  draw_mat  <- posterior::as_draws_matrix(object$draws)
+  col_names <- colnames(draw_mat)
+  n_draws   <- nrow(draw_mat)
+  n_bp      <- length(dm$X_deltas)
+
+  b0_cols  <- match(paste0("b0_", colnames(dm$X_b0)), col_names)
+  b1_cols  <- match(paste0("b1_", colnames(dm$X_b1)), col_names)
+  
+  subject_var <- object$subject_var
+  group_levels <- if (!is.null(subject_var)) levels(as.factor(object$data[[subject_var]])) else character(0)
+  u_cols <- if (length(group_levels) > 0) match(paste0("u_", group_levels), col_names) else integer(0)
+
+  delta_cols_list <- lapply(seq_len(n_bp), function(k) match(paste0("delta", k, "_", colnames(dm$X_deltas[[k]])), col_names))
+  om_cols_list    <- lapply(seq_len(n_bp), function(k) match(paste0("omega", k, "_", colnames(dm$X_om[[k]])), col_names))
+  rho_cols_list   <- lapply(seq_len(n_bp), function(k) match(paste0("rho", k, "_", colnames(dm$X_rho[[k]])), col_names))
+
+  gamma_b1_cols <- which(grepl("^gamma_b1_", col_names))
+  gamma_delta_cols_list <- lapply(seq_len(n_bp), function(k) which(grepl(paste0("^gamma_delta", k, "_"), col_names)))
+
+  fitted_draws <- matrix(0, nrow = n_draws, ncol = n)
+  for (s in seq_len(n_draws)) {
+    mu_i <- as.vector(dm$X_b0 %*% as.numeric(draw_mat[s, b0_cols]))
+    beta_b1 <- as.numeric(draw_mat[s, b1_cols])
+    if (length(gamma_b1_cols) > 0) beta_b1 <- beta_b1 * as.numeric(draw_mat[s, gamma_b1_cols])
+    b1_vals <- as.vector(dm$X_b1 %*% beta_b1)
+    
+    if (n_bp > 0) {
+      om1_i <- as.vector(dm$X_om[[1]] %*% as.numeric(draw_mat[s, om_cols_list[[1]]]))
+      mu_i  <- mu_i + b1_vals * (tau - om1_i)
+    } else {
+      mu_i  <- mu_i + b1_vals * tau
+    }
+    
+    for (k in seq_len(n_bp)) {
+      b_delta <- as.numeric(draw_mat[s, delta_cols_list[[k]]])
+      if (length(gamma_delta_cols_list[[k]]) > 0) b_delta <- b_delta * as.numeric(draw_mat[s, gamma_delta_cols_list[[k]]])
+      delta_i <- as.vector(dm$X_deltas[[k]] %*% b_delta)
+      om_i    <- as.vector(dm$X_om[[k]] %*% as.numeric(draw_mat[s, om_cols_list[[k]]]))
+      rho_i   <- as.vector(dm$X_rho[[k]] %*% as.numeric(draw_mat[s, rho_cols_list[[k]]]))
+      di <- tau - om_i
+      si <- 1 / (1 + exp(-di * rho_i))
+      mu_i <- mu_i + delta_i * di * si
+    }
+    
+    if (length(u_cols) > 0 && !any(is.na(u_cols))) {
+      u_b0 <- as.numeric(draw_mat[s, u_cols])
+      for (i in seq_len(n)) {
+        g <- dm$group_b0[i]
+        if (g >= 0L) mu_i[i] <- mu_i[i] + u_b0[g + 1L]
+      }
+    }
+    
+    fitted_draws[s, ] <- mu_i
+  }
+
+  if (!summary) return(fitted_draws)
+  data.frame(
+    .observation = seq_len(n),
+    fitted_mean  = colMeans(fitted_draws),
+    fitted_Q2.5  = apply(fitted_draws, 2, stats::quantile, probs = 0.025),
+    fitted_Q97.5 = apply(fitted_draws, 2, stats::quantile, probs = 0.975)
+  )
+}
+
+#' @export
+log_lik.bjlm_fit <- function(object, ...) {
+  outcome_vars <- all.vars(object$outcome_formula)
+  y_name <- outcome_vars[1]
+  y_obs <- as.double(object$data[[y_name]])
+  
+  fit_draws <- fitted(object, summary = FALSE)
+  sigma_draws <- as.numeric(posterior::as_draws_matrix(object$draws)[, "sigma"])
+  ll_matrix <- matrix(0, nrow = nrow(fit_draws), ncol = length(y_obs))
+  for (i in seq_along(y_obs)) {
+    ll_matrix[, i] <- stats::dnorm(y_obs[i], mean = fit_draws[, i], sd = sigma_draws, log = TRUE)
+  }
+  ll_matrix
+}
+
+#' @export
+log_lik.smoothbp_fit <- function(object, ...) {
+  response <- object$response %||% all.vars(object$outcome_formula)[1]
+  y_obs <- as.double(object$data[[response]])
+  
+  fit_draws <- fitted(object, summary = FALSE)
+  sigma_draws <- as.numeric(posterior::as_draws_matrix(object$draws)[, "sigma"])
+  ll_matrix <- matrix(0, nrow = nrow(fit_draws), ncol = length(y_obs))
+  for (i in seq_along(y_obs)) {
+    ll_matrix[, i] <- stats::dnorm(y_obs[i], mean = fit_draws[, i], sd = sigma_draws, log = TRUE)
+  }
+  ll_matrix
+}
+
+#' @importFrom loo loo
+#' @export
+loo.bjlm_fit <- function(x, ...) {
+  loo::loo(log_lik(x), ...)
+}
+
+#' @importFrom loo waic
+#' @export
+waic.bjlm_fit <- function(x, ...) {
+  loo::waic(log_lik(x), ...)
+}
+
+#' @export
+loo.smoothbp_fit <- function(x, ...) {
+  loo::loo(log_lik(x), ...)
+}
+
+#' @export
+waic.smoothbp_fit <- function(x, ...) {
+  loo::waic(log_lik(x), ...)
+}
+
+#' @importFrom bayesplot pp_check
+#' @export
+pp_check.bjlm_fit <- function(object, n_draws = 50, ...) {
+  outcome_vars <- all.vars(object$outcome_formula)
+  y_name <- outcome_vars[1]
+  y_obs <- as.double(object$data[[y_name]])
+  
+  fit_mat <- fitted(object, summary = FALSE)
+  sigma_draws <- as.numeric(posterior::as_draws_matrix(object$draws)[, "sigma"])
+  idx <- sample(nrow(fit_mat), min(n_draws, nrow(fit_mat)))
+  y_rep <- do.call(rbind, lapply(idx, function(s) stats::rnorm(length(y_obs), mean = fit_mat[s, ], sd = sigma_draws[s])))
+  bayesplot::ppc_dens_overlay(y_obs, y_rep)
+}
+
+#' @export
+pp_check.smoothbp_fit <- function(object, n_draws = 50, ...) {
+  response <- object$response %||% all.vars(object$outcome_formula)[1]
+  y_obs <- as.double(object$data[[response]])
+  
+  fit_mat <- fitted(object, summary = FALSE)
+  sigma_draws <- as.numeric(posterior::as_draws_matrix(object$draws)[, "sigma"])
+  idx <- sample(nrow(fit_mat), min(n_draws, nrow(fit_mat)))
+  y_rep <- do.call(rbind, lapply(idx, function(s) stats::rnorm(length(y_obs), mean = fit_mat[s, ], sd = sigma_draws[s])))
+  bayesplot::ppc_dens_overlay(y_obs, y_rep)
+}
+
+#' Pointwise log-likelihood matrix
+#'
+#' @param object A fitted model object.
+#' @param ... Additional arguments passed to methods.
+#' @export
+log_lik <- function(object, ...) UseMethod("log_lik")
+
+#' @importFrom loo loo
+#' @export
+loo::loo
+
+#' @importFrom loo waic
+#' @export
+loo::waic
+
+#' @importFrom bayesplot pp_check
+#' @export
+bayesplot::pp_check
+
+
 

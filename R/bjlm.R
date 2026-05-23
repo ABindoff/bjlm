@@ -273,7 +273,12 @@ bjlm <- function(
       shared_cols = character(0),
       zero_breakpoint = FALSE,
       propensity_formula = propensity,
-      outcome_formula = outcome
+      outcome_formula = outcome,
+      b0_formula = b0_fixed_formula,
+      b1_formula = b1,
+      deltas = deltas,
+      omega = omega,
+      rho = rho
     ),
     class = "bjlm_fit"
   )

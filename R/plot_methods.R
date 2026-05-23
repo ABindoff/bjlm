@@ -312,3 +312,245 @@ trace_plot <- function(
       strip.text      = ggplot2::element_text(size = 7.5, lineheight = 1.1)
     )
 }
+
+# Suppress CRAN check warnings for ggplot variables
+Propensity <- Treatment <- Weight <- y_fit <- .data <- NULL
+
+#' Plot outcome predictions and piecewise trajectories
+#'
+#' @param fit A `bjlm_fit` object.
+#' @param type One of `"population"` (default), `"subject"`, or `"both"`.
+#' @param subjects Optional vector of subject IDs to plot when `type` is `"subject"` or `"both"`.
+#' @param n_subjects Number of random subjects to select if `subjects` is NULL.
+#' @param ... Unused.
+#'
+#' @return A `ggplot` object.
+#' @export
+plot_predictions <- function(fit, type = c("population", "subject", "both"), subjects = NULL, n_subjects = 5, ...) {
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    stop("Package 'ggplot2' is required for plotting predictions.")
+  }
+  type <- match.arg(type)
+  
+  # Parse outcome variable names
+  outcome_vars <- all.vars(fit$outcome_formula)
+  y_name <- outcome_vars[1]
+  tau_name <- outcome_vars[2]
+  
+  # Base plot with raw data
+  p <- ggplot2::ggplot(fit$data, ggplot2::aes(x = .data[[tau_name]])) +
+    ggplot2::geom_point(ggplot2::aes(y = .data[[y_name]]), alpha = 0.3, colour = "grey50", size = 1.2) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", size = 13, colour = "#2c3e50"),
+      plot.subtitle = ggplot2::element_text(size = 10, colour = "grey40"),
+      panel.grid.minor = ggplot2::element_blank(),
+      legend.position = "bottom"
+    )
+  
+  scale_colors <- character(0)
+  
+  if (type %in% c("population", "both")) {
+    pop_data <- fit$data
+    if (!is.null(fit$subject_var)) {
+      pop_data[[fit$subject_var]] <- "__POPULATION_LEVEL__"
+    }
+    pop_pred <- stats::fitted(fit, newdata = pop_data, summary = TRUE)
+    
+    pop_df <- fit$data
+    pop_df$y_fit <- pop_pred$fitted_mean
+    pop_df$lo <- pop_pred$fitted_Q2.5
+    pop_df$hi <- pop_pred$fitted_Q97.5
+    
+    p <- p +
+      ggplot2::geom_ribbon(data = pop_df, ggplot2::aes(ymin = lo, ymax = hi), fill = "#2b5c8f", alpha = 0.15) +
+      ggplot2::geom_line(data = pop_df, ggplot2::aes(y = y_fit, colour = "Population Trajectory"), linewidth = 1.2)
+      
+    scale_colors["Population Trajectory"] <- "#2b5c8f"
+      
+    # Plot vertical lines for estimated breakpoints (omega)
+    draw_mat <- posterior::as_draws_matrix(fit$draws)
+    col_names <- colnames(draw_mat)
+    om_cols <- grep("^omega[0-9]+_", col_names, value = TRUE)
+    if (length(om_cols) > 0) {
+      for (om_var in om_cols) {
+        om_mean <- mean(as.numeric(draw_mat[, om_var]))
+        p <- p + ggplot2::geom_vline(xintercept = om_mean, linetype = "dashed", colour = "#d35400", alpha = 0.6)
+      }
+    }
+  }
+  
+  if (type %in% c("subject", "both") && !is.null(fit$subject_var)) {
+    sub_var <- fit$subject_var
+    all_subs <- unique(fit$data[[sub_var]])
+    if (is.null(subjects)) {
+      subjects <- sample(all_subs, min(n_subjects, length(all_subs)))
+    }
+    
+    sub_df <- fit$data[fit$data[[sub_var]] %in% subjects, , drop = FALSE]
+    if (nrow(sub_df) > 0) {
+      sub_pred <- stats::fitted(fit, newdata = sub_df, summary = TRUE)
+      sub_df$y_fit <- sub_pred$fitted_mean
+      sub_df$lo <- sub_pred$fitted_Q2.5
+      sub_df$hi <- sub_pred$fitted_Q97.5
+      
+      # Convert subjects to factor for distinct colors
+      sub_df[[sub_var]] <- as.factor(sub_df[[sub_var]])
+      
+      p <- p +
+        ggplot2::geom_line(data = sub_df, ggplot2::aes(y = y_fit, group = .data[[sub_var]], colour = "Subject-specific Fitted"), 
+                           linewidth = 0.8, alpha = 0.8, linetype = "dashed")
+                           
+      scale_colors["Subject-specific Fitted"] <- "#2ecc71"
+    }
+  }
+  
+  p <- p + ggplot2::scale_colour_manual(values = scale_colors, name = "Model Fit") +
+    ggplot2::labs(
+      title = "Posterior Fitted Trajectories",
+      subtitle = "Shaded band shows 95% credible interval; points are observed data.",
+      x = tau_name,
+      y = y_name
+    )
+  
+  p
+}
+
+#' Plot time-varying latent Gaussian Process (GP) deviations
+#'
+#' @param fit A `bjlm_fit` object.
+#' @param subjects Optional vector of subject IDs to plot.
+#' @param n_subjects Number of random subjects to select if `subjects` is NULL.
+#' @param ... Unused.
+#'
+#' @return A `ggplot` object.
+#' @export
+plot_gp <- function(fit, subjects = NULL, n_subjects = 5, ...) {
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    stop("Package 'ggplot2' is required for plotting GP curves.")
+  }
+  
+  # Look for parameters starting with gp_ in the posterior draws
+  col_names <- colnames(posterior::as_draws_matrix(fit$draws))
+  gp_cols <- grep("^gp_", col_names, value = TRUE)
+  
+  if (length(gp_cols) == 0) {
+    stop("No latent Gaussian Process draws found in this fitted model. ",
+         "Please ensure you specified a latent_gp() block in your bjlm_model() pipeline.")
+  }
+  
+  # Skeleton implementation
+  ggplot2::ggplot() + 
+    ggplot2::labs(title = "Latent Gaussian Process Curves")
+}
+
+#' Plot propensity score diagnostics and weight balance
+#'
+#' @param fit A `bjlm_fit` object.
+#' @param type One of `"overlap"` (default), `"weights"`, or `"both"`.
+#' @param ... Unused.
+#'
+#' @return A `ggplot` object, or a list of two ggplot objects if `type = "both"`.
+#' @export
+plot_propensity <- function(fit, type = c("overlap", "weights", "both"), ...) {
+  if (!requireNamespace("ggplot2", quietly = TRUE)) {
+    stop("Package 'ggplot2' is required for plotting propensity diagnostics.")
+  }
+  type <- match.arg(type)
+  
+  prop_vars <- all.vars(fit$propensity_formula)
+  treatment_name <- fit$treatment_name
+  prop_covariate_names <- prop_vars[prop_vars != treatment_name]
+  
+  sub_var <- fit$subject_var
+  if (!is.null(sub_var)) {
+    sub_data <- fit$data[!duplicated(fit$data[[sub_var]]), ]
+  } else {
+    sub_data <- fit$data
+  }
+  
+  prop_formula <- stats::reformulate(prop_covariate_names)
+  x_prop <- stats::model.matrix(prop_formula, data = sub_data)
+  
+  draw_mat <- posterior::as_draws_matrix(fit$draws)
+  alpha_cols <- grep("^alpha_", colnames(draw_mat), value = TRUE)
+  
+  if (length(alpha_cols) == 0) {
+    stop("Propensity model coefficients (alpha) not found in posterior draws.")
+  }
+  
+  alpha_means <- colMeans(draw_mat[, alpha_cols, drop = FALSE])
+  alpha_clean_names <- sub("^alpha_", "", alpha_cols)
+  match_idx <- match(colnames(x_prop), alpha_clean_names)
+  alpha_aligned <- alpha_means[match_idx]
+  
+  linear_predictor <- as.vector(x_prop %*% alpha_aligned)
+  prop_scores <- 1 / (1 + exp(-linear_predictor))
+  
+  treatment <- sub_data[[treatment_name]]
+  
+  df_plot <- data.frame(
+    Propensity = prop_scores,
+    Treatment = factor(treatment, levels = c(0, 1), labels = c("Control", "Treated"))
+  )
+  
+  p_overlap <- ggplot2::ggplot(df_plot, ggplot2::aes(x = Propensity, fill = Treatment)) +
+    ggplot2::geom_density(alpha = 0.4, colour = "transparent") +
+    ggplot2::scale_fill_manual(values = c("Control" = "#e74c3c", "Treated" = "#2ecc71")) +
+    ggplot2::labs(
+      title = "Propensity Score Overlap (Common Support)",
+      subtitle = "Density distributions of estimated propensity scores by treatment group.",
+      x = "Estimated Propensity Score",
+      y = "Density"
+    ) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", size = 12, colour = "#2c3e50"),
+      plot.subtitle = ggplot2::element_text(size = 9, colour = "grey40"),
+      legend.position = "bottom"
+    )
+    
+  p_trt <- mean(treatment)
+  
+  if (fit$weight_type == "stabilised_ate") {
+    w <- ifelse(treatment == 1, p_trt / prop_scores, (1 - p_trt) / (1 - prop_scores))
+  } else if (fit$weight_type == "ate") {
+    w <- ifelse(treatment == 1, 1 / prop_scores, 1 / (1 - prop_scores))
+  } else if (fit$weight_type == "att") {
+    w <- ifelse(treatment == 1, 1, prop_scores / (1 - prop_scores))
+  } else if (fit$weight_type == "stabilised_att") {
+    w <- ifelse(treatment == 1, p_trt, p_trt * prop_scores / (1 - prop_scores))
+  } else {
+    w <- rep(1, length(treatment))
+  }
+  
+  w <- pmin(w, fit$max_weight)
+  
+  df_plot$Weight <- w
+  
+  p_weights <- ggplot2::ggplot(df_plot, ggplot2::aes(x = Treatment, y = Weight, fill = Treatment)) +
+    ggplot2::geom_violin(alpha = 0.5, colour = "transparent", scale = "width") +
+    ggplot2::geom_boxplot(width = 0.15, fill = "white", outlier.shape = 16, outlier.size = 1.5, outlier.alpha = 0.5) +
+    ggplot2::scale_fill_manual(values = c("Control" = "#e74c3c", "Treated" = "#2ecc71")) +
+    ggplot2::labs(
+      title = "IPW Weight Distribution",
+      subtitle = sprintf("Distribution of calculated weights (type: %s, max trim: %g)", fit$weight_type, fit$max_weight),
+      x = "Treatment Status",
+      y = "Inverse Probability Weight"
+    ) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold", size = 12, colour = "#2c3e50"),
+      plot.subtitle = ggplot2::element_text(size = 9, colour = "grey40"),
+      legend.position = "none"
+    )
+    
+  if (type == "overlap") {
+    return(p_overlap)
+  } else if (type == "weights") {
+    return(p_weights)
+  } else {
+    return(list(overlap = p_overlap, weights = p_weights))
+  }
+}
+
