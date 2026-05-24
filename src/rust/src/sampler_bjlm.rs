@@ -584,18 +584,19 @@ fn sample_linear_coefs_weighted(
                 }
                 let omega = crate::polya_gamma::sample_pg(1.0, c_i, rng);
                 let kappa = data.y[i] - 0.5;
-                let z_i = kappa / omega;
-                let mut y_tilde_i = z_i;
-                if g >= 0 {
-                    y_tilde_i -= state.u_b0[g as usize];
-                }
                 
                 let w_eff = weights[i] * omega;
                 let mut row = w_x.row_mut(i);
                 for j in 0..p_total {
                     row[j] *= w_eff;
                 }
-                w_y[i] = y_tilde_i * w_eff;
+                
+                // y_tilde_i = (kappa / omega - u_b0)
+                // w_y[i] = y_tilde_i * w_eff 
+                //        = (kappa / omega - u_b0) * weights[i] * omega 
+                //        = kappa * weights[i] - u_b0 * weights[i] * omega
+                let u_b0_val = if g >= 0 { state.u_b0[g as usize] } else { 0.0 };
+                w_y[i] = kappa * weights[i] - u_b0_val * w_eff;
             }
         }
         OutcomeFamily::NegativeBinomial => {
@@ -610,18 +611,19 @@ fn sample_linear_coefs_weighted(
                 }
                 let omega = crate::polya_gamma::sample_pg(data.y[i] + r, c_i, rng);
                 let kappa = (data.y[i] - r) / 2.0;
-                let z_i = kappa / omega;
-                let mut y_tilde_i = z_i;
-                if g >= 0 {
-                    y_tilde_i -= state.u_b0[g as usize];
-                }
                 
                 let w_eff = weights[i] * omega;
                 let mut row = w_x.row_mut(i);
                 for j in 0..p_total {
                     row[j] *= w_eff;
                 }
-                w_y[i] = y_tilde_i * w_eff;
+                
+                // y_tilde_i = (kappa / omega - u_b0)
+                // w_y[i] = y_tilde_i * w_eff 
+                //        = (kappa / omega - u_b0) * weights[i] * omega 
+                //        = kappa * weights[i] - u_b0 * weights[i] * omega
+                let u_b0_val = if g >= 0 { state.u_b0[g as usize] } else { 0.0 };
+                w_y[i] = kappa * weights[i] - u_b0_val * w_eff;
             }
         }
     }
