@@ -4,7 +4,15 @@ use nalgebra::{DMatrix, DVector};
 // Data passed in from R
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OutcomeFamily {
+    Gaussian,
+    Binomial,
+    NegativeBinomial,
+}
+
 pub struct ModelData {
+    pub outcome_family: OutcomeFamily,
     pub y: DVector<f64>,
     pub tau: DVector<f64>,
     pub x_b0: DMatrix<f64>,
@@ -153,6 +161,9 @@ pub struct Priors {
     pub sigma_re_om_shape: f64,
     pub sigma_re_om_scale: f64,
 
+    pub r_shape: f64,
+    pub r_rate: f64,
+
     pub p_b0: usize,
     pub p_b1: usize,
     pub p_deltas: Vec<usize>,
@@ -199,6 +210,9 @@ pub struct State {
     pub pi: f64,
     /// Learned standard deviation for omega random effects at each breakpoint
     pub sigma_re_om: Vec<f64>,
+    /// Negative binomial overdispersion parameter
+    pub r: f64,
+    pub step_r: f64,
     /// States for latent Gaussian Processes
     pub gp_states: Vec<GpState>,
 }
@@ -218,7 +232,7 @@ pub struct GpState {
 }
 
 impl State {
-    pub fn n_params(&self, include_gammas: bool, learn_pi: bool, hierarchical: bool) -> usize {
+    pub fn n_params(&self, include_gammas: bool, learn_pi: bool, hierarchical: bool, outcome_family: OutcomeFamily) -> usize {
         let mut n = self.beta_b0.len() + self.u_b0.len() + self.beta_b1.len() + 2;
         for i in 0..self.beta_deltas.len() {
             n += self.beta_deltas[i].len();
@@ -237,12 +251,15 @@ impl State {
         if hierarchical {
             n += self.sigma_re_om.len();
         }
+        if outcome_family == OutcomeFamily::NegativeBinomial {
+            n += 1;
+        }
         n += self.gp_states.len() * 3; // alpha, rho, sigma_x per GP
         n
     }
 
-    pub fn to_vec(&self, include_gammas: bool, learn_pi: bool, hierarchical: bool) -> Vec<f64> {
-        let mut v = Vec::with_capacity(self.n_params(include_gammas, learn_pi, hierarchical));
+    pub fn to_vec(&self, include_gammas: bool, learn_pi: bool, hierarchical: bool, outcome_family: OutcomeFamily) -> Vec<f64> {
+        let mut v = Vec::with_capacity(self.n_params(include_gammas, learn_pi, hierarchical, outcome_family));
         v.extend_from_slice(self.beta_b0.as_slice());
         v.extend_from_slice(self.u_b0.as_slice());
         v.extend_from_slice(self.beta_b1.as_slice());
@@ -265,6 +282,9 @@ impl State {
         }
         if hierarchical {
             for &s in &self.sigma_re_om { v.push(s); }
+        }
+        if outcome_family == OutcomeFamily::NegativeBinomial {
+            v.push(self.r);
         }
         
         for gp in &self.gp_states {

@@ -341,6 +341,63 @@ fn sample_sigma_u_weighted(priors: &Priors, state: &mut State, rng: &mut StdRng)
     state.sigma_u = 1.0 / gamma_dist.sample(rng).sqrt();
 }
 
+fn ln_gamma(mut z: f64) -> f64 {
+    let c = [
+        76.18009172947146,
+        -86.50532032941677,
+        24.01409824083091,
+        -1.231739572450155,
+        0.1208650973866179e-2,
+        -0.5395239384953e-5,
+    ];
+    let mut sum = 1.000000000190015;
+    for i in 0..6 {
+        sum += c[i] / (z + (i as f64) + 1.0);
+    }
+    let temp = z + 5.5;
+    (z + 0.5) * temp.ln() - temp + (2.5066282746310005 * sum / z).ln()
+}
+
+fn sample_r_weighted(data: &ModelData, priors: &Priors, state: &mut State, weights: &[f64], adapting: bool, rng: &mut StdRng) {
+    let current_r = state.r;
+    let log_r = current_r.ln();
+    
+    let normal = Normal::new(0.0, state.step_r).unwrap();
+    let prop_log_r = log_r + normal.sample(rng);
+    let prop_r = prop_log_r.exp();
+    
+    let mu = state.means(data); // mu is the linear predictor psi_i
+    
+    let mut log_lik_diff = 0.0;
+    for i in 0..data.n {
+        let y = data.y[i];
+        let w = weights[i];
+        let psi = mu[i];
+        
+        let ll_curr = ln_gamma(y + current_r) - ln_gamma(current_r) - current_r * (1.0 + psi.exp()).ln();
+        let ll_prop = ln_gamma(y + prop_r) - ln_gamma(prop_r) - prop_r * (1.0 + psi.exp()).ln();
+        
+        log_lik_diff += w * (ll_prop - ll_curr);
+    }
+    
+    let prior_curr = (priors.r_shape - 1.0) * log_r - priors.r_rate * current_r;
+    let prior_prop = (priors.r_shape - 1.0) * prop_log_r - priors.r_rate * prop_r;
+    
+    // Jacobian for log transform is just adding prop_log_r - log_r to acceptance prob
+    let log_accept = log_lik_diff + (prior_prop - prior_curr) + (prop_log_r - log_r);
+    
+    let mut accept_prob = log_accept.exp();
+    if accept_prob > 1.0 { accept_prob = 1.0; }
+    
+    if rng.gen::<f64>() < accept_prob {
+        state.r = prop_r;
+    }
+    
+    if adapting {
+        state.step_r *= (1.0 + 0.1 * (accept_prob - 0.44)).max(1e-4);
+    }
+}
+
 fn sample_linear_coefs_weighted(
     data: &ModelData, priors: &Priors, state: &mut State,
     weights: &[f64], rng: &mut StdRng,
@@ -480,34 +537,97 @@ fn sample_linear_coefs_weighted(
         col.fill(0.0);
     }
 
-    // Sufficient statistics — WEIGHTED: X'WX and X'Wy
-    let mut y_tilde = data.y.clone();
-    if data.n_groups_b0 > 0 {
-        for i in 0..n {
-            let g = data.group_b0[i];
-            if g >= 0 {
-                y_tilde[i] -= state.u_b0[g as usize];
+    // Get current beta vector for PG linear predictor
+    let mut beta_current = DVector::<f64>::zeros(p_total);
+    beta_current.view_mut((0, 0), (p_b0, 1)).copy_from(&state.beta_b0);
+    beta_current.view_mut((p_b0, 0), (p_b1, 1)).copy_from(&state.beta_b1);
+    let mut offset_tmp = p_b0 + p_b1;
+    for k in 0..data.n_breakpoints {
+        let pk = data.x_deltas[k].ncols();
+        beta_current.view_mut((offset_tmp, 0), (pk, 1)).copy_from(&state.beta_deltas[k]);
+        offset_tmp += pk;
+    }
+
+    let mut w_x = x_full.clone();
+    let mut w_y = DVector::<f64>::zeros(n);
+    let mut inv_sig2_eff = 1.0 / sigma2; // For Gaussian
+
+    use crate::model::OutcomeFamily;
+    match data.outcome_family {
+        OutcomeFamily::Gaussian => {
+            // Sufficient statistics — WEIGHTED: X'WX and X'Wy
+            let mut y_tilde = data.y.clone();
+            if data.n_groups_b0 > 0 {
+                for i in 0..n {
+                    let g = if data.group_b0.is_empty() { -1 } else { data.group_b0[i] };
+                    if g >= 0 {
+                        y_tilde[i] -= state.u_b0[g as usize];
+                    }
+                }
+            }
+            for i in 0..n {
+                let mut row = w_x.row_mut(i);
+                for j in 0..p_total {
+                    row[j] *= weights[i];
+                }
+                w_y[i] = y_tilde[i] * weights[i];
+            }
+        }
+        OutcomeFamily::Binomial => {
+            inv_sig2_eff = 1.0;
+            let c_vec = &x_full * &beta_current;
+            for i in 0..n {
+                let mut c_i = c_vec[i];
+                let g = if data.group_b0.is_empty() { -1 } else { data.group_b0[i] };
+                if g >= 0 {
+                    c_i += state.u_b0[g as usize];
+                }
+                let omega = crate::polya_gamma::sample_pg(1.0, c_i, rng);
+                let kappa = data.y[i] - 0.5;
+                let z_i = kappa / omega;
+                let mut y_tilde_i = z_i;
+                if g >= 0 {
+                    y_tilde_i -= state.u_b0[g as usize];
+                }
+                
+                let w_eff = weights[i] * omega;
+                let mut row = w_x.row_mut(i);
+                for j in 0..p_total {
+                    row[j] *= w_eff;
+                }
+                w_y[i] = y_tilde_i * w_eff;
+            }
+        }
+        OutcomeFamily::NegativeBinomial => {
+            inv_sig2_eff = 1.0;
+            let c_vec = &x_full * &beta_current;
+            let r = state.r;
+            for i in 0..n {
+                let mut c_i = c_vec[i];
+                let g = if data.group_b0.is_empty() { -1 } else { data.group_b0[i] };
+                if g >= 0 {
+                    c_i += state.u_b0[g as usize];
+                }
+                let omega = crate::polya_gamma::sample_pg(data.y[i] + r, c_i, rng);
+                let kappa = (data.y[i] - r) / 2.0;
+                let z_i = kappa / omega;
+                let mut y_tilde_i = z_i;
+                if g >= 0 {
+                    y_tilde_i -= state.u_b0[g as usize];
+                }
+                
+                let w_eff = weights[i] * omega;
+                let mut row = w_x.row_mut(i);
+                for j in 0..p_total {
+                    row[j] *= w_eff;
+                }
+                w_y[i] = y_tilde_i * w_eff;
             }
         }
     }
 
-    // Apply weights to design matrix: W^{1/2} X
-    let mut w_x = x_full.clone();
-    for i in 0..n {
-        let mut row = w_x.row_mut(i);
-        for j in 0..p_total {
-            row[j] *= weights[i];
-        }
-    }
-
-    // Apply weights to response: W y_tilde
-    let mut w_y = y_tilde.clone();
-    for i in 0..n {
-        w_y[i] *= weights[i];
-    }
-
     let xt = x_full.transpose();
-    let mut precision = &xt * &w_x / sigma2; // X' W X / σ²
+    let mut precision = &xt * &w_x * inv_sig2_eff; 
     for j in 0..p_total {
         precision[(j, j)] += prec_prior[j];
     }
@@ -515,7 +635,7 @@ fn sample_linear_coefs_weighted(
     let cholesky = precision
         .cholesky()
         .expect("Weighted linear precision matrix not positive definite");
-    let xty = &xt * &w_y / sigma2; // X' W y / σ²
+    let xty = &xt * &w_y * inv_sig2_eff; 
     let rhs = xty + prec_prior.component_mul(&mu_prior);
     let mean = cholesky.solve(&rhs);
 
@@ -599,7 +719,7 @@ fn sample_random_effects_weighted(
     let mut sum_wr = vec![0.0f64; n_groups]; // weighted sum of residuals
     let mut sum_w = vec![0.0f64; n_groups]; // sum of weights
     for i in 0..data.n {
-        let g = data.group_b0[i];
+        let g = if data.group_b0.is_empty() { -1 } else { data.group_b0[i] };
         if g >= 0 {
             sum_wr[g as usize] += weights[i] * resid[i];
             sum_w[g as usize] += weights[i];
@@ -718,7 +838,7 @@ impl LinearCache {
         let mut re_contrib = DVector::<f64>::zeros(data.n);
         if data.n_groups_b0 > 0 {
             for i in 0..data.n {
-                let g = data.group_b0[i];
+                let g = if data.group_b0.is_empty() { -1 } else { data.group_b0[i] };
                 if g >= 0 { re_contrib[i] = state.u_b0[g as usize]; }
             }
         }
@@ -992,7 +1112,7 @@ pub fn run_chain_bjlm(
     let mut prop_state = PropensityState::new(prop_data.p_prop, prop_data.n_subjects, &mut rng);
 
     let n_post = n_iter - n_warmup;
-    let n_outcome_params = outcome_state.n_params(false, false, false);
+    let n_outcome_params = outcome_state.n_params(false, false, false, outcome_data.outcome_family.clone());
     let n_prop_params = prop_data.p_prop;
     let n_total_params = n_outcome_params + n_prop_params + 1; // +1 for mean weight
     let mut draws = DMatrix::<f64>::zeros(n_post, n_total_params);
@@ -1075,11 +1195,18 @@ pub fn run_chain_bjlm(
         sample_linear_coefs_weighted(
             outcome_data, outcome_priors, &mut outcome_state, &weights_obs, &mut rng,
         );
-        sample_sigma_weighted(
-            outcome_data, outcome_priors, &mut outcome_state, &weights_obs, &mut rng,
-        );
+        if matches!(outcome_data.outcome_family, crate::model::OutcomeFamily::Gaussian) {
+            sample_sigma_weighted(
+                outcome_data, outcome_priors, &mut outcome_state, &weights_obs, &mut rng,
+            );
+        }
         if outcome_data.n_groups_b0 > 0 {
             sample_sigma_u_weighted(outcome_priors, &mut outcome_state, &mut rng);
+        }
+        if matches!(outcome_data.outcome_family, crate::model::OutcomeFamily::NegativeBinomial) {
+            sample_r_weighted(
+                outcome_data, outcome_priors, &mut outcome_state, &weights_obs, iter < n_warmup, &mut rng,
+            );
         }
 
         // === HMC adaptation ===
@@ -1102,7 +1229,7 @@ pub fn run_chain_bjlm(
         // === Store draws ===
         if iter >= n_warmup {
             let row = iter - n_warmup;
-            let outcome_draw = outcome_state.to_vec(false, false, false);
+            let outcome_draw = outcome_state.to_vec(false, false, false, outcome_data.outcome_family.clone());
             for (col, &val) in outcome_draw.iter().enumerate() {
                 draws[(row, col)] = val;
             }

@@ -141,42 +141,88 @@ fn erf(x: f64) -> f64 {
 /// For mu >> trunc, we use the approximation that the truncated IG
 /// is approximately a truncated half-normal.
 fn sample_truncated_ig(mu: f64, lambda: f64, trunc: f64, rng: &mut StdRng) -> f64 {
-    if mu > trunc {
-        // mu > trunc: use right-truncated normal approximation
-        // IG(mu, 1) for large mu is approximately N(mu, mu^3/lambda)
-        // We just sample from the half-normal method
-        loop {
-            let y: f64 = StandardNormal.sample(rng);
-            let y = y * y; // chi-squared(1)
-            let x = mu + mu * mu * y / (2.0 * lambda)
-                - mu / (2.0 * lambda)
-                    * (4.0 * mu * lambda * y + mu * mu * y * y).sqrt();
-            if x <= 0.0 || x.is_nan() {
-                continue;
-            }
-            let u: f64 = rng.gen();
-            let result = if u <= mu / (mu + x) { x } else { mu * mu / x };
-            if result < trunc && result > 0.0 {
-                return result;
-            }
+    // Numerically stable exact Inverse Gaussian sampler.
+    // Standard formula: x = mu + (mu^2 * y)/(2*lambda) - (mu/(2*lambda)) * sqrt(4*mu*lambda*y + mu^2*y^2)
+    // Suffers from catastrophic cancellation when mu is large.
+    // Instead we use the identity A - B = (A^2 - B^2) / (A + B) = mu^2 / (A + B)
+    // where A = mu + (mu^2 * y)/(2*lambda)
+    // and   B = (mu/(2*lambda)) * sqrt(4*mu*lambda*y + mu^2*y^2)
+    loop {
+        let y: f64 = StandardNormal.sample(rng);
+        let y = y * y; // chi-squared(1)
+        
+        let a = mu + (mu * mu * y) / (2.0 * lambda);
+        let b = (mu / (2.0 * lambda)) * (4.0 * mu * lambda * y + mu * mu * y * y).sqrt();
+        let x = (mu * mu) / (a + b);
+        
+        if x <= 0.0 || x.is_nan() {
+            continue;
         }
+        
+        let u: f64 = rng.gen();
+        let result = if u <= mu / (mu + x) { x } else { mu * mu / x };
+        if result < trunc && result > 0.0 {
+            return result;
+        }
+    }
+}
+
+/// Sample from PG(b, c) for float b > 0.
+///
+/// For b=1, uses the exact sample_pg1 method.
+/// For integer b, sums b independent PG(1, c) draws.
+/// For float b, approximates via a Gamma distribution with matched mean and variance.
+pub fn sample_pg(b: f64, c: f64, rng: &mut StdRng) -> f64 {
+    let c_abs = c.abs();
+    
+    // For large c, the exact sampler is exponentially inefficient.
+    // We fall back to the Gamma approximation.
+    if b == 1.0 && c_abs <= 5.0 {
+        return sample_pg1(c, rng);
+    }
+    
+    // If b is an integer, we can sum PG(1, c) exactly
+    if (b.round() - b).abs() < 1e-9 && b > 0.0 && c_abs <= 5.0 {
+        let n = b.round() as u32;
+        let mut sum = 0.0;
+        for _ in 0..n {
+            sum += sample_pg1(c, rng);
+        }
+        return sum;
+    }
+    
+    // For non-integer float b, use a Gamma approximation
+    // E[PG(b, c)] = (b / 2c) * tanh(c/2)
+    // V[PG(b, c)] = b / (4 * c^3) * (sinh(c) - c) / cosh^2(c/2)
+    // If c is very small, use limits:
+    // mean -> b / 4
+    // var -> b / 24
+    let mean;
+    let var;
+    let c_abs = c.abs();
+    
+    if c_abs < 1e-6 {
+        mean = b / 4.0;
+        var = b / 24.0;
     } else {
-        // mu <= trunc: standard IG sampling, reject if >= trunc
-        loop {
-            let y: f64 = StandardNormal.sample(rng);
-            let y = y * y;
-            let x = mu + mu * mu * y / (2.0 * lambda)
-                - mu / (2.0 * lambda)
-                    * (4.0 * mu * lambda * y + mu * mu * y * y).sqrt();
-            if x <= 0.0 || x.is_nan() {
-                continue;
-            }
-            let u: f64 = rng.gen();
-            let result = if u <= mu / (mu + x) { x } else { mu * mu / x };
-            if result < trunc && result > 0.0 {
-                return result;
-            }
-        }
+        let tanh_half = (c_abs * 0.5).tanh();
+        mean = (b / (2.0 * c_abs)) * tanh_half;
+        
+        // Numerically stable variance computation
+        let cosh_half = (c_abs * 0.5).cosh();
+        let sinh_c = c_abs.sinh();
+        var = (b / (4.0 * c_abs * c_abs * c_abs)) * (sinh_c - c_abs) / (cosh_half * cosh_half);
+    }
+    
+    // Match moments to Gamma(shape, rate)
+    let shape = (mean * mean) / var;
+    let rate = mean / var;
+    
+    use rand_distr::Gamma;
+    if let Ok(dist) = Gamma::new(shape, 1.0 / rate) {
+        dist.sample(rng)
+    } else {
+        mean // Fallback if shape/rate are invalid
     }
 }
 

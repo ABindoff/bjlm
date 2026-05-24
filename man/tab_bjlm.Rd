@@ -9,7 +9,8 @@ tab_bjlm(
   labels = NULL,
   digits = 2,
   fmt = c("mean [CI]", "mean (SD)"),
-  show_rhat = FALSE
+  show_rhat = FALSE,
+  exponentiate = NULL
 )
 }
 \arguments{

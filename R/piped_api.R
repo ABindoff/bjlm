@@ -73,9 +73,32 @@ outcome <- function(
 ) {
   if (!inherits(model, "bjlm_model")) stop("First argument must be a bjlm_model object.")
 
-  if (is.character(family)) family <- get(family, mode = "function", envir = parent.frame())()
-  if (!inherits(family, "family") || family$family != "gaussian" || family$link != "identity") {
-    stop("Currently only gaussian('identity') is supported for the outcome model.")
+  if (is.character(family)) {
+    family <- tolower(family)
+    if (family %in% c("negbin", "nbinom", "negative_binomial", "negative binomial")) {
+      family <- list(family = "negative_binomial", link = "log")
+      class(family) <- "family"
+    } else if (family %in% c("binomial", "logistic", "logit")) {
+      family <- binomial("logit")
+    } else if (family %in% c("poisson", "cloglog", "tobit", "probit")) {
+      family <- list(family = family, link = "unknown")
+      class(family) <- "family"
+    } else {
+      family <- get(family, mode = "function", envir = parent.frame())()
+    }
+  }
+  
+  if (!inherits(family, "family")) {
+    stop("family must be a family object or a valid string.")
+  }
+
+  supported_families <- c("gaussian", "binomial", "negative_binomial")
+  if (!family$family %in% supported_families) {
+    if (family$family %in% c("poisson", "cloglog", "tobit", "probit")) {
+      stop(sprintf("Family '%s' is planned but not yet implemented.", family$family))
+    }
+    stop(sprintf("Family '%s' is not supported. Supported families: %s", 
+                 family$family, paste(supported_families, collapse = ", ")))
   }
 
   # Detect zero-breakpoint speed shortcut:
@@ -403,10 +426,12 @@ fit.bjlm_compiled_model <- function(object, priors = NULL, ...) {
     },
     latent_gps = object$model$latent_gps,
     priors = priors,
+    outcome_family = object$model$outcome$family$family %||% "gaussian",
     ...
   )
 
   # Attach compilation metadata for reproducibility and flowchart generation
+  fit_obj$model <- object$model
   fit_obj$subject_var <- object$subject_var
   fit_obj$merged_cols <- object$merged_cols
   fit_obj$shared_cols <- object$shared_cols
@@ -673,13 +698,46 @@ print.bjlm_flowchart <- function(x, ...) {
 }
 
 #' @export
-fitted.bjlm_fit <- function(object, newdata = NULL, summary = TRUE, ...) {
-  .build_predictions(object, newdata, summary, ...)
+fitted.bjlm_fit <- function(object, newdata = NULL, type = c("link", "response", "rr"), summary = TRUE, link_override = NULL, truncation = NULL, ...) {
+  type <- match.arg(type)
+  if (type == "rr") {
+    fam <- object$model$outcome$family$family %||% "gaussian"
+    if (fam != "binomial") {
+      stop("type='rr' is only applicable to binomial outcome models.")
+    }
+    trt_var <- all.vars(object$model$propensity$formula)[1]
+    if (is.na(trt_var) || is.null(trt_var)) {
+      stop("Could not identify treatment variable from propensity formula.")
+    }
+    
+    data1 <- if (is.null(newdata)) object$data else newdata
+    data1[[trt_var]] <- 1
+    p1_draws <- .build_predictions(object, newdata = data1, type = "response", summary = FALSE)
+    
+    data0 <- if (is.null(newdata)) object$data else newdata
+    data0[[trt_var]] <- 0
+    p0_draws <- .build_predictions(object, newdata = data0, type = "response", summary = FALSE)
+    
+    p1_marg <- rowMeans(p1_draws)
+    p0_marg <- rowMeans(p0_draws)
+    rr_draws <- as.matrix(p1_marg / p0_marg)
+    colnames(rr_draws) <- "RR"
+    
+    if (!summary) return(rr_draws)
+    return(data.frame(
+      .observation = 1,
+      fitted_mean = mean(rr_draws),
+      fitted_Q2.5 = stats::quantile(rr_draws, 0.025),
+      fitted_Q97.5 = stats::quantile(rr_draws, 0.975)
+    ))
+  }
+  .build_predictions(object, newdata, type, summary, ...)
 }
 
 #' @export
-fitted.smoothbp_fit <- function(object, newdata = NULL, summary = TRUE, ...) {
-  .build_predictions(object, newdata, summary, ...)
+fitted.smoothbp_fit <- function(object, newdata = NULL, type = c("link", "response"), summary = TRUE, ...) {
+  type <- match.arg(type)
+  .build_predictions(object, newdata, type, summary, ...)
 }
 
 .build_predictions_dm <- function(object, data) {
@@ -719,7 +777,7 @@ fitted.smoothbp_fit <- function(object, newdata = NULL, summary = TRUE, ...) {
   )
 }
 
-.build_predictions <- function(object, newdata = NULL, summary = TRUE, ...) {
+.build_predictions <- function(object, newdata = NULL, type = "link", summary = TRUE, ...) {
   if (is.null(newdata)) {
     data <- object$data
   } else {
@@ -789,6 +847,17 @@ fitted.smoothbp_fit <- function(object, newdata = NULL, summary = TRUE, ...) {
     fitted_draws[s, ] <- mu_i
   }
 
+  fam <- object$model$outcome$family$family %||% "gaussian"
+  if (type == "response") {
+    if (fam == "binomial") {
+      fitted_draws <- 1 / (1 + exp(-fitted_draws))
+    } else if (fam == "negative_binomial") {
+      fitted_draws <- exp(fitted_draws)
+    }
+  } else if (type == "rr") {
+    stop("type='rr' should be handled by fitted.bjlm_fit wrapper.")
+  }
+
   if (!summary) return(fitted_draws)
   data.frame(
     .observation = seq_len(n),
@@ -804,11 +873,29 @@ log_lik.bjlm_fit <- function(object, ...) {
   y_name <- outcome_vars[1]
   y_obs <- as.double(object$data[[y_name]])
   
-  fit_draws <- fitted(object, summary = FALSE)
-  sigma_draws <- as.numeric(posterior::as_draws_matrix(object$draws)[, "sigma"])
-  ll_matrix <- matrix(0, nrow = nrow(fit_draws), ncol = length(y_obs))
-  for (i in seq_along(y_obs)) {
-    ll_matrix[, i] <- stats::dnorm(y_obs[i], mean = fit_draws[, i], sd = sigma_draws, log = TRUE)
+  fit_draws <- fitted(object, summary = FALSE, type = "link")
+  fam <- object$model$outcome$family$family %||% "gaussian"
+  
+  n_draws <- nrow(fit_draws)
+  n_obs <- length(y_obs)
+  ll_matrix <- matrix(0, nrow = n_draws, ncol = n_obs)
+  
+  if (fam == "gaussian") {
+    sigma_draws <- as.numeric(posterior::as_draws_matrix(object$draws)[, "sigma"])
+    for (i in seq_along(y_obs)) {
+      ll_matrix[, i] <- stats::dnorm(y_obs[i], mean = fit_draws[, i], sd = sigma_draws, log = TRUE)
+    }
+  } else if (fam == "binomial") {
+    p_draws <- 1 / (1 + exp(-fit_draws))
+    for (i in seq_along(y_obs)) {
+      ll_matrix[, i] <- stats::dbinom(y_obs[i], size = 1, prob = p_draws[, i], log = TRUE)
+    }
+  } else if (fam == "negative_binomial") {
+    mu_draws <- exp(fit_draws)
+    r_draws <- as.numeric(posterior::as_draws_matrix(object$draws)[, "r"])
+    for (i in seq_along(y_obs)) {
+      ll_matrix[, i] <- stats::dnbinom(y_obs[i], size = r_draws, mu = mu_draws[, i], log = TRUE)
+    }
   }
   ll_matrix
 }

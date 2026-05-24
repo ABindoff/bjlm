@@ -18,6 +18,7 @@ bjlm(
   data,
   priors = NULL,
   outcome_priors = NULL,
+  outcome_family = "gaussian",
   propensity_prior_sd = 2.5,
   chains = 4L,
   iter = 5000L,

@@ -34,7 +34,8 @@ tab_bjlm <- function(...,
                      labels    = NULL,
                      digits    = 2,
                      fmt       = c("mean [CI]", "mean (SD)"),
-                     show_rhat = FALSE) {
+                     show_rhat = FALSE,
+                     exponentiate = NULL) {
 
   fmt    <- match.arg(fmt)
   models <- list(...)
@@ -79,7 +80,8 @@ tab_bjlm <- function(...,
     stop("Package 'posterior' is required for tab_bjlm. Install it with install.packages('posterior').")
   }
 
-  cols <- lapply(models, function(fit) {
+  cols <- lapply(seq_along(models), function(j) {
+    fit <- models[[j]]
     draws <- fit$draws
     param_names <- c(fit$outcome_names, fit$propensity_names)
     
@@ -89,6 +91,24 @@ tab_bjlm <- function(...,
     if (length(param_names) == 0) return(character(0))
     
     sub <- posterior::subset_draws(draws, variable = param_names)
+    
+    # Exponentiate regression coefficients if requested or implied by family
+    fam <- fit$model$outcome$family$family %||% "gaussian"
+    do_exp <- if (is.null(exponentiate)) (fam %in% c("binomial", "negative_binomial")) else isTRUE(exponentiate)
+    
+    if (do_exp) {
+      if (fam == "binomial") labels[j] <<- paste0(labels[j], "\n(OR)")
+      else if (fam == "negative_binomial") labels[j] <<- paste0(labels[j], "\n(IRR)")
+      else labels[j] <<- paste0(labels[j], "\n(Exp)")
+      # Convert to draws_matrix to allow matrix assignment
+      sub <- posterior::as_draws_matrix(sub)
+      for (v in posterior::variables(sub)) {
+        if (grepl("^(b0_|b1_|delta)", v)) {
+          sub[, v] <- exp(sub[, v])
+        }
+      }
+    }
+
     s <- posterior::summarise_draws(sub,
       mean = mean,
       sd = stats::sd,
@@ -159,6 +179,16 @@ tab_bjlm <- function(...,
   }
 
   subtitle_text <- if (fmt == "mean [CI]") "Mean [95% credible interval]" else "Mean (posterior SD)"
+  
+  # Determine if any model was exponentiated to adjust subtitle/title
+  any_exp <- any(vapply(models, function(m) {
+    fam <- m$model$outcome$family$family %||% "gaussian"
+    if (is.null(exponentiate)) (fam %in% c("binomial", "negative_binomial")) else isTRUE(exponentiate)
+  }, logical(1)))
+  
+  if (any_exp) {
+    subtitle_text <- paste(subtitle_text, "(Coefficients exponentiated)")
+  }
 
   tbl_out |>
     gt::gt(groupname_col = "block_label", rowname_col = "term") |>

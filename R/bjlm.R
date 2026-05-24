@@ -51,6 +51,7 @@ bjlm <- function(
     data,
     priors = NULL,
     outcome_priors = NULL,
+    outcome_family = "gaussian",
     propensity_prior_sd = 2.5,
     chains = 4L,
     iter = 5000L,
@@ -173,7 +174,11 @@ bjlm <- function(
       paste0(gp$name, c("_alpha", "_rho", "_sigma_x"))
     }))
   }
-  outcome_names <- c(b0_names, re_names, b1_names, delta_names, om_names, rho_names, "sigma", "sigma_u", gp_hyper_names)
+  outcome_names <- c(b0_names, re_names, b1_names, delta_names, om_names, rho_names, "sigma", "sigma_u")
+  if (outcome_family == "negative_binomial") {
+    outcome_names <- c(outcome_names, "r")
+  }
+  outcome_names <- c(outcome_names, gp_hyper_names)
 
   # ---- Process Latent GPs ----
   gp_list <- list()
@@ -252,6 +257,8 @@ bjlm <- function(
     sigma_scale = outcome_priors$sigma$scale,
     sigma_u_shape = outcome_priors$sigma_u$shape,
     sigma_u_scale = outcome_priors$sigma_u$scale,
+    prior_r_shape = outcome_priors$r$shape,
+    prior_r_rate = outcome_priors$r$scale,
     x_prop = as.double(x_prop), p_prop = as.integer(p_prop),
     latent_gps = gp_list,
     treatment = as.double(treatment),
@@ -267,7 +274,8 @@ bjlm <- function(
     warmup = as.integer(warmup),
     seed = as.integer(seed),
     verbose = verbose,
-    n_cores = as.integer(cores)
+    n_cores = as.integer(cores),
+    outcome_family = outcome_family
   )
 
   # ---- Post-process draws ----

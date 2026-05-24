@@ -2,7 +2,7 @@ use nalgebra::{DMatrix, DVector};
 use rand::rngs::StdRng;
 use rand_distr::{Normal, Distribution};
 
-use crate::polya_gamma::sample_pg1;
+use crate::polya_gamma::sample_pg;
 
 // ---------------------------------------------------------------------------
 // Pólya-Gamma augmented Gibbs sampler for logistic regression
@@ -113,7 +113,7 @@ pub fn sample_propensity(
         for j in 0..p {
             psi += get_x(i, j) * state.alpha[j];
         }
-        state.omega_pg[i] = sample_pg1(psi, rng);
+        state.omega_pg[i] = sample_pg(1.0, psi, rng);
     }
 
     // Step 2: Build weighted normal equations

@@ -699,7 +699,7 @@ pub fn run_chain_re(
     let mut rng = StdRng::seed_from_u64(seed);
     let mut state = init_state_re(data, priors, &mut rng);
     let n_post = n_iter - n_warmup;
-    let n_params = state.n_params(false, false, true);
+    let n_params = state.n_params(false, false, true, data.outcome_family.clone());
     let mut draws = DMatrix::<f64>::zeros(n_post, n_params);
 
     let mut adapt_om: Vec<HmcAdapt> = (0..data.n_breakpoints).map(|k| HmcAdapt::new(data.x_om[k].ncols(), step_om_init, target_accept, 5, 15)).collect();
@@ -744,7 +744,7 @@ pub fn run_chain_re(
 
         if iter >= n_warmup {
             let row = iter - n_warmup;
-            let draw = state.to_vec(false, false, true);
+            let draw = state.to_vec(false, false, true, data.outcome_family.clone());
             for (col, &val) in draw.iter().enumerate() { draws[(row, col)] = val; }
         }
     }
@@ -762,7 +762,7 @@ pub fn run_chain_re_ss(
     state.pi = ss.pi_init;
     let n_post = n_iter - n_warmup;
     let learn_pi = ss.beta_a > 0.0;
-    let n_params = state.n_params(true, learn_pi, true);
+    let n_params = state.n_params(true, learn_pi, true, data.outcome_family.clone());
     let mut draws = DMatrix::<f64>::zeros(n_post, n_params);
 
     let mut adapt_om: Vec<HmcAdapt> = (0..data.n_breakpoints).map(|k| HmcAdapt::new(data.x_om[k].ncols(), step_om_init, target_accept, 5, 15)).collect();
@@ -809,7 +809,7 @@ pub fn run_chain_re_ss(
 
         if iter >= n_warmup {
             let row = iter - n_warmup;
-            let draw = state.to_vec(true, learn_pi, true);
+            let draw = state.to_vec(true, learn_pi, true, data.outcome_family.clone());
             for (col, &val) in draw.iter().enumerate() { draws[(row, col)] = val; }
         }
     }
@@ -874,5 +874,6 @@ pub fn init_state_re(data: &ModelData, priors: &Priors, rng: &mut StdRng) -> Sta
         gamma_deltas, pi: 0.5,
         sigma_re_om: vec![1.0; data.n_breakpoints],
         gp_states,
+        r: 1.0, step_r: 0.1,
     }
 }

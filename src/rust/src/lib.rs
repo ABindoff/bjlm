@@ -79,7 +79,7 @@ fn run_mcmc(
     let n = y.len();
     let n_bp = p_deltas.len();
 
-    let data = ModelData {
+    let data = ModelData { outcome_family: crate::model::OutcomeFamily::Gaussian,
         y: DVector::from_column_slice(y),
         tau: DVector::from_column_slice(tau),
         x_b0: flat_to_dmatrix(x_b0, n, p_b0 as usize),
@@ -95,7 +95,7 @@ fn run_mcmc(
         latent_gps: Vec::new(),
     };
 
-    let priors = Priors {
+    let priors = Priors { r_shape: 0.0, r_rate: 0.0,
         b0_mean: prior_mean_b0.to_vec(),
         b0_sd: prior_sd_b0.to_vec(),
         b0_lb: prior_lb_b0.to_vec(),
@@ -212,7 +212,7 @@ fn run_mcmc_ss(
     let n = y.len();
     let n_bp = p_deltas.len();
 
-    let data = ModelData {
+    let data = ModelData { outcome_family: crate::model::OutcomeFamily::Gaussian,
         y: DVector::from_column_slice(y),
         tau: DVector::from_column_slice(tau),
         x_b0: flat_to_dmatrix(x_b0, n, p_b0 as usize),
@@ -228,7 +228,7 @@ fn run_mcmc_ss(
         latent_gps: Vec::new(),
     };
 
-    let priors = Priors {
+    let priors = Priors { r_shape: 0.0, r_rate: 0.0,
         b0_mean: prior_mean_b0.to_vec(),
         b0_sd: prior_sd_b0.to_vec(),
         b0_lb: prior_lb_b0.to_vec(),
@@ -349,7 +349,7 @@ fn run_mcmc_re(
     let n = y.len();
     let n_bp = p_deltas.len();
 
-    let data = ModelData {
+    let data = ModelData { outcome_family: crate::model::OutcomeFamily::Gaussian,
         y: DVector::from_column_slice(y),
         tau: DVector::from_column_slice(tau),
         x_b0: flat_to_dmatrix(x_b0, n, p_b0 as usize),
@@ -365,7 +365,7 @@ fn run_mcmc_re(
         latent_gps: Vec::new(),
     };
 
-    let priors = Priors {
+    let priors = Priors { r_shape: 0.0, r_rate: 0.0,
         b0_mean: prior_mean_b0.to_vec(),
         b0_sd: prior_sd_b0.to_vec(),
         b0_lb: prior_lb_b0.to_vec(),
@@ -485,7 +485,7 @@ fn run_mcmc_re_ss(
     let n = y.len();
     let n_bp = p_deltas.len();
 
-    let data = ModelData {
+    let data = ModelData { outcome_family: crate::model::OutcomeFamily::Gaussian,
         y: DVector::from_column_slice(y),
         tau: DVector::from_column_slice(tau),
         x_b0: flat_to_dmatrix(x_b0, n, p_b0 as usize),
@@ -501,7 +501,7 @@ fn run_mcmc_re_ss(
         latent_gps: Vec::new(),
     };
 
-    let priors = Priors {
+    let priors = Priors { r_shape: 0.0, r_rate: 0.0,
         b0_mean: prior_mean_b0.to_vec(),
         b0_sd: prior_sd_b0.to_vec(),
         b0_lb: prior_lb_b0.to_vec(),
@@ -598,6 +598,8 @@ fn run_bjlm(
     sigma_scale: f64,
     sigma_u_shape: f64,
     sigma_u_scale: f64,
+    prior_r_shape: f64,
+    prior_r_rate: f64,
     // Propensity data
     x_prop: &[f64], p_prop: i32,
     latent_gps: List,
@@ -618,6 +620,7 @@ fn run_bjlm(
     seed: i32,
     verbose: bool,
     n_cores: i32,
+    outcome_family: &str,
 ) -> List {
     let mut p_deltas = p_deltas;
     let mut p_om = p_om;
@@ -634,7 +637,14 @@ fn run_bjlm(
     let n_subj = n_subjects as usize;
     let p_pr = p_prop as usize;
 
+    let outcome_family_enum = match outcome_family {
+        "binomial" => crate::model::OutcomeFamily::Binomial,
+        "negative_binomial" => crate::model::OutcomeFamily::NegativeBinomial,
+        _ => crate::model::OutcomeFamily::Gaussian,
+    };
+
     let outcome_data = ModelData {
+        outcome_family: outcome_family_enum,
         y: DVector::from_column_slice(y),
         tau: DVector::from_column_slice(tau),
         x_b0: flat_to_dmatrix(x_b0, n, p_b0 as usize),
@@ -702,6 +712,8 @@ fn run_bjlm(
         sigma_u_scale,
         sigma_re_om_shape: 1.0,
         sigma_re_om_scale: 1.0,
+        r_shape: prior_r_shape,
+        r_rate: prior_r_rate,
         p_b0: p_b0 as usize,
         p_b1: p_b1 as usize,
         p_deltas: p_deltas.iter().map(|&p| p as usize).collect(),

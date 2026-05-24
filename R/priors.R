@@ -94,6 +94,7 @@ print.smoothbp_prior <- function(x, ...) {
 #' @param sigma   `prior_invgamma()` for residual SD.
 #' @param sigma_u `prior_invgamma()` for random-effect SD.
 #' @param sigma_re_om `prior_invgamma()` for random-effect SD on omega.
+#' @param r `prior_gamma()` for Negative Binomial overdispersion parameter.
 #'
 #' @return A `smoothbp_priors` list.
 #' @export
@@ -105,11 +106,18 @@ smoothbp_priors <- function(
     rho     = prior_normal(3, 2, lb = 0),
     sigma   = prior_invgamma(1, 1),
     sigma_u = prior_invgamma(1, 1),
-    sigma_re_om = prior_invgamma(1, 1)
+    sigma_re_om = prior_invgamma(1, 1),
+    r       = prior_gamma(1, 1)
 ) {
+  stopifnot(
+    inherits(sigma, "smoothbp_prior") && sigma$family == "invgamma",
+    inherits(sigma_u, "smoothbp_prior") && sigma_u$family == "invgamma",
+    inherits(sigma_re_om, "smoothbp_prior") && sigma_re_om$family == "invgamma",
+    inherits(r, "smoothbp_prior") && r$family == "gamma"
+  )
   structure(
     list(b0 = b0, b1 = b1, deltas = deltas, omega = omega, rho = rho,
-         sigma = sigma, sigma_u = sigma_u, sigma_re_om = sigma_re_om),
+         sigma = sigma, sigma_u = sigma_u, sigma_re_om = sigma_re_om, r = r),
     class = "smoothbp_priors"
   )
 }
@@ -280,11 +288,12 @@ bjlm_outcome_priors <- function(
     rho     = prior_normal(3, 2, lb = 0),
     sigma   = prior_invgamma(1, 1),
     sigma_u = prior_invgamma(1, 1),
-    sigma_re_om = prior_invgamma(1, 1)
+    sigma_re_om = prior_invgamma(1, 1),
+    r       = prior_gamma(1, 1)
 ) {
   smoothbp_priors(
     b0 = b0, b1 = b1, deltas = deltas, omega = omega, rho = rho,
-    sigma = sigma, sigma_u = sigma_u, sigma_re_om = sigma_re_om
+    sigma = sigma, sigma_u = sigma_u, sigma_re_om = sigma_re_om, r = r
   )
 }
 
