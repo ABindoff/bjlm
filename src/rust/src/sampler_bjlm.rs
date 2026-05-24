@@ -778,6 +778,24 @@ fn sample_random_effects_weighted(
         let post_mean = (sum_wr[j] / sigma2) / prec;
         state.u_b0[j] = post_mean + post_sd * normal.sample(rng);
     }
+    
+    // Sweep Centering for Identifiability
+    if data.x_b0.ncols() > 0 {
+        let mut has_intercept = true;
+        for i in 0..data.n {
+            if (data.x_b0[(i, 0)] - 1.0).abs() > 1e-6 {
+                has_intercept = false;
+                break;
+            }
+        }
+        if has_intercept {
+            let mean_u = state.u_b0.iter().sum::<f64>() / n_groups as f64;
+            for j in 0..n_groups {
+                state.u_b0[j] -= mean_u;
+            }
+            state.beta_b0[0] += mean_u;
+        }
+    }
 }
 
 // ========================== Weighted HMC ==========================

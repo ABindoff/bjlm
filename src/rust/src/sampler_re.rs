@@ -465,11 +465,31 @@ fn sample_random_effects(data: &ModelData, _priors: &Priors, state: &mut State, 
 
     let mut sum_r = vec![0.0f64; n_groups];
     let mut count = vec![0.0f64; n_groups];
+    use crate::model::OutcomeFamily;
     for i in 0..data.n {
         let g = data.group_b0[i];
         if g >= 0 {
-            sum_r[g as usize] += resid[i];
-            count[g as usize] += 1.0;
+            match data.outcome_family {
+                OutcomeFamily::Gaussian => {
+                    sum_r[g as usize] += resid[i];
+                    count[g as usize] += 1.0;
+                }
+                OutcomeFamily::Binomial => {
+                    let c_i = mu_fixed[i] + state.u_b0[g as usize]; // Need old u_b0 for PG
+                    let omega = crate::polya_gamma::sample_pg(1.0, c_i, rng);
+                    let kappa = data.y[i] - 0.5;
+                    sum_r[g as usize] += (kappa - omega * mu_fixed[i]) * sigma2;
+                    count[g as usize] += omega * sigma2;
+                }
+                OutcomeFamily::NegativeBinomial => {
+                    let c_i = mu_fixed[i] + state.u_b0[g as usize];
+                    let r_param = state.r;
+                    let omega = crate::polya_gamma::sample_pg(data.y[i] + r_param, c_i, rng);
+                    let kappa = (data.y[i] - r_param) / 2.0;
+                    sum_r[g as usize] += (kappa - omega * mu_fixed[i]) * sigma2;
+                    count[g as usize] += omega * sigma2;
+                }
+            }
         }
     }
 
@@ -479,6 +499,24 @@ fn sample_random_effects(data: &ModelData, _priors: &Priors, state: &mut State, 
         let post_sd = (1.0 / prec).sqrt();
         let post_mean = (sum_r[j] / sigma2) / prec;
         state.u_b0[j] = post_mean + post_sd * normal.sample(rng);
+    }
+    
+    // Sweep Centering for Identifiability
+    if data.x_b0.ncols() > 0 {
+        let mut has_intercept = true;
+        for i in 0..data.n {
+            if (data.x_b0[(i, 0)] - 1.0).abs() > 1e-6 {
+                has_intercept = false;
+                break;
+            }
+        }
+        if has_intercept {
+            let mean_u = state.u_b0.iter().sum::<f64>() / n_groups as f64;
+            for j in 0..n_groups {
+                state.u_b0[j] -= mean_u;
+            }
+            state.beta_b0[0] += mean_u;
+        }
     }
 }
 
