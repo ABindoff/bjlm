@@ -156,11 +156,33 @@ fn sample_gp_state(
                 if eff_beta != 0.0 {
                     // mu_without = mu_full - eff_beta * current_gp_x
                     let mu_without = mu_base[gidx] - eff_beta * outcome_state.gp_states[gp_idx].x[s][tidx];
-                    let r = outcome_data.y[gidx] - mu_without;
                     
-                    let p_add = w * inv_sig2_y * eff_beta * eff_beta;
-                    prec[(tidx, tidx)] += p_add;
-                    rhs[tidx] += w * inv_sig2_y * eff_beta * r;
+                    use crate::model::OutcomeFamily;
+                    match outcome_data.outcome_family {
+                        OutcomeFamily::Gaussian => {
+                            let r = outcome_data.y[gidx] - mu_without;
+                            let p_add = w * inv_sig2_y * eff_beta * eff_beta;
+                            prec[(tidx, tidx)] += p_add;
+                            rhs[tidx] += w * inv_sig2_y * eff_beta * r;
+                        }
+                        OutcomeFamily::Binomial => {
+                            let c_i = mu_base[gidx];
+                            let omega = crate::polya_gamma::sample_pg(1.0, c_i, rng);
+                            let kappa = outcome_data.y[gidx] - 0.5;
+                            let p_add = w * omega * eff_beta * eff_beta;
+                            prec[(tidx, tidx)] += p_add;
+                            rhs[tidx] += w * eff_beta * (kappa - omega * mu_without);
+                        }
+                        OutcomeFamily::NegativeBinomial => {
+                            let c_i = mu_base[gidx];
+                            let r_param = outcome_state.r;
+                            let omega = crate::polya_gamma::sample_pg(outcome_data.y[gidx] + r_param, c_i, rng);
+                            let kappa = (outcome_data.y[gidx] - r_param) / 2.0;
+                            let p_add = w * omega * eff_beta * eff_beta;
+                            prec[(tidx, tidx)] += p_add;
+                            rhs[tidx] += w * eff_beta * (kappa - omega * mu_without);
+                        }
+                    }
                 }
             }
             
@@ -720,11 +742,32 @@ fn sample_random_effects_weighted(
 
     let mut sum_wr = vec![0.0f64; n_groups]; // weighted sum of residuals
     let mut sum_w = vec![0.0f64; n_groups]; // sum of weights
+    
+    use crate::model::OutcomeFamily;
     for i in 0..data.n {
         let g = if data.group_b0.is_empty() { -1 } else { data.group_b0[i] };
         if g >= 0 {
-            sum_wr[g as usize] += weights[i] * resid[i];
-            sum_w[g as usize] += weights[i];
+            match data.outcome_family {
+                OutcomeFamily::Gaussian => {
+                    sum_wr[g as usize] += weights[i] * resid[i];
+                    sum_w[g as usize] += weights[i];
+                }
+                OutcomeFamily::Binomial => {
+                    let c_i = mu_fixed[i] + state.u_b0[g as usize]; // Need old u_b0 for PG
+                    let omega = crate::polya_gamma::sample_pg(1.0, c_i, rng);
+                    let kappa = data.y[i] - 0.5;
+                    sum_wr[g as usize] += weights[i] * (kappa - omega * mu_fixed[i]);
+                    sum_w[g as usize] += weights[i] * omega;
+                }
+                OutcomeFamily::NegativeBinomial => {
+                    let c_i = mu_fixed[i] + state.u_b0[g as usize];
+                    let r_param = state.r;
+                    let omega = crate::polya_gamma::sample_pg(data.y[i] + r_param, c_i, rng);
+                    let kappa = (data.y[i] - r_param) / 2.0;
+                    sum_wr[g as usize] += weights[i] * (kappa - omega * mu_fixed[i]);
+                    sum_w[g as usize] += weights[i] * omega;
+                }
+            }
         }
     }
 
