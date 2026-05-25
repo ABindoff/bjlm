@@ -140,7 +140,7 @@ We observe the HMC trace plots to verify both chains successfully converged to i
 ```{r sim1-traceplots, fig.width=8, fig.height=6}
 color_scheme_set("mix-blue-red")
 # brms Traceplot
-mcmc_trace(as.array(brms_fit), pars = c("b_b0_Intercept", "b_b0_Trt", "b_b0_X_obs", "shape")) + 
+mcmc_trace(brms_fit, pars = c("b_b0_Intercept", "b_b0_Trt", "b_b0_X_obs", "shape")) + 
   ggtitle("brms Trace Plots (Negative Binomial)")
 
 # bjlm Traceplot
@@ -295,7 +295,7 @@ GP parameters, particularly the lengthscale `rho`, are notorious for creating fu
 
 ```{r sim2-traceplots, fig.width=8, fig.height=6}
 # stan Traceplot
-mcmc_trace(as.array(stan_fit), pars = c("rho", "sigma_y_sq")) + 
+mcmc_trace(stan_fit, pars = c("rho", "sigma_y_sq")) + 
   ggtitle("rstan Trace Plots (Note any divergent transitions)")
 
 # bjlm Traceplot
