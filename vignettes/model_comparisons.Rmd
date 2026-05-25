@@ -336,10 +336,24 @@ Slight discrepancies in Wasserstein distances for GP hyperparameters (`rho`, `si
 ### LOO-IC Comparison
 
 ```{r sim2-loo}
-# Extract log-likelihood manually from stan_fit and use loo
-log_lik_stan <- extract_log_lik(stan_fit, merge_chains = FALSE)
-loo_stan <- loo(log_lik_stan)
+# Extract draws from stan_fit
+draws_b0_int <- as.vector(as.matrix(stan_fit, pars = "b0_int"))
+draws_b0_x <- as.vector(as.matrix(stan_fit, pars = "b0_x"))
+draws_sigma_y <- sqrt(as.vector(as.matrix(stan_fit, pars = "sigma_y_sq")))
+draws_X_true <- as.matrix(stan_fit, pars = "X_true")
 
+# Reconstruct log-likelihood matrix (S x N) in R manually
+# to avoid re-running the 4-hour Stan model to add a generated quantities block.
+S <- length(draws_b0_int)
+N <- nrow(dat_gp)
+log_lik_stan <- matrix(NA_real_, nrow = S, ncol = N)
+for (n in 1:N) {
+  mu <- draws_b0_int + draws_b0_x * draws_X_true[, n]
+  log_lik_stan[, n] <- dnorm(dat_gp$Y[n], mean = mu, sd = draws_sigma_y, log = TRUE)
+}
+colnames(log_lik_stan) <- paste0("y[", 1:N, "]")
+
+loo_stan <- loo(log_lik_stan)
 loo_bjlm_gp <- loo(bjlm_fit_gp)
 
 loo_compare(loo_stan, loo_bjlm_gp)
