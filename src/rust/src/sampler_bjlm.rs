@@ -301,7 +301,7 @@ fn sample_gp_hyperparameters(
             alpha = alpha_new;
             current_ll = ll_new;
         }
-        if adapting { step_alpha *= (1.0 + 0.1 * (accept_prob - target_accept)).max(1e-4); }
+        if adapting { step_alpha = (step_alpha * (1.0 + 0.1 * (accept_prob - target_accept))).max(0.005); }
 
         // Rho
         let log_rho_new = rho.ln() + step_rho * normal.sample(rng);
@@ -312,7 +312,7 @@ fn sample_gp_hyperparameters(
             rho = rho_new;
             current_ll = ll_new;
         }
-        if adapting { step_rho *= (1.0 + 0.1 * (accept_prob - target_accept)).max(1e-4); }
+        if adapting { step_rho = (step_rho * (1.0 + 0.1 * (accept_prob - target_accept))).max(0.005); }
 
         // Sigma_x
         let log_sigma_new = sigma_x.ln() + step_sigma * normal.sample(rng);
@@ -322,7 +322,7 @@ fn sample_gp_hyperparameters(
         if rng.gen::<f64>() < accept_prob {
             sigma_x = sigma_new;
         }
-        if adapting { step_sigma *= (1.0 + 0.1 * (accept_prob - target_accept)).max(1e-4); }
+        if adapting { step_sigma = (step_sigma * (1.0 + 0.1 * (accept_prob - target_accept))).max(0.005); }
 
         outcome_state.gp_states[gp_idx].alpha = alpha;
         outcome_state.gp_states[gp_idx].rho = rho;
@@ -339,7 +339,7 @@ fn sample_sigma_weighted(
     data: &ModelData, priors: &Priors, state: &mut State,
     weights: &[f64], rng: &mut StdRng,
 ) {
-    let mu = state.means(data);
+    let mu = state.means_full(data);
     let mut wss = 0.0;
     let mut wn = 0.0;
     for i in 0..data.n {
@@ -388,7 +388,7 @@ fn sample_r_weighted(data: &ModelData, priors: &Priors, state: &mut State, weigh
     let prop_log_r = log_r + normal.sample(rng);
     let prop_r = prop_log_r.exp();
     
-    let mu = state.means(data); // mu is the linear predictor psi_i
+    let mu = state.means_full(data); // mu is the linear predictor psi_i
     
     let mut log_lik_diff = 0.0;
     for i in 0..data.n {
@@ -416,7 +416,7 @@ fn sample_r_weighted(data: &ModelData, priors: &Priors, state: &mut State, weigh
     }
     
     if adapting {
-        state.step_r *= (1.0 + 0.1 * (accept_prob - 0.44)).max(1e-4);
+        state.step_r = (state.step_r * (1.0 + 0.1 * (accept_prob - 0.44))).max(0.005);
     }
 }
 
@@ -737,7 +737,7 @@ fn sample_random_effects_weighted(
 
     let mut state_no_re = state.clone();
     state_no_re.u_b0.fill(0.0);
-    let mu_fixed = state_no_re.means(data);
+    let mu_fixed = state_no_re.means_full(data);
     let resid = &data.y - &mu_fixed;
 
     let mut sum_wr = vec![0.0f64; n_groups]; // weighted sum of residuals

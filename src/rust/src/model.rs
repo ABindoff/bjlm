@@ -358,7 +358,53 @@ impl State {
                 mu[i] += b_delta[i] * di * si;
             }
         }
+        mu
+    }
 
+    pub fn means_full(&self, data: &ModelData) -> DVector<f64> {
+        let n = data.n;
+        let mut mu = self.means(data);
+
+        // Add contributions of ALL GPs
+        for (gp_idx, gp) in data.latent_gps.iter().enumerate() {
+            if gp.p_b0_idx >= 0 {
+                let col = gp.p_b0_idx as usize;
+                let beta = self.beta_b0[col];
+                for s in 0..gp.subjects.len() {
+                    let subj = &gp.subjects[s];
+                    let gp_x = &self.gp_states[gp_idx].x[s];
+                    for i in 0..subj.out_indices.len() {
+                        let gidx = subj.out_global[i];
+                        mu[gidx] += beta * gp_x[subj.out_indices[i]];
+                    }
+                }
+            }
+            if gp.p_b1_idx >= 0 {
+                let col = gp.p_b1_idx as usize;
+                let beta = self.beta_b1[col];
+                if self.gamma_b1[col] {
+                    // b1 is interacted with time
+                    let center = if data.n_breakpoints > 0 {
+                        self.omega_vec(0, &data.x_om[0])
+                    } else {
+                        DVector::zeros(n)
+                    };
+                    for s in 0..gp.subjects.len() {
+                        let subj = &gp.subjects[s];
+                        let gp_x = &self.gp_states[gp_idx].x[s];
+                        for i in 0..subj.out_indices.len() {
+                            let gidx = subj.out_global[i];
+                            let t_val = if data.n_breakpoints > 0 {
+                                data.tau[gidx] - center[gidx]
+                            } else {
+                                data.tau[gidx]
+                            };
+                            mu[gidx] += beta * t_val * gp_x[subj.out_indices[i]];
+                        }
+                    }
+                }
+            }
+        }
         mu
     }
 }

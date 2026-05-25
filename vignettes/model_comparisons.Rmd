@@ -95,7 +95,8 @@ brms_form <- bf(
 bpriors <- c(
   prior(normal(0, 5), nlpar = "b0"),
   prior(normal(0, 5), nlpar = "b1"),
-  prior(normal(0, 5), nlpar = "delta")
+  prior(normal(0, 5), nlpar = "delta"),
+  prior(gamma(1, 1), class = "shape")
 )
 
 if (file.exists("sim1_brms_fit.rds")) {
@@ -118,7 +119,8 @@ In `bjlm`, we set narrow priors to "fix" $\omega$ and $\rho$ to match the `brms`
 my_priors <- bjlm_priors(
   outcome = smoothbp_priors(
     omega = list(prior_normal(5.0, 1e-6)),
-    rho = list(prior_normal(2.0, 1e-6))
+    rho = list(prior_normal(2.0, 1e-6)),
+    r = prior_gamma(1, 1)
   )
 )
 
@@ -286,10 +288,10 @@ library(rstan)
 stan_data <- list(
   N = nrow(dat_gp),
   N_subj = length(unique(dat_gp$id)),
-  subj_idx = dat_gp$id,
+  T_subj = length(unique(dat_gp$time)),
   Y = dat_gp$Y,
   X_obs = dat_gp$X_obs,
-  time = dat_gp$time,
+  time_grid = sort(unique(dat_gp$time)),
   w = dat_gp$ipw
 )
 
@@ -297,7 +299,7 @@ if (file.exists("sim2_stan_fit.rds")) {
   stan_fit <- readRDS("sim2_stan_fit.rds")
 } else {
   stan_fit <- stan(
-    file = "../benchmarks/joint_gp.stan",
+    file = "../benchmarks/joint_gp_multi.stan",
     data = stan_data,
     chains = 4,
     iter = 2000,
@@ -328,9 +330,9 @@ Because `bjlm` uses conditional conjugacy for parameter sampling where possible,
 ### Posterior Densities and 1-Wasserstein
 
 ```{r sim2-posteriors}
-stan_draws <- as.data.frame(stan_fit, pars = c("b0_int", "b0_x", "sigma_y_sq", "rho")) |>
-  select(`b0_(Intercept)` = b0_int, `b0_X_obs` = b0_x, sigma = sigma_y_sq, X_obs_rho = rho) |>
-  mutate(sigma = sqrt(sigma), model = "rstan")
+stan_draws <- as.data.frame(stan_fit, pars = c("b0_int", "b0_x", "sigma_y", "rho")) |>
+  select(`b0_(Intercept)` = b0_int, `b0_X_obs` = b0_x, sigma = sigma_y, X_obs_rho = rho) |>
+  mutate(model = "rstan")
 
 bjlm_draws_gp <- posterior::as_draws_df(bjlm_fit_gp$draws) |> 
   as_tibble() |>
@@ -359,7 +361,7 @@ Slight discrepancies in Wasserstein distances for GP hyperparameters (`rho`, `si
 # Extract draws from stan_fit
 draws_b0_int <- as.vector(as.matrix(stan_fit, pars = "b0_int"))
 draws_b0_x <- as.vector(as.matrix(stan_fit, pars = "b0_x"))
-draws_sigma_y <- sqrt(as.vector(as.matrix(stan_fit, pars = "sigma_y_sq")))
+draws_sigma_y <- as.vector(as.matrix(stan_fit, pars = "sigma_y"))
 draws_X_true <- as.matrix(stan_fit, pars = "X_true")
 
 # Reconstruct log-likelihood matrix (S x N) in R manually
