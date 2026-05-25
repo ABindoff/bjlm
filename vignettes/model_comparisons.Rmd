@@ -322,7 +322,7 @@ GP parameters, particularly the lengthscale `rho`, are notorious for creating fu
 
 ```{r sim2-traceplots, fig.width=8, fig.height=6}
 # stan Traceplot
-mcmc_trace(stan_fit, pars = c("rho", "sigma_y_sq")) + 
+mcmc_trace(stan_fit, pars = c("rho", "sigma_y")) + 
   ggtitle("rstan Trace Plots (Note any divergent transitions)")
 
 # bjlm Traceplot
