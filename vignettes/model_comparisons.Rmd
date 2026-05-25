@@ -98,11 +98,16 @@ bpriors <- c(
   prior(normal(0, 5), nlpar = "delta")
 )
 
-brms_fit <- brm(
-  brms_form, data = dat_nb, family = negbinomial(),
-  prior = bpriors, chains = 4, iter = 2000, warmup = 1000,
-  cores = 4, seed = 42, backend = "rstan", silent = 2, refresh = 0
-)
+if (file.exists("sim1_brms_fit.rds")) {
+  brms_fit <- readRDS("sim1_brms_fit.rds")
+} else {
+  brms_fit <- brm(
+    brms_form, data = dat_nb, family = negbinomial(),
+    prior = bpriors, chains = 4, iter = 2000, warmup = 1000,
+    cores = 4, seed = 42, backend = "rstan", silent = 2, refresh = 0
+  )
+  saveRDS(brms_fit, "sim1_brms_fit.rds")
+}
 ```
 
 ### bjlm Implementation
@@ -117,20 +122,25 @@ my_priors <- bjlm_priors(
   )
 )
 
-bjlm_fit_nb <- bjlm_model() |>
-  propensity(Trt ~ X_obs, data = dat_nb) |>
-  outcome(
-    Y ~ tau,
-    b0 = ~ 1 + Trt + X_obs + (1 | id),
-    b1 = ~ 1,
-    deltas = list(~ 1),
-    omega = list(~ 1),
-    rho = list(~ 1),
-    data = dat_nb,
-    family = "negative_binomial"
-  ) |>
-  compile() |>
-  fit(chains = 4, iter = 2000, warmup = 1000, cores = 4, seed = 42, priors = my_priors)
+if (file.exists("sim1_bjlm_fit.rds")) {
+  bjlm_fit_nb <- readRDS("sim1_bjlm_fit.rds")
+} else {
+  bjlm_fit_nb <- bjlm_model() |>
+    propensity(Trt ~ X_obs, data = dat_nb) |>
+    outcome(
+      Y ~ tau,
+      b0 = ~ 1 + Trt + X_obs + (1 | id),
+      b1 = ~ 1,
+      deltas = list(~ 1),
+      omega = list(~ 1),
+      rho = list(~ 1),
+      data = dat_nb,
+      family = "negative_binomial"
+    ) |>
+    compile() |>
+    fit(chains = 4, iter = 2000, warmup = 1000, cores = 4, seed = 42, priors = my_priors)
+  saveRDS(bjlm_fit_nb, "sim1_bjlm_fit.rds")
+}
 ```
 
 ### Convergence and Trace Plots
@@ -200,7 +210,7 @@ Next, we evaluate the joint GP formulation where a latent variable `X_true` is o
 ```{r sim2-data}
 set.seed(123)
 
-n_subjects <- 100
+n_subjects <- 15
 n_obs_per_subject <- 10
 
 true_b0_int <- 0.5
@@ -239,25 +249,30 @@ dat_gp$Y <- true_b0_int + true_b0_x * dat_gp$X_true + rnorm(nrow(dat_gp), 0, tru
 ### bjlm Implementation
 
 ```{r sim2-bjlm, results="hide"}
-bjlm_fit_gp <- bjlm_model() |>
-  propensity(dummy_trt ~ 1, data = dat_gp) |>
-  outcome(
-    Y ~ time,
-    b0 = ~ 1 + X_obs,
-    data = dat_gp,
-    family = "gaussian"
-  ) |>
-  latent_gp(
-    name = "X_obs",
-    data = dat_gp,
-    time_var = "time",
-    obs_var = "X_obs",
-    subject = "id",
-    time_out_var = "time",
-    time_trt_var = "time"
-  ) |>
-  compile() |>
-  fit(chains = 4, iter = 2000, warmup = 1000, cores = 4, seed = 42)
+if (file.exists("sim2_bjlm_fit.rds")) {
+  bjlm_fit_gp <- readRDS("sim2_bjlm_fit.rds")
+} else {
+  bjlm_fit_gp <- bjlm_model() |>
+    propensity(dummy_trt ~ 1, data = dat_gp) |>
+    outcome(
+      Y ~ time,
+      b0 = ~ 1 + X_obs,
+      data = dat_gp,
+      family = "gaussian"
+    ) |>
+    latent_gp(
+      name = "X_obs",
+      data = dat_gp,
+      time_var = "time",
+      obs_var = "X_obs",
+      subject = "id",
+      time_out_var = "time",
+      time_trt_var = "time"
+    ) |>
+    compile() |>
+    fit(chains = 4, iter = 2000, warmup = 1000, cores = 4, seed = 42)
+  saveRDS(bjlm_fit_gp, "sim2_bjlm_fit.rds")
+}
 ```
 
 ### rstan Implementation
@@ -278,15 +293,20 @@ stan_data <- list(
   w = dat_gp$ipw
 )
 
-stan_fit <- stan(
-  file = "../benchmarks/joint_gp.stan",
-  data = stan_data,
-  chains = 4,
-  iter = 2000,
-  warmup = 1000,
-  cores = 4,
-  seed = 42
-)
+if (file.exists("sim2_stan_fit.rds")) {
+  stan_fit <- readRDS("sim2_stan_fit.rds")
+} else {
+  stan_fit <- stan(
+    file = "../benchmarks/joint_gp.stan",
+    data = stan_data,
+    chains = 4,
+    iter = 2000,
+    warmup = 1000,
+    cores = 4,
+    seed = 42
+  )
+  saveRDS(stan_fit, "sim2_stan_fit.rds")
+}
 ```
 
 ### Convergence and Trace Plots

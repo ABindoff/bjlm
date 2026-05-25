@@ -748,7 +748,11 @@ fitted.smoothbp_fit <- function(object, newdata = NULL, type = c("link", "respon
   rho_fml <- object$rho
   
   X_b0 <- stats::model.matrix(b0_fml, data = data)
-  X_b1 <- stats::model.matrix(b1_fml, data = data)
+  if (is.null(b1_fml)) {
+    X_b1 <- stats::model.matrix(~ 0, data = data)
+  } else {
+    X_b1 <- stats::model.matrix(b1_fml, data = data)
+  }
   
   n_bp <- length(deltas_fml)
   X_deltas <- if (n_bp > 0) lapply(deltas_fml, function(f) stats::model.matrix(f, data = data)) else list()
