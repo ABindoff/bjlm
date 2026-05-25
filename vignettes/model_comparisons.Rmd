@@ -96,7 +96,8 @@ bpriors <- c(
   prior(normal(0, 5), nlpar = "b0"),
   prior(normal(0, 5), nlpar = "b1"),
   prior(normal(0, 5), nlpar = "delta"),
-  prior(gamma(1, 1), class = "shape")
+  prior(gamma(1, 1), class = "shape"),
+  prior(inv_gamma(1, 1), class = "sd", group = "id", nlpar = "b0")
 )
 
 if (file.exists("sim1_brms_fit.rds")) {
@@ -118,9 +119,13 @@ In `bjlm`, we set narrow priors to "fix" $\omega$ and $\rho$ to match the `brms`
 ```{r sim1-bjlm, results="hide"}
 my_priors <- bjlm_priors(
   outcome = smoothbp_priors(
+    b0 = prior_normal(0, 5),
+    b1 = prior_normal(0, 5),
+    deltas = list(prior_normal(0, 5)),
     omega = list(prior_normal(5.0, 1e-6)),
     rho = list(prior_normal(2.0, 1e-6)),
-    r = prior_gamma(1, 1)
+    r = prior_gamma(1, 1),
+    sigma_u = prior_invgamma(1, 1)
   )
 )
 
