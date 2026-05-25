@@ -10,6 +10,122 @@ use crate::weights::{WeightType, compute_weights, expand_weights_to_obs};
 use crate::sampler::init_state;
 
 // ---------------------------------------------------------------------------
+// Dual-averaging step-size adapter for Metropolis-Hastings
+// (Nesterov 2009; same scheme as Stan/NUTS uses for HMC)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct DualAvg {
+    epsilon: f64,
+    mu: f64,
+    log_eps_bar: f64,
+    h_bar: f64,
+    da_count: usize,
+    gamma: f64,
+    t0: f64,
+    kappa: f64,
+    target_accept: f64,
+}
+
+impl DualAvg {
+    fn new(init_epsilon: f64, target_accept: f64) -> Self {
+        DualAvg {
+            epsilon: init_epsilon,
+            mu: (10.0 * init_epsilon).ln(),
+            log_eps_bar: 0.0,
+            h_bar: 0.0,
+            da_count: 0,
+            gamma: 0.05,
+            t0: 10.0,
+            kappa: 0.75,
+            target_accept,
+        }
+    }
+
+    fn update(&mut self, accept_prob: f64) {
+        let ap = if accept_prob.is_nan() { 0.0 } else { accept_prob.clamp(0.0, 1.0) };
+        self.da_count += 1;
+        let m = self.da_count as f64;
+        let w = 1.0 / (m + self.t0);
+        self.h_bar = (1.0 - w) * self.h_bar + w * (self.target_accept - ap);
+        let log_eps = self.mu - (m.sqrt() / self.gamma) * self.h_bar;
+        self.epsilon = log_eps.exp().clamp(1e-6, 5.0);
+        let mk = m.powf(-self.kappa);
+        self.log_eps_bar = mk * log_eps + (1.0 - mk) * self.log_eps_bar;
+    }
+
+    fn freeze(&mut self) {
+        self.epsilon = self.log_eps_bar.exp().clamp(1e-6, 5.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Joint + componentwise adaptive MH for GP hyperparameters.
+// Combines a 3D joint proposal (all hyperparams at once) with per-dimension
+// componentwise proposals, each with independent dual-averaging step-size
+// adaptation. A shared diagonal mass matrix is estimated via Welford's
+// online algorithm during warmup.
+// ---------------------------------------------------------------------------
+
+struct GpHyperAdapt {
+    /// Dual-averaging for the joint (3D) proposal
+    joint_da: DualAvg,
+    /// Dual-averaging for componentwise proposals: [alpha, rho, sigma_x]
+    comp_da: [DualAvg; 3],
+    /// Diagonal mass matrix (estimated variances on log scale)
+    inv_mass: [f64; 3],
+    /// Welford online variance estimation
+    welford_n: usize,
+    welford_mean: [f64; 3],
+    welford_m2: [f64; 3],
+}
+
+impl GpHyperAdapt {
+    fn new(init_epsilon: f64) -> Self {
+        GpHyperAdapt {
+            // Optimal joint acceptance for d=3: ~0.30
+            joint_da: DualAvg::new(init_epsilon, 0.30),
+            comp_da: [
+                DualAvg::new(init_epsilon, 0.44),
+                DualAvg::new(init_epsilon, 0.44),
+                DualAvg::new(init_epsilon, 0.44),
+            ],
+            inv_mass: [1.0; 3],
+            welford_n: 0,
+            welford_mean: [0.0; 3],
+            welford_m2: [0.0; 3],
+        }
+    }
+
+    fn observe(&mut self, log_theta: &[f64; 3]) {
+        self.welford_n += 1;
+        let n = self.welford_n as f64;
+        for k in 0..3 {
+            let delta = log_theta[k] - self.welford_mean[k];
+            self.welford_mean[k] += delta / n;
+            let delta2 = log_theta[k] - self.welford_mean[k];
+            self.welford_m2[k] += delta * delta2;
+        }
+    }
+
+    fn refresh_mass_matrix(&mut self) {
+        if self.welford_n < 20 { return; }
+        let n = self.welford_n as f64;
+        for k in 0..3 {
+            let var_k = self.welford_m2[k] / (n - 1.0);
+            self.inv_mass[k] = var_k.max(1e-8);
+        }
+    }
+
+    fn freeze(&mut self) {
+        self.joint_da.freeze();
+        for da in &mut self.comp_da {
+            da.freeze();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Joint Bayesian IPW sampler
 //
 // Architecture:
@@ -244,18 +360,16 @@ fn sample_gp_hyperparameters(
     outcome_data: &ModelData,
     outcome_state: &mut State,
     rng: &mut StdRng,
+    adapts: &mut [GpHyperAdapt],
     adapting: bool,
 ) {
     let normal = Normal::new(0.0, 1.0).unwrap();
-    let target_accept = 0.44;
 
     for (gp_idx, gp) in outcome_data.latent_gps.iter().enumerate() {
+        let adapt = &mut adapts[gp_idx];
         let mut alpha = outcome_state.gp_states[gp_idx].alpha;
         let mut rho = outcome_state.gp_states[gp_idx].rho;
         let mut sigma_x = outcome_state.gp_states[gp_idx].sigma_x;
-        let mut step_alpha = outcome_state.gp_states[gp_idx].step_alpha;
-        let mut step_rho = outcome_state.gp_states[gp_idx].step_rho;
-        let mut step_sigma = outcome_state.gp_states[gp_idx].step_sigma;
 
         let compute_ll = |a: f64, r: f64, s: f64| -> f64 {
             let mut ll = 0.0;
@@ -292,44 +406,95 @@ fn sample_gp_hyperparameters(
 
         let mut current_ll = compute_ll(alpha, rho, sigma_x);
 
-        // Alpha
-        let log_alpha_new = alpha.ln() + step_alpha * normal.sample(rng);
-        let alpha_new = log_alpha_new.exp();
-        let ll_new = compute_ll(alpha_new, rho, sigma_x);
-        let accept_prob = (ll_new - current_ll).exp().min(1.0);
-        if rng.gen::<f64>() < accept_prob {
-            alpha = alpha_new;
-            current_ll = ll_new;
+        // === Joint proposal on log scale ===
+        {
+            let eps = adapt.joint_da.epsilon;
+            let a_prop = (alpha.ln() + eps * adapt.inv_mass[0].sqrt() * normal.sample(rng)).exp();
+            let r_prop = (rho.ln() + eps * adapt.inv_mass[1].sqrt() * normal.sample(rng)).exp();
+            let s_prop = (sigma_x.ln() + eps * adapt.inv_mass[2].sqrt() * normal.sample(rng)).exp();
+
+            if a_prop.is_finite() && r_prop.is_finite() && s_prop.is_finite()
+                && a_prop > 0.0 && r_prop > 0.0 && s_prop > 0.0
+            {
+                let ll_new = compute_ll(a_prop, r_prop, s_prop);
+                let log_ratio = ll_new - current_ll;
+                let accept_prob = if log_ratio.is_nan() { 0.0 } else { log_ratio.exp().min(1.0) };
+                if rng.gen::<f64>() < accept_prob {
+                    alpha = a_prop;
+                    rho = r_prop;
+                    sigma_x = s_prop;
+                    current_ll = ll_new;
+                }
+                if adapting { adapt.joint_da.update(accept_prob); }
+            } else {
+                if adapting { adapt.joint_da.update(0.0); }
+            }
         }
-        if adapting { step_alpha = (step_alpha * (1.0 + 0.1 * (accept_prob - target_accept))).max(0.005); }
+
+        // === Componentwise proposals ===
+        // Alpha
+        {
+            let eps = adapt.comp_da[0].epsilon;
+            let a_prop = (alpha.ln() + eps * adapt.inv_mass[0].sqrt() * normal.sample(rng)).exp();
+            if a_prop.is_finite() && a_prop > 0.0 {
+                let ll_new = compute_ll(a_prop, rho, sigma_x);
+                let log_ratio = ll_new - current_ll;
+                let accept_prob = if log_ratio.is_nan() { 0.0 } else { log_ratio.exp().min(1.0) };
+                if rng.gen::<f64>() < accept_prob {
+                    alpha = a_prop;
+                    current_ll = ll_new;
+                }
+                if adapting { adapt.comp_da[0].update(accept_prob); }
+            } else {
+                if adapting { adapt.comp_da[0].update(0.0); }
+            }
+        }
 
         // Rho
-        let log_rho_new = rho.ln() + step_rho * normal.sample(rng);
-        let rho_new = log_rho_new.exp();
-        let ll_new = compute_ll(alpha, rho_new, sigma_x);
-        let accept_prob = (ll_new - current_ll).exp().min(1.0);
-        if rng.gen::<f64>() < accept_prob {
-            rho = rho_new;
-            current_ll = ll_new;
+        {
+            let eps = adapt.comp_da[1].epsilon;
+            let r_prop = (rho.ln() + eps * adapt.inv_mass[1].sqrt() * normal.sample(rng)).exp();
+            if r_prop.is_finite() && r_prop > 0.0 {
+                let ll_new = compute_ll(alpha, r_prop, sigma_x);
+                let log_ratio = ll_new - current_ll;
+                let accept_prob = if log_ratio.is_nan() { 0.0 } else { log_ratio.exp().min(1.0) };
+                if rng.gen::<f64>() < accept_prob {
+                    rho = r_prop;
+                    current_ll = ll_new;
+                }
+                if adapting { adapt.comp_da[1].update(accept_prob); }
+            } else {
+                if adapting { adapt.comp_da[1].update(0.0); }
+            }
         }
-        if adapting { step_rho = (step_rho * (1.0 + 0.1 * (accept_prob - target_accept))).max(0.005); }
 
         // Sigma_x
-        let log_sigma_new = sigma_x.ln() + step_sigma * normal.sample(rng);
-        let sigma_new = log_sigma_new.exp();
-        let ll_new = compute_ll(alpha, rho, sigma_new);
-        let accept_prob = (ll_new - current_ll).exp().min(1.0);
-        if rng.gen::<f64>() < accept_prob {
-            sigma_x = sigma_new;
+        {
+            let eps = adapt.comp_da[2].epsilon;
+            let s_prop = (sigma_x.ln() + eps * adapt.inv_mass[2].sqrt() * normal.sample(rng)).exp();
+            if s_prop.is_finite() && s_prop > 0.0 {
+                let ll_new = compute_ll(alpha, rho, s_prop);
+                let log_ratio = ll_new - current_ll;
+                let accept_prob = if log_ratio.is_nan() { 0.0 } else { log_ratio.exp().min(1.0) };
+                if rng.gen::<f64>() < accept_prob {
+                    sigma_x = s_prop;
+                }
+                if adapting { adapt.comp_da[2].update(accept_prob); }
+            } else {
+                if adapting { adapt.comp_da[2].update(0.0); }
+            }
         }
-        if adapting { step_sigma = (step_sigma * (1.0 + 0.1 * (accept_prob - target_accept))).max(0.005); }
 
+        // Write back
         outcome_state.gp_states[gp_idx].alpha = alpha;
         outcome_state.gp_states[gp_idx].rho = rho;
         outcome_state.gp_states[gp_idx].sigma_x = sigma_x;
-        outcome_state.gp_states[gp_idx].step_alpha = step_alpha;
-        outcome_state.gp_states[gp_idx].step_rho = step_rho;
-        outcome_state.gp_states[gp_idx].step_sigma = step_sigma;
+
+        // Observe for mass matrix estimation
+        if adapting {
+            let log_theta = [alpha.ln(), rho.ln(), sigma_x.ln()];
+            adapt.observe(&log_theta);
+        }
     }
 }
 
@@ -1222,6 +1387,11 @@ pub fn run_chain_bjlm(
     // Initialize propensity state
     let mut prop_state = PropensityState::new(prop_data.p_prop, prop_data.n_subjects, &mut rng);
 
+    // Initialize GP hyperparameter adapters (dual-averaging + mass matrix)
+    let mut gp_hyper_adapts: Vec<GpHyperAdapt> = outcome_data.latent_gps.iter()
+        .map(|_| GpHyperAdapt::new(0.1))
+        .collect();
+
     let n_post = n_iter - n_warmup;
     let n_outcome_params = outcome_state.n_params(false, false, false, outcome_data.outcome_family.clone());
     let n_prop_params = prop_data.p_prop;
@@ -1276,7 +1446,7 @@ pub fn run_chain_bjlm(
             outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng,
         );
         sample_gp_hyperparameters(
-            outcome_data, &mut outcome_state, &mut rng, iter < n_warmup,
+            outcome_data, &mut outcome_state, &mut rng, &mut gp_hyper_adapts, iter < n_warmup,
         );
 
         // === OUTCOME BLOCK (weighted) ===
@@ -1330,10 +1500,20 @@ pub fn run_chain_bjlm(
                     adapt_rho[k].refresh_mass_matrix();
                 }
             }
+            // GP hyperparameter mass matrix refresh
+            if (iter + 1) % 500 == 0 {
+                for gp_adapt in gp_hyper_adapts.iter_mut() {
+                    gp_adapt.refresh_mass_matrix();
+                }
+            }
         } else if iter == n_warmup {
             for k in 0..outcome_data.n_breakpoints {
                 adapt_om[k].freeze();
                 adapt_rho[k].freeze();
+            }
+            // Freeze GP hyperparameter adapters
+            for gp_adapt in gp_hyper_adapts.iter_mut() {
+                gp_adapt.freeze();
             }
         }
 
