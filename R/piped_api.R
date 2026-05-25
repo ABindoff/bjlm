@@ -802,7 +802,7 @@ fitted.smoothbp_fit <- function(object, newdata = NULL, type = c("link", "respon
   n_bp      <- length(dm$X_deltas)
 
   b0_cols  <- match(paste0("b0_", colnames(dm$X_b0)), col_names)
-  b1_cols  <- match(paste0("b1_", colnames(dm$X_b1)), col_names)
+  b1_cols  <- if (ncol(dm$X_b1) > 0) match(paste0("b1_", colnames(dm$X_b1)), col_names) else integer(0)
   
   subject_var <- object$subject_var
   group_levels <- if (!is.null(subject_var)) levels(as.factor(object$data[[subject_var]])) else character(0)
@@ -818,9 +818,13 @@ fitted.smoothbp_fit <- function(object, newdata = NULL, type = c("link", "respon
   fitted_draws <- matrix(0, nrow = n_draws, ncol = n)
   for (s in seq_len(n_draws)) {
     mu_i <- as.vector(dm$X_b0 %*% as.numeric(draw_mat[s, b0_cols]))
-    beta_b1 <- as.numeric(draw_mat[s, b1_cols])
-    if (length(gamma_b1_cols) > 0) beta_b1 <- beta_b1 * as.numeric(draw_mat[s, gamma_b1_cols])
-    b1_vals <- as.vector(dm$X_b1 %*% beta_b1)
+    b1_vals <- if (ncol(dm$X_b1) == 0) {
+      rep(0, n)
+    } else {
+      beta_b1 <- as.numeric(draw_mat[s, b1_cols])
+      if (length(gamma_b1_cols) > 0) beta_b1 <- beta_b1 * as.numeric(draw_mat[s, gamma_b1_cols])
+      as.vector(dm$X_b1 %*% beta_b1)
+    }
     
     if (n_bp > 0) {
       om1_i <- as.vector(dm$X_om[[1]] %*% as.numeric(draw_mat[s, om_cols_list[[1]]]))
