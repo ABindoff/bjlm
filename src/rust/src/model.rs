@@ -26,6 +26,7 @@ pub struct ModelData {
     /// 0-based group indices for b0 random intercept; -1 if observation has no RE
     pub group_b0: Vec<i32>,
     pub n_groups_b0: usize,
+    pub group_prop: Vec<usize>,
     pub n: usize,
     pub n_breakpoints: usize,
     /// Indicates if a coefficient in x_om[k] is a random effect (hierarchical)

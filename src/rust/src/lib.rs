@@ -89,6 +89,7 @@ fn run_mcmc(
         x_rho: list_to_vec_dmatrix(x_rho, n, p_rho),
         group_b0: group_b0.to_vec(),
         n_groups_b0: n_groups_b0 as usize,
+        group_prop: Vec::new(),
         n_breakpoints: n_bp,
         n,
         re_mask_om: Vec::new(),
@@ -222,6 +223,7 @@ fn run_mcmc_ss(
         x_rho: list_to_vec_dmatrix(x_rho, n, p_rho),
         group_b0: group_b0.to_vec(),
         n_groups_b0: n_groups_b0 as usize,
+        group_prop: Vec::new(),
         n_breakpoints: n_bp,
         n,
         re_mask_om: Vec::new(),
@@ -359,6 +361,7 @@ fn run_mcmc_re(
         x_rho: list_to_vec_dmatrix(x_rho, n, p_rho),
         group_b0: group_b0.to_vec(),
         n_groups_b0: n_groups_b0 as usize,
+        group_prop: Vec::new(),
         n_breakpoints: n_bp,
         n,
         re_mask_om: re_mask_om.iter().map(|r| r.1.as_integer_vector().unwrap().iter().map(|&v| v != 0).collect()).collect(),
@@ -495,6 +498,7 @@ fn run_mcmc_re_ss(
         x_rho: list_to_vec_dmatrix(x_rho, n, p_rho),
         group_b0: group_b0.to_vec(),
         n_groups_b0: n_groups_b0 as usize,
+        group_prop: Vec::new(),
         n_breakpoints: n_bp,
         n,
         re_mask_om: re_mask_om.iter().map(|r| r.1.as_integer_vector().unwrap().iter().map(|&v| v != 0).collect()).collect(),
@@ -588,6 +592,7 @@ fn run_bjlm(
     x_rho: List, p_rho: &[i32],
     group_b0: &[i32],
     n_groups_b0: i32,
+    group_prop: &[i32],
     // Outcome priors
     prior_mean_b0: &[f64], prior_sd_b0: &[f64], prior_lb_b0: &[f64], prior_ub_b0: &[f64],
     prior_mean_b1: &[f64], prior_sd_b1: &[f64], prior_lb_b1: &[f64], prior_ub_b1: &[f64],
@@ -643,46 +648,61 @@ fn run_bjlm(
         _ => crate::model::OutcomeFamily::Gaussian,
     };
 
+    let mut x_b0_mat = flat_to_dmatrix(x_b0, n, p_b0 as usize);
+    let mut x_b1_mat = flat_to_dmatrix(x_b1, n, p_b1 as usize);
+
+    let mut gps = Vec::new();
+    for (_, robj) in latent_gps.iter() {
+        let gp_list = robj.as_list().unwrap();
+        let mut gp = crate::model::GpData {
+            name: gp_list.dollar("name").unwrap().as_str().unwrap().to_string(),
+            obs_time: gp_list.dollar("obs_time").unwrap().as_real_vector().unwrap(),
+            obs_val: gp_list.dollar("obs_val").unwrap().as_real_vector().unwrap(),
+            obs_group: gp_list.dollar("obs_group").unwrap().as_integer_vector().unwrap().into_iter().map(|g| g as usize).collect(),
+            
+            trt_time: gp_list.dollar("trt_time").unwrap().as_real_vector().unwrap(),
+            trt_group: gp_list.dollar("trt_group").unwrap().as_integer_vector().unwrap().into_iter().map(|g| g as usize).collect(),
+            
+            out_time: gp_list.dollar("out_time").unwrap().as_real_vector().unwrap(),
+            out_group: gp_list.dollar("out_group").unwrap().as_integer_vector().unwrap().into_iter().map(|g| g as usize).collect(),
+            
+            p_b0_idx: gp_list.dollar("p_b0_idx").unwrap().as_integer_vector().unwrap()[0],
+            p_b1_idx: gp_list.dollar("p_b1_idx").unwrap().as_integer_vector().unwrap()[0],
+            p_prop_idx: gp_list.dollar("p_prop_idx").unwrap().as_integer_vector().unwrap()[0],
+            subjects: Vec::new(),
+        };
+        gp.process(n_subjects as usize);
+        gps.push(gp);
+    }
+
+    // Zero out GP columns in the design matrices so they are excluded from base predictions
+    for gp in &gps {
+        if gp.p_b0_idx >= 0 {
+            let col = gp.p_b0_idx as usize;
+            for i in 0..n { x_b0_mat[(i, col)] = 0.0; }
+        }
+        if gp.p_b1_idx >= 0 {
+            let col = gp.p_b1_idx as usize;
+            for i in 0..n { x_b1_mat[(i, col)] = 0.0; }
+        }
+    }
+
     let outcome_data = ModelData {
         outcome_family: outcome_family_enum,
         y: DVector::from_column_slice(y),
         tau: DVector::from_column_slice(tau),
-        x_b0: flat_to_dmatrix(x_b0, n, p_b0 as usize),
-        x_b1: flat_to_dmatrix(x_b1, n, p_b1 as usize),
+        x_b0: x_b0_mat,
+        x_b1: x_b1_mat,
         x_deltas: list_to_vec_dmatrix(x_deltas, n, p_deltas),
         x_om: list_to_vec_dmatrix(x_om, n, p_om),
         x_rho: list_to_vec_dmatrix(x_rho, n, p_rho),
         group_b0: group_b0.to_vec(),
         n_groups_b0: n_groups_b0 as usize,
+        group_prop: group_prop.iter().map(|&x| x as usize).collect(),
         n_breakpoints: n_bp,
         n,
         re_mask_om: Vec::new(),
-        latent_gps: {
-            let mut gps = Vec::new();
-            for (_, robj) in latent_gps.iter() {
-                let gp_list = robj.as_list().unwrap();
-                let mut gp = crate::model::GpData {
-                    name: gp_list.dollar("name").unwrap().as_str().unwrap().to_string(),
-                    obs_time: gp_list.dollar("obs_time").unwrap().as_real_vector().unwrap(),
-                    obs_val: gp_list.dollar("obs_val").unwrap().as_real_vector().unwrap(),
-                    obs_group: gp_list.dollar("obs_group").unwrap().as_integer_vector().unwrap().into_iter().map(|g| g as usize).collect(),
-                    
-                    trt_time: gp_list.dollar("trt_time").unwrap().as_real_vector().unwrap(),
-                    trt_group: gp_list.dollar("trt_group").unwrap().as_integer_vector().unwrap().into_iter().map(|g| g as usize).collect(),
-                    
-                    out_time: gp_list.dollar("out_time").unwrap().as_real_vector().unwrap(),
-                    out_group: gp_list.dollar("out_group").unwrap().as_integer_vector().unwrap().into_iter().map(|g| g as usize).collect(),
-                    
-                    p_b0_idx: gp_list.dollar("p_b0_idx").unwrap().as_integer_vector().unwrap()[0],
-                    p_b1_idx: gp_list.dollar("p_b1_idx").unwrap().as_integer_vector().unwrap()[0],
-                    p_prop_idx: gp_list.dollar("p_prop_idx").unwrap().as_integer_vector().unwrap()[0],
-                    subjects: Vec::new(),
-                };
-                gp.process(n_subj);
-                gps.push(gp);
-            }
-            gps
-        },
+        latent_gps: gps,
     };
 
     let outcome_priors = Priors {
@@ -722,7 +742,14 @@ fn run_bjlm(
     };
 
     // Propensity data: subject-level design matrix
-    let x_prop_mat = DMatrix::from_column_slice(n_subj, p_pr, x_prop);
+    let mut x_prop_mat = DMatrix::from_column_slice(n_subj, p_pr, x_prop);
+    for gp in &outcome_data.latent_gps {
+        if gp.p_prop_idx >= 0 {
+            let col = gp.p_prop_idx as usize;
+            for i in 0..n_subj { x_prop_mat[(i, col)] = 0.0; }
+        }
+    }
+    
     let prop_data = PropensityData {
         x_prop: x_prop_mat,
         treatment: treatment.to_vec(),

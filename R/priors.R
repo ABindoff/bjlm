@@ -29,6 +29,12 @@ fixed <- function(value) {
   structure(value, class = "smoothbp_fixed")
 }
 
+#' @rdname fixed
+#' @export
+prior_fixed <- function(value) {
+  fixed(value)
+}
+
 #' Specify an inverse-gamma prior for a variance component
 #'
 #' @param shape Shape parameter (> 0).
@@ -176,6 +182,7 @@ space_omega_priors <- function(K, tau_min, tau_max) {
 
 .expand_prior <- function(prior_spec, coef_names) {
   n <- length(coef_names)
+  if (n == 0) return(data.frame(name=character(), mean=numeric(), sd=numeric(), lb=numeric(), ub=numeric(), stringsAsFactors=FALSE))
   if (inherits(prior_spec, "smoothbp_prior") && prior_spec$family == "normal") {
     data.frame(
       name = coef_names,

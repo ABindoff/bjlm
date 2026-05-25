@@ -1,0 +1,143 @@
+---
+title: "Testing the `bjlm` Package"
+author: "Antigravity"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Uncomment the following line to load the package from source during development
+devtools::load_all(".")
+# library(bjlm)
+set.seed(42)
+```
+
+## Introduction
+
+This document contains a series of tests for the `bjlm` package using simulated data of varying sizes. The goal is to push the sampler and the API using edge cases, unusual but plausible specifications, and common scenarios. 
+
+This test suite covers:
+1. A basic cross-sectional linear model.
+2. A logistic regression model with an extreme weight distribution and a single structural breakpoint.
+3. A complex longitudinal negative binomial model with subject-level random intercepts and a Latent Gaussian Process (GP) confounder.
+
+---
+
+## Scenario 1: Basic Linear Model
+
+We start with a very simple cross-sectional design. We simulate a continuous outcome `Y` dependent on time `tau` and a binary treatment `Trt`.
+
+```{r scenario1}
+n <- 200
+dat1 <- data.frame(id = 1:n, tau = runif(n, 0, 10), Trt = rbinom(n, 1, 0.5))
+# True model: Y = 2 + 0.5*tau + 1.5*Trt + error
+dat1$Y <- 2 + 0.5 * dat1$tau + 1.5 * dat1$Trt + rnorm(n)
+
+fit1 <- bjlm_model() |>
+  propensity(Trt ~ 1, data = dat1) |>
+  outcome(Y ~ tau, b0 = ~ 1 + Trt, b1 = ~ 1, data = dat1) |>
+  compile() |>
+  fit(iter = 500, warmup = 200, chains = 2, cores = 2)
+
+# The table should show an intercept of ~2.0, b1 of ~0.5, and Trt of ~1.5
+tab_bjlm(fit1)
+```
+
+---
+
+## Scenario 2: Logistic Regression with Breakpoint & Extreme Weights
+
+Here we test the robustness of the Pólya-Gamma sampler and the Inverse Probability Weight (IPW) truncation. We generate an extreme propensity score distribution, leading to large weights, and limit `max_weight` to 10. We also simulate a single structural breakpoint at `tau = 10`.
+
+```{r scenario2}
+n <- 300
+tau <- runif(n, 0, 20)
+
+# Create an extreme propensity score distribution
+pi_trt <- plogis(-2 + 0.2 * tau)
+Trt <- rbinom(n, 1, pi_trt)
+
+# Outcome with a negative shift (slope change) at tau = 10
+Y_prob <- plogis(0.5 + 0.2 * tau + 2 * Trt - 0.5 * pmax(0, tau - 10))
+Y <- rbinom(n, 1, Y_prob)
+dat2 <- data.frame(id = 1:n, tau = tau, Trt = Trt, Y = Y)
+
+fit2 <- bjlm_model() |>
+  propensity(Trt ~ tau, data = dat2) |>
+  # deltas, omega, rho specified to fit a breakpoint model
+  outcome(
+    Y ~ tau, 
+    b0 = ~ 1 + Trt, 
+    b1 = ~ 1, 
+    deltas = list(~ 1), 
+    omega = list(~ 1), 
+    rho = list(~ 1), 
+    data = dat2, 
+    family = "binomial"
+  ) |>
+  compile() |>
+  fit(iter = 500, warmup = 200, chains = 2, cores = 2, max_weight = 10)
+
+# Since this is a binomial model, tab_bjlm should exponentiate coefficients (Odds Ratios)
+tab_bjlm(fit2)
+```
+
+---
+
+## Scenario 3: Negative Binomial with Random Intercepts & Latent GP
+
+This is the most complex specification. We simulate longitudinal data where a confounder `X_obs` is observed with noise but enters the outcome and propensity models. We use a Latent Gaussian Process to model `X_obs` smoothly over time. The outcome follows a Negative Binomial distribution with subject-level random intercepts.
+
+```{r scenario3}
+n_subj <- 50
+n_obs <- 5
+tau_out <- runif(n_subj * n_obs, 0, 15)
+id_out <- rep(1:n_subj, each = n_obs)
+
+# True smooth confounder
+X_true <- sin(tau_out / 3)
+Trt_expanded <- rbinom(n_subj * n_obs, 1, plogis(X_true))
+
+# NB outcome with random intercept per subject
+mu <- exp(0.5 + 0.1 * tau_out + Trt_expanded + X_true + rnorm(n_subj)[id_out])
+Y_nb <- rnbinom(n_subj * n_obs, mu = mu, size = 2)
+
+dat3 <- data.frame(
+  id = factor(id_out), 
+  tau = tau_out, 
+  Trt = Trt_expanded, 
+  Y = Y_nb, 
+  # Noisy observation of the true confounder
+  X_obs = X_true + rnorm(n_subj * n_obs, 0, 0.2)
+)
+
+# Sub-sample the first observation per subject for the cross-sectional propensity model
+dat3_prop <- dat3[!duplicated(dat3$id), ]
+
+fit3 <- bjlm_model() |>
+  propensity(Trt ~ X_obs, data = dat3_prop) |>
+  outcome(
+    Y ~ tau, 
+    b0 = ~ 1 + Trt + X_obs + (1 | id), 
+    b1 = ~ 1, 
+    data = dat3, 
+    family = "negative_binomial"
+  ) |>
+  latent_gp(
+    name = "X_obs", 
+    data = dat3, 
+    time_var = "tau", 
+    obs_var = "X_obs", 
+    subject = "id", 
+    time_out_var = "tau", 
+    time_trt_var = "tau"
+  ) |>
+  compile() |>
+  # The GP sampler relies on the Gamma approximation fix for numerical stability
+  fit(iter = 300, warmup = 150, chains = 2, cores = 2)
+
+# Since this is a negative binomial model, tab_bjlm should output Incident Rate Ratios (IRR)
+# The summary should also include the `r` parameter (dispersion).
+tab_bjlm(fit3)
+```

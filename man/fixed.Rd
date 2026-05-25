@@ -2,9 +2,12 @@
 % Please edit documentation in R/priors.R
 \name{fixed}
 \alias{fixed}
+\alias{prior_fixed}
 \title{Fix a parameter at a specific value}
 \usage{
 fixed(value)
+
+prior_fixed(value)
 }
 \arguments{
 \item{value}{The fixed value(s) (numeric scalar or vector).}

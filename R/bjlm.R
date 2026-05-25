@@ -85,8 +85,18 @@ bjlm <- function(
 
   # Propensity model is subject-level, so we need to identify unique subjects
   re_info <- .parse_re(b0)
+  
+  # Determine the subject variable
+  # If there is a random intercept, we use its grouping variable.
+  # If there isn't, but there are latent GPs, we use the first latent GP's subject.
+  group_var <- NULL
   if (!is.null(re_info$re_group)) {
     group_var <- re_info$re_group
+  } else if (length(latent_gps) > 0) {
+    group_var <- latent_gps[[1]]$subject
+  }
+  
+  if (!is.null(group_var)) {
     group_factor <- as.factor(data[[group_var]])
     group_indices <- as.integer(group_factor) - 1L
     n_groups <- nlevels(group_factor)
@@ -98,6 +108,7 @@ bjlm <- function(
     n_subjects <- nrow(subject_data)
   } else {
     # Cross-sectional
+    group_factor <- NULL
     group_indices <- rep(-1L, n)
     n_groups <- 0L
     subject_data <- data
@@ -116,7 +127,11 @@ bjlm <- function(
   # ---- Build outcome design matrices ----
   b0_fixed_formula <- re_info$fixed
   x_b0 <- model.matrix(b0_fixed_formula, data = data)
-  x_b1 <- model.matrix(b1, data = data)
+  if (is.null(b1)) {
+    x_b1 <- model.matrix(~ 0, data = data)
+  } else {
+    x_b1 <- model.matrix(b1, data = data)
+  }
 
   n_bp <- length(deltas)
   x_deltas_list <- lapply(deltas, function(f) model.matrix(f, data = data))
@@ -157,8 +172,8 @@ bjlm <- function(
 
   # ---- Parameter names ----
   b0_names <- paste0("b0_", colnames(x_b0))
-  re_names <- if (n_groups > 0) paste0("u_", levels(group_factor)) else character(0)
-  b1_names <- paste0("b1_", colnames(x_b1))
+  re_names <- if (n_groups > 0 && !is.null(re_info$re_group)) paste0("u_", levels(group_factor)) else character(0)
+  b1_names <- if (ncol(x_b1) > 0) paste0("b1_", colnames(x_b1)) else character(0)
   delta_names <- if (n_bp > 0) {
     unlist(lapply(seq_len(n_bp), function(k) paste0("delta", k, "_", colnames(x_deltas_list[[k]]))))
   } else character(0)
@@ -196,21 +211,29 @@ bjlm <- function(
       
       # Coerce subject variable in GP data to match the factor levels of the outcome subject variable
       gp_data <- gp$data
-      gp_data[[gp$subject]] <- factor(gp_data[[gp$subject]], levels = levels(group_factor))
-      # Drop missing subjects
-      gp_data <- gp_data[!is.na(gp_data[[gp$subject]]), , drop = FALSE]
+      if (!is.null(group_factor)) {
+        gp_data[[gp$subject]] <- factor(gp_data[[gp$subject]], levels = levels(group_factor))
+        gp_data <- gp_data[!is.na(gp_data[[gp$subject]]), , drop = FALSE]
+        obs_group <- as.integer(gp_data[[gp$subject]]) - 1L
+        trt_group <- as.integer(factor(subject_data[[group_var]], levels = levels(group_factor))) - 1L
+        out_group <- as.integer(factor(data[[group_var]], levels = levels(group_factor))) - 1L
+      } else {
+        obs_group <- rep(-1L, nrow(gp_data))
+        trt_group <- rep(-1L, nrow(subject_data))
+        out_group <- rep(-1L, nrow(data))
+      }
       
       list(
         name = gp$name,
         obs_time = as.double(gp_data[[gp$time_var]]),
         obs_val = as.double(gp_data[[gp$obs_var]]),
-        obs_group = as.integer(gp_data[[gp$subject]]) - 1L,
+        obs_group = obs_group,
         
         trt_time = as.double(subject_data[[gp$time_trt_var]]),
-        trt_group = as.integer(factor(subject_data[[group_var]], levels = levels(group_factor))) - 1L,
+        trt_group = trt_group,
         
         out_time = as.double(data[[gp$time_out_var]]),
-        out_group = as.integer(factor(data[[group_var]], levels = levels(group_factor))) - 1L,
+        out_group = out_group,
         
         p_b0_idx = as.integer(p_b0_idx),
         p_b1_idx = as.integer(p_b1_idx),
@@ -231,8 +254,9 @@ bjlm <- function(
     p_om = as.integer(p_om),
     x_rho = if (n_bp > 0) lapply(x_rho_list, as.double) else list(-1),
     p_rho = as.integer(p_rho),
-    group_b0 = if (n_groups > 0) group_indices else -1L,
-    n_groups_b0 = as.integer(n_groups),
+    group_b0 = if (!is.null(re_info$re_group) && n_groups > 0) group_indices else -1L,
+    n_groups_b0 = if (!is.null(re_info$re_group)) as.integer(n_groups) else 0L,
+    group_prop = if (n_groups > 0) group_indices else -1L,
     prior_mean_b0 = pv$b0$mean,
     prior_sd_b0 = pv$b0$sd,
     prior_lb_b0 = pv$b0$lb,
@@ -287,6 +311,10 @@ bjlm <- function(
 
   draws_list <- lapply(seq_len(chains), function(c) {
     mat <- raw$draws[[c]]
+    if (ncol(mat) != length(all_names)) {
+      message("Dimension mismatch! mat has ", ncol(mat), " columns but all_names has ", length(all_names), " elements.")
+      message("all_names: ", paste(all_names, collapse = ", "))
+    }
     colnames(mat) <- all_names
     mat
   })
@@ -326,7 +354,7 @@ bjlm <- function(
       subject_var = re_info$re_group,
       merged_cols = character(0),
       shared_cols = character(0),
-      zero_breakpoint = FALSE,
+      zero_breakpoint = is.null(b1),
       propensity_formula = propensity,
       outcome_formula = outcome,
       b0_formula = b0_fixed_formula,

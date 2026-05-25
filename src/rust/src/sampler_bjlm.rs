@@ -950,6 +950,10 @@ impl LinearCache {
     }
 }
 
+fn softplus(x: f64) -> f64 {
+    if x > 20.0 { x } else { x.exp().ln_1p() }
+}
+
 fn hmc_step_om_weighted(
     data: &ModelData, priors: &Priors, state: &mut State, k: usize,
     cache: &LinearCache, weights: &[f64], adapt: &mut HmcAdapt, rng: &mut StdRng,
@@ -982,18 +986,40 @@ fn hmc_step_om_weighted(
             mu[i] += delta_k[i] * di * si;
         }
 
-        let r = &data.y - &mu;
-        // WEIGHTED log-likelihood
         let mut ll = 0.0;
-        for i in 0..data.n {
-            ll += -0.5 * weights[i] * r[i] * r[i] / (sigma * sigma);
+        let mut grad_ll_mu = DVector::<f64>::zeros(data.n);
+
+        match data.outcome_family {
+            crate::model::OutcomeFamily::Gaussian => {
+                let inv_s2 = 1.0 / (sigma * sigma);
+                for i in 0..data.n {
+                    let ri = data.y[i] - mu[i];
+                    ll += -0.5 * weights[i] * ri * ri * inv_s2;
+                    grad_ll_mu[i] = weights[i] * ri * inv_s2;
+                }
+            },
+            crate::model::OutcomeFamily::Binomial => {
+                for i in 0..data.n {
+                    let expit_mu = sigmoid(mu[i]);
+                    ll += weights[i] * (data.y[i] * mu[i] - softplus(mu[i]));
+                    grad_ll_mu[i] = weights[i] * (data.y[i] - expit_mu);
+                }
+            },
+            crate::model::OutcomeFamily::NegativeBinomial => {
+                let r_param = state.r;
+                for i in 0..data.n {
+                    let expit_mu = sigmoid(mu[i]);
+                    ll += weights[i] * (data.y[i] * mu[i] - (data.y[i] + r_param) * softplus(mu[i]));
+                    grad_ll_mu[i] = weights[i] * (data.y[i] - (data.y[i] + r_param) * expit_mu);
+                }
+            }
         }
+
         let lp = log_truncated_normal_prior(
             q.as_slice(), &priors.om_mean[k], &priors.om_sd[k],
             &priors.om_lb[k], &priors.om_ub[k],
         );
 
-        let inv_s2 = 1.0 / (sigma * sigma);
         let mut grad = DVector::<f64>::zeros(p);
         for i in 0..data.n {
             let di = data.tau[i] - om_k[i];
@@ -1002,8 +1028,7 @@ fn hmc_step_om_weighted(
             let bi = cache.delta_vals[k][i];
             let mut dmu_dom = -(bi * si + di * ri * si * (1.0 - si) * bi);
             if is_om1 { dmu_dom -= cache.b1_vals[i]; }
-            // WEIGHTED gradient
-            let factor = weights[i] * r[i] * inv_s2 * dmu_dom;
+            let factor = grad_ll_mu[i] * dmu_dom;
             for j in 0..p {
                 grad[j] -= factor * data.x_om[k][(i, j)];
             }
@@ -1051,24 +1076,47 @@ fn hmc_step_rho_weighted(
             mu[i] += delta_k[i] * di * si;
         }
 
-        let r = &data.y - &mu;
         let mut ll = 0.0;
-        for i in 0..data.n {
-            ll += -0.5 * weights[i] * r[i] * r[i] / (sigma * sigma);
+        let mut grad_ll_mu = DVector::<f64>::zeros(data.n);
+
+        match data.outcome_family {
+            crate::model::OutcomeFamily::Gaussian => {
+                let inv_s2 = 1.0 / (sigma * sigma);
+                for i in 0..data.n {
+                    let ri = data.y[i] - mu[i];
+                    ll += -0.5 * weights[i] * ri * ri * inv_s2;
+                    grad_ll_mu[i] = weights[i] * ri * inv_s2;
+                }
+            },
+            crate::model::OutcomeFamily::Binomial => {
+                for i in 0..data.n {
+                    let expit_mu = sigmoid(mu[i]);
+                    ll += weights[i] * (data.y[i] * mu[i] - softplus(mu[i]));
+                    grad_ll_mu[i] = weights[i] * (data.y[i] - expit_mu);
+                }
+            },
+            crate::model::OutcomeFamily::NegativeBinomial => {
+                let r_param = state.r;
+                for i in 0..data.n {
+                    let expit_mu = sigmoid(mu[i]);
+                    ll += weights[i] * (data.y[i] * mu[i] - (data.y[i] + r_param) * softplus(mu[i]));
+                    grad_ll_mu[i] = weights[i] * (data.y[i] - (data.y[i] + r_param) * expit_mu);
+                }
+            }
         }
+
         let lp = log_truncated_normal_prior(
             q.as_slice(), &priors.rho_mean[k], &priors.rho_sd[k],
             &priors.rho_lb[k], &priors.rho_ub[k],
         );
 
-        let inv_s2 = 1.0 / (sigma * sigma);
         let mut grad = DVector::<f64>::zeros(p);
         for i in 0..data.n {
             let di = data.tau[i] - om_k[i];
             let si = sigmoid(di * rho_k[i]);
             let bi = cache.delta_vals[k][i];
             let dmu_drho = di * di * si * (1.0 - si) * bi;
-            let factor = weights[i] * r[i] * inv_s2 * dmu_drho;
+            let factor = grad_ll_mu[i] * dmu_drho;
             for j in 0..p {
                 grad[j] -= factor * data.x_rho[k][(i, j)];
             }
@@ -1212,14 +1260,14 @@ pub fn run_chain_bjlm(
         );
 
         // Expand subject-level weights to observation-level
-        // Cross-sectional: group_b0 is empty, weights map 1:1
-        // Longitudinal: expand via group indices
-        let weights_obs = if outcome_data.group_b0.is_empty() || outcome_data.n_groups_b0 == 0 {
+        let weights_obs = if outcome_data.group_prop.is_empty() || outcome_data.group_prop[0] == usize::MAX {
             // Cross-sectional: n_subjects == n_obs, use weights directly
             weights_subj.clone()
         } else {
+            // Convert group_prop (Vec<usize>) to Vec<i32> for expand_weights_to_obs
+            let group_prop_i32: Vec<i32> = outcome_data.group_prop.iter().map(|&x| x as i32).collect();
             expand_weights_to_obs(
-                &weights_subj, &outcome_data.group_b0, outcome_data.n,
+                &weights_subj, &group_prop_i32, outcome_data.n,
             )
         };
 
