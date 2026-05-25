@@ -275,7 +275,7 @@ stan_data <- list(
   Y = dat_gp$Y,
   X_obs = dat_gp$X_obs,
   time = dat_gp$time,
-  weights = dat_gp$ipw
+  w = dat_gp$ipw
 )
 
 stan_fit <- stan(
