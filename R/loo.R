@@ -64,7 +64,7 @@ log_lik.bjlm_fit <- function(object, ...) {
   # Check if there is treatment variation in the data
   has_trt_variation <- TRUE
   if (!is.null(object$propensity_formula)) {
-    prop_vars <- all_vars(object$propensity_formula)
+    prop_vars <- all.vars(object$propensity_formula)
     if (length(prop_vars) > 0) {
       trt_var <- prop_vars[1]
       if (trt_var %in% names(object$data)) {
