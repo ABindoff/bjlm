@@ -163,29 +163,222 @@ causal_effect <- function(fit, param = NULL, prob = 0.95) {
 #' Weight diagnostics for bjlm_fit
 #'
 #' Reports summary statistics of the IPW weights across posterior draws,
-#' including checks for positivity violations.
+#' including checks for positivity violations, Effective Sample Size (ESS),
+#' trimming proportion, and a text-based distribution histogram.
 #'
 #' @param fit A \code{bjlm_fit} object.
 #'
+#' @return Invisibly, a list containing observation-level mean weights, ESS draws,
+#'   trimmed proportions, and untrimmed max weights.
 #' @export
 weight_diagnostics <- function(fit) {
   stopifnot(inherits(fit, "bjlm_fit"))
 
-  if (requireNamespace("posterior", quietly = TRUE)) {
-    draws <- posterior::subset_draws(fit$draws, variable = "mean_weight")
-    draws_mat <- posterior::as_draws_matrix(draws)
-    w_draws <- as.numeric(draws_mat[, "mean_weight"])
+  # 1. Subject-level data
+  subject_var <- fit$subject_var
+  subject_data <- if (!is.null(subject_var) && subject_var %in% names(fit$data)) {
+    fit$data[!duplicated(fit$data[[subject_var]]), , drop = FALSE]
   } else {
-    stop("Package 'posterior' is required.")
+    fit$data
+  }
+  
+  # 2. Extract propensity model info
+  prop_formula <- fit$propensity_formula
+  if (is.null(prop_formula)) {
+    # If no propensity model was specified (outcome-only model), weights are all 1.0
+    cat("\n=== Weight Diagnostics ===\n")
+    cat("  Propensity Model:          None (Outcome-only model fitted)\n")
+    cat("  Weight Type:               None\n")
+    cat("  All weights are identical to 1.0.\n")
+    return(invisible(list(
+      weights = rep(1.0, nrow(fit$data)),
+      ess = rep(nrow(fit$data), fit$iter - fit$warmup),
+      trimmed_prop = rep(0, fit$iter - fit$warmup),
+      max_untrimmed = rep(1.0, fit$iter - fit$warmup)
+    )))
+  }
+  
+  treatment_var <- all.vars(prop_formula)[1]
+  rhs_formula <- formula(delete.response(terms(prop_formula)))
+  
+  x_prop <- model.matrix(rhs_formula, data = subject_data)
+  treatment <- as.numeric(subject_data[[treatment_var]])
+  n_subj <- length(treatment)
+  
+  # 3. Extract alpha draws
+  alpha_names <- fit$propensity_names
+  if (is.null(alpha_names)) {
+    alpha_names <- colnames(posterior::as_draws_matrix(fit$draws))
+    alpha_names <- alpha_names[grepl("^alpha_", alpha_names)]
+  }
+  
+  if (length(alpha_names) == 0) {
+    stop("Could not find propensity parameter draws (alpha) in the fitted model.")
+  }
+  
+  alpha_draws <- posterior::subset_draws(fit$draws, variable = alpha_names)
+  alpha_mat <- posterior::as_draws_matrix(alpha_draws)
+  
+  # Ensure column order matches colnames(x_prop)
+  expected_names <- paste0("alpha_", colnames(x_prop))
+  colnames_alpha <- colnames(alpha_mat)
+  col_indices <- sapply(colnames(x_prop), function(col) {
+    target <- paste0("alpha_", col)
+    idx <- which(colnames_alpha == target)
+    if (length(idx) == 0) {
+      idx <- which(grepl(col, colnames_alpha, fixed = TRUE))
+    }
+    if (length(idx) == 0) {
+      stop(sprintf("Could not find propensity coefficient for covariate '%s' in posterior draws.", col))
+    }
+    idx[1]
+  })
+  
+  alpha_mat <- alpha_mat[, col_indices, drop = FALSE]
+  class(alpha_mat) <- "matrix"
+  S <- nrow(alpha_mat)
+  
+  # 4. Determine if treatment is continuous
+  is_continuous <- !all(treatment %in% c(0, 1))
+  
+  # 5. Compute subject-level weights for each draw
+  W <- matrix(NA_real_, nrow = S, ncol = n_subj)
+  trimmed_prop <- numeric(S)
+  max_untrimmed <- numeric(S)
+  
+  max_w <- fit$max_weight
+  w_type <- fit$weight_type
+  
+  if (is_continuous) {
+    mean_t <- mean(treatment)
+    var_t <- var(treatment)
+    sd_t <- sd(treatment)
+    
+    for (s in seq_len(S)) {
+      alpha_s <- alpha_mat[s, ]
+      pred_s <- as.vector(x_prop %*% alpha_s)
+      
+      # Estimate residual variance for this draw
+      resid_sq <- (treatment - pred_s)^2
+      sigma_a_sq_s <- mean(resid_sq)
+      
+      # Conditional density f(T_i | X_i)
+      cond_dens <- dnorm(treatment, mean = pred_s, sd = sqrt(sigma_a_sq_s))
+      cond_dens <- pmax(cond_dens, 1e-10) # prevent division by zero
+      
+      # Marginal density f(T_i)
+      marg_dens <- dnorm(treatment, mean = mean_t, sd = sd_t)
+      
+      is_stabilised <- w_type %in% c("stabilised_ate", "stabilised_att")
+      
+      untrimmed <- if (is_stabilised) {
+        marg_dens / cond_dens
+      } else {
+        1.0 / cond_dens
+      }
+      
+      max_untrimmed[s] <- max(untrimmed)
+      trimmed_w <- pmin(untrimmed, max_w)
+      W[s, ] <- trimmed_w
+      trimmed_prop[s] <- mean(untrimmed >= max_w - 1e-6)
+    }
+  } else {
+    p_marginal <- mean(treatment)
+    for (s in seq_len(S)) {
+      alpha_s <- alpha_mat[s, ]
+      eta_s <- as.vector(x_prop %*% alpha_s)
+      pi_s <- 1 / (1 + exp(-eta_s))
+      pi_s <- pmax(pmin(pi_s, 1 - 1e-6), 1e-6)
+      
+      untrimmed <- if (w_type == "ate") {
+        ifelse(treatment > 0.5, 1.0 / pi_s, 1.0 / (1.0 - pi_s))
+      } else if (w_type == "att") {
+        ifelse(treatment > 0.5, 1.0, pi_s / (1.0 - pi_s))
+      } else if (w_type == "stabilised_ate") {
+        ifelse(treatment > 0.5, p_marginal / pi_s, (1.0 - p_marginal) / (1.0 - pi_s))
+      } else if (w_type == "stabilised_att") {
+        ifelse(treatment > 0.5, 1.0, p_marginal * pi_s / ((1.0 - p_marginal) * (1.0 - pi_s)))
+      } else {
+        ifelse(treatment > 0.5, 1.0 / pi_s, 1.0 / (1.0 - pi_s))
+      }
+      
+      max_untrimmed[s] <- max(untrimmed)
+      trimmed_w <- pmin(untrimmed, max_w)
+      W[s, ] <- trimmed_w
+      trimmed_prop[s] <- mean(untrimmed >= max_w - 1e-6)
+    }
   }
 
+  # 6. Expand to observation level
+  if (!is.null(subject_var) && subject_var %in% names(fit$data)) {
+    obs_subjects <- fit$data[[subject_var]]
+    subj_indices <- match(obs_subjects, subject_data[[subject_var]])
+    W_obs <- W[, subj_indices, drop = FALSE]
+  } else {
+    W_obs <- W
+  }
+  
+  N_obs <- ncol(W_obs)
+  
+  # Calculate ESS for each draw
+  ess_draws <- numeric(S)
+  for (s in seq_len(S)) {
+    w_s <- W_obs[s, ]
+    mean_w <- mean(w_s)
+    sd_w <- sd(w_s)
+    cv_sq <- if (mean_w > 0) (sd_w / mean_w)^2 else 0
+    ess_draws[s] <- N_obs / (1 + cv_sq)
+  }
+  
+  # Mean weight for each observation
+  obs_mean_weights <- colMeans(W_obs)
+  
+  # 7. Print premium diagnostics report
   cat("\n=== Weight Diagnostics ===\n")
-  cat(sprintf("  Weight type: %s\n", fit$weight_type))
-  cat(sprintf("  Max weight (trim): %g\n", fit$max_weight))
-  cat(sprintf("  Mean weight across draws: %.3f (SD: %.3f)\n", mean(w_draws), sd(w_draws)))
-  cat(sprintf("  Range: [%.3f, %.3f]\n", min(w_draws), max(w_draws)))
+  cat(sprintf("  Exposure Type:             %s\n", if (is_continuous) "Continuous (Generalized Propensity Score)" else "Binary (Logistic propensity model)"))
+  cat(sprintf("  Weight Type:               %s\n", w_type))
+  cat(sprintf("  Max weight (trim):         %g\n", max_w))
+  cat(sprintf("  Posterior Mean ESS:        %.1f (%.1f%% of sample size %d)\n", 
+              mean(ess_draws), 100 * mean(ess_draws) / N_obs, N_obs))
+  cat(sprintf("  Mean untrimmed max weight: %.1f [Range of max: %.1f, %.1f]\n", 
+              mean(max_untrimmed), min(max_untrimmed), max(max_untrimmed)))
+  cat(sprintf("  Mean prop. weights trimmed: %.2f%%\n", 100 * mean(trimmed_prop)))
+  
+  # Positivity Check
+  med_max_untrimmed <- median(max_untrimmed)
+  if (med_max_untrimmed > 50) {
+    cat("  WARNING: High untrimmed weights suggest potential propensity score positivity violations!\n")
+  } else {
+    cat("  Positivity check:          Passed (no extreme untrimmed weights detected)\n")
+  }
+  
+  cat("\n  Observation-level weight distribution summary:\n")
+  smry <- quantile(obs_mean_weights, probs = c(0, 0.25, 0.5, 0.75, 1))
+  cat(sprintf("    Min: %.3f | 25%%: %.3f | Median: %.3f | 75%%: %.3f | Max: %.3f\n\n",
+              smry[1], smry[2], smry[3], smry[4], smry[5]))
+  
+  # Text-based histogram of mean weights
+  if (sd(obs_mean_weights) > 1e-6) {
+    bins <- cut(obs_mean_weights, breaks = seq(min(obs_mean_weights), max(obs_mean_weights), length.out = 6), include.lowest = TRUE)
+    bin_counts <- table(bins)
+    cat("  Weight distribution histogram (text-based):\n")
+    for (bin_name in names(bin_counts)) {
+      count <- bin_counts[bin_name]
+      pct <- 100 * count / length(obs_mean_weights)
+      bar <- paste(rep("■", round(pct / 4)), collapse = "")
+      cat(sprintf("    %-18s : %5.1f%% | %s\n", bin_name, pct, bar))
+    }
+  } else {
+    cat("  Weight distribution histogram: all weights are identical (1.0).\n")
+  }
+  cat("\n")
 
-  invisible(w_draws)
+  invisible(list(
+    weights = obs_mean_weights,
+    ess = ess_draws,
+    trimmed_prop = trimmed_prop,
+    max_untrimmed = max_untrimmed
+  ))
 }
 
 
