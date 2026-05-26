@@ -282,7 +282,7 @@ bjlm <- function(
     sigma_u_shape = outcome_priors$sigma_u$shape,
     sigma_u_scale = outcome_priors$sigma_u$scale,
     prior_r_shape = outcome_priors$r$shape,
-    prior_r_rate = outcome_priors$r$scale,
+    prior_r_rate = 1.0 / outcome_priors$r$scale,
     x_prop = as.double(x_prop), p_prop = as.integer(p_prop),
     latent_gps = gp_list,
     treatment = as.double(treatment),

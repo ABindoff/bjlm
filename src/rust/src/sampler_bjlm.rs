@@ -638,10 +638,17 @@ fn sample_r_weighted(data: &ModelData, priors: &Priors, state: &mut State, weigh
     for i in 0..data.n {
         let y = data.y[i];
         let w = weights[i];
-        let psi = mu[i];
+        let mu_i = mu[i].exp(); // mu = exp(psi)
         
-        let ll_curr = ln_gamma(y + current_r) - ln_gamma(current_r) - current_r * (1.0 + psi.exp()).ln();
-        let ll_prop = ln_gamma(y + prop_r) - ln_gamma(prop_r) - prop_r * (1.0 + psi.exp()).ln();
+        // Full NB log-pmf (terms that depend on r):
+        // lgamma(y+r) - lgamma(r) + r*ln(r/(r+mu)) + y*ln(mu/(r+mu))
+        // lgamma(y+1) cancels in the difference
+        let ll_curr = ln_gamma(y + current_r) - ln_gamma(current_r)
+            + current_r * (current_r / (current_r + mu_i)).ln()
+            + y * (mu_i / (current_r + mu_i)).ln();
+        let ll_prop = ln_gamma(y + prop_r) - ln_gamma(prop_r)
+            + prop_r * (prop_r / (prop_r + mu_i)).ln()
+            + y * (mu_i / (prop_r + mu_i)).ln();
         
         log_lik_diff += w * (ll_prop - ll_curr);
     }
