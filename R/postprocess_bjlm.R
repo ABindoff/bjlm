@@ -81,9 +81,57 @@ print.bjlm_fit <- function(x, ...) {
 #'   and the full posterior draws vector.
 #'
 #' @export
-causal_effect <- function(fit, param, prob = 0.95) {
+causal_effect <- function(fit, param = NULL, prob = 0.95) {
   stopifnot(inherits(fit, "bjlm_fit"))
   alpha <- 1 - prob
+
+  # Retrieve treatment variable name
+  treatment_name <- fit$treatment_name
+  if (is.null(treatment_name) || is.na(treatment_name)) {
+    if (!is.null(fit$propensity_formula)) {
+      treatment_name <- all.vars(fit$propensity_formula)[1]
+    }
+  }
+
+  if (is.null(param)) {
+    if (is.null(treatment_name) || is.na(treatment_name)) {
+      stop("`param` must be specified because treatment variable name could not be auto-detected.")
+    }
+    
+    # Find all outcome parameters containing treatment_name
+    matching_params <- fit$outcome_names[grepl(treatment_name, fit$outcome_names)]
+    
+    if (length(matching_params) == 0) {
+      stop(sprintf("No parameter in the outcome model contains the treatment variable name '%s'.", treatment_name))
+    }
+    
+    if (length(matching_params) == 1) {
+      param <- matching_params[1]
+      message(sprintf("Auto-detected treatment parameter: '%s'", param))
+    } else {
+      # In change-point models, default to the slope-change parameter (delta) if it exists,
+      # otherwise default to the first match.
+      slope_matches <- matching_params[grepl("^delta", matching_params)]
+      if (length(slope_matches) > 0) {
+        param <- slope_matches[1]
+      } else {
+        param <- matching_params[1]
+      }
+      message(sprintf("Multiple treatment parameters found (%s). Defaulting to: '%s'", 
+                      paste(paste0("'", matching_params, "'"), collapse = ", "), param))
+    }
+  } else {
+    # Validate user-specified parameter name
+    if (!is.null(treatment_name) && !is.na(treatment_name)) {
+      if (!grepl(treatment_name, param)) {
+        warning(sprintf("The specified parameter '%s' does not contain the treatment variable name '%s'. Are you sure this is the correct parameter?", param, treatment_name))
+      }
+    }
+    if (!param %in% fit$outcome_names) {
+      stop(sprintf("Parameter '%s' not found in the outcome model draws. Available parameters: %s", 
+                   param, paste(paste0("'", fit$outcome_names, "'"), collapse = ", ")))
+    }
+  }
 
   if (requireNamespace("posterior", quietly = TRUE)) {
     draws <- posterior::subset_draws(fit$draws, variable = param)

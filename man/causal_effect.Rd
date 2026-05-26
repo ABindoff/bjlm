@@ -4,7 +4,7 @@
 \alias{causal_effect}
 \title{Extract causal effect estimates}
 \usage{
-causal_effect(fit, param, prob = 0.95)
+causal_effect(fit, param = NULL, prob = 0.95)
 }
 \arguments{
 \item{fit}{A \code{bjlm_fit} object.}
