@@ -458,6 +458,11 @@ plot_propensity <- function(fit, type = c("overlap", "weights", "both"), ...) {
   }
   type <- match.arg(type)
   
+  if (is.null(fit$propensity_formula)) {
+    warning("No propensity score model specified in this fit. Skipping propensity plotting.")
+    return(NULL)
+  }
+  
   prop_vars <- all.vars(fit$propensity_formula)
   treatment_name <- fit$treatment_name
   prop_covariate_names <- prop_vars[prop_vars != treatment_name]

@@ -163,8 +163,31 @@ latent_gp <- function(model, name, data, obs_var, time_var, time_trt_var, time_o
 #' @export
 compile <- function(model) {
   if (!inherits(model, "bjlm_model")) stop("Must be a bjlm_model object.")
-  if (is.null(model$propensity)) stop("Model is missing propensity() specification.")
   if (is.null(model$outcome)) stop("Model is missing outcome() specification.")
+
+  if (is.null(model$propensity)) {
+    # Auto-generate a dummy propensity block to keep Rust backend compatible
+    out_data <- model$outcome$data
+    if (is.null(out_data)) stop("Outcome dataset is missing.")
+    
+    # Generate a unique dummy treatment name
+    dummy_trt_name <- "dummy_trt"
+    while (dummy_trt_name %in% names(out_data)) {
+      dummy_trt_name <- paste0(dummy_trt_name, "_gp")
+    }
+    
+    # Inject constant treatment into a copy of out_data
+    out_data[[dummy_trt_name]] <- 1L
+    model$outcome$data <- out_data
+    
+    model$propensity <- list(
+      formula = stats::as.formula(paste0(dummy_trt_name, " ~ 1")),
+      data = out_data,
+      family = stats::binomial("logit")
+    )
+    model$weight_type <- "none"
+    model$auto_propensity <- TRUE
+  }
 
   out_data <- model$outcome$data
   prop_data <- model$propensity$data %||% out_data
@@ -436,7 +459,8 @@ fit.bjlm_compiled_model <- function(object, priors = NULL, ...) {
   fit_obj$merged_cols <- object$merged_cols
   fit_obj$shared_cols <- object$shared_cols
   fit_obj$zero_breakpoint <- object$zero_breakpoint
-  fit_obj$propensity_formula <- object$model$propensity$formula
+  fit_obj$propensity_formula <- if (isTRUE(object$model$auto_propensity)) NULL else object$model$propensity$formula
+  fit_obj$treatment_name <- if (isTRUE(object$model$auto_propensity)) NULL else object$treatment_name
   fit_obj$outcome_formula <- object$model$outcome$formula
   
   # Attach individual parameter formulas for prediction and plotting S3 methods
