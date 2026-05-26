@@ -98,3 +98,19 @@ test_that("fitted S3 method, diagnostics, and plotting functions work as expecte
   expect_s3_class(p_prop_both$overlap, "ggplot")
   expect_s3_class(p_prop_both$weights, "ggplot")
 })
+
+test_that("recovery_plot works with bjlm_fit objects", {
+  skip_if_not_installed("ggplot2")
+  skip_if_not_installed("posterior")
+  
+  set.seed(42)
+  dat <- simulate_smoothbp(n_subj = 5, n_obs = 3, seed = 42)
+  
+  fit <- bjlm_model() |> 
+    outcome(y ~ tau, b0 = ~ 1 + (1 | subject), b1 = ~ 1, data = dat) |> 
+    compile() |> 
+    fit(iter = 20, warmup = 10, chains = 1, verbose = FALSE)
+    
+  p <- recovery_plot(fit, dat)
+  expect_s3_class(p, "ggplot")
+})

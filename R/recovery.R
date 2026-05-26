@@ -12,7 +12,7 @@
 #' \code{(Intercept)} term for comparison against the scalar true value from
 #' the simulation.
 #'
-#' @param fit  A \code{smoothbp_fit} object.
+#' @param fit  A \code{smoothbp_fit} or \code{bjlm_fit} object.
 #' @param dat  The data frame used to fit \code{fit}, which must carry a
 #'   \code{"true_params"} attribute (returned by \code{\link{simulate_smoothbp}}).
 #' @param level Credible interval width.  Default \code{0.95}.
@@ -30,8 +30,8 @@
 #'
 #' @export
 recovery_plot <- function(fit, dat, level = 0.95) {
-  if (!inherits(fit, "smoothbp_fit")) {
-    stop("`fit` must be a smoothbp_fit object.")
+  if (!inherits(fit, "smoothbp_fit") && !inherits(fit, "bjlm_fit")) {
+    stop("`fit` must be a smoothbp_fit or bjlm_fit object.")
   }
   tp <- attr(dat, "true_params")
   if (is.null(tp)) {

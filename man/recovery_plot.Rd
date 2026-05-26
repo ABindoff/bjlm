@@ -7,7 +7,7 @@
 recovery_plot(fit, dat, level = 0.95)
 }
 \arguments{
-\item{fit}{A \code{smoothbp_fit} object.}
+\item{fit}{A \code{smoothbp_fit} or \code{bjlm_fit} object.}
 
 \item{dat}{The data frame used to fit \code{fit}, which must carry a
 \code{"true_params"} attribute (returned by \code{\link{simulate_smoothbp}}).}
