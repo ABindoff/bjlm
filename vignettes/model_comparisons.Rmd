@@ -145,7 +145,7 @@ if (file.exists("sim1_bjlm_fit.rds")) {
       family = "negative_binomial"
     ) |>
     compile() |>
-    fit(chains = 4, iter = 4000, warmup = 3000, cores = 4, seed = 42, priors = my_priors)
+    fit(chains = 4, iter = 4000, warmup = 3000, cores = 4, seed = 42, priors = my_priors, weights = "ate")
   saveRDS(bjlm_fit_nb, "sim1_bjlm_fit.rds")
 }
 ```
@@ -177,8 +177,6 @@ brms_draws <- posterior::as_draws_df(brms_fit) |>
 bjlm_draws <- posterior::as_draws_df(bjlm_fit_nb$draws) |> 
   as_tibble() |>
   select(`b0_(Intercept)` = `b0_(Intercept)`, `b0_Trt` = b0_Trt, `b0_X_obs` = b0_X_obs, shape = r) |>
-  # Shift bjlm's intercept to align with brms due to parametrisation
-  mutate(`b0_(Intercept)` = `b0_(Intercept)` + log(shape)) |>
   mutate(model = "bjlm")
 
 combined_draws <- bind_rows(brms_draws, bjlm_draws)
@@ -335,9 +333,19 @@ Because `bjlm` uses conditional conjugacy for parameter sampling where possible,
 ### Posterior Densities and 1-Wasserstein
 
 ```{r sim2-posteriors}
-stan_draws <- as.data.frame(stan_fit, pars = c("b0_int", "b0_x", "sigma_y", "rho")) |>
-  select(`b0_(Intercept)` = b0_int, `b0_X_obs` = b0_x, sigma = sigma_y, X_obs_rho = rho) |>
-  mutate(model = "rstan")
+all_pars <- stan_fit@sim$fnames_oi
+has_sigma_y <- "sigma_y" %in% all_pars
+
+if (has_sigma_y) {
+  stan_draws <- as.data.frame(stan_fit, pars = c("b0_int", "b0_x", "sigma_y", "rho")) |>
+    select(`b0_(Intercept)` = b0_int, `b0_X_obs` = b0_x, sigma = sigma_y, X_obs_rho = rho) |>
+    mutate(model = "rstan")
+} else {
+  stan_draws <- as.data.frame(stan_fit, pars = c("b0_int", "b0_x", "sigma_y_sq", "rho")) |>
+    select(`b0_(Intercept)` = b0_int, `b0_X_obs` = b0_x, sigma = sigma_y_sq, X_obs_rho = rho) |>
+    mutate(sigma = sqrt(sigma)) |>
+    mutate(model = "rstan")
+}
 
 bjlm_draws_gp <- posterior::as_draws_df(bjlm_fit_gp$draws) |> 
   as_tibble() |>
@@ -366,8 +374,14 @@ Slight discrepancies in Wasserstein distances for GP hyperparameters (`rho`, `si
 # Extract draws from stan_fit
 draws_b0_int <- as.vector(as.matrix(stan_fit, pars = "b0_int"))
 draws_b0_x <- as.vector(as.matrix(stan_fit, pars = "b0_x"))
-draws_sigma_y <- as.vector(as.matrix(stan_fit, pars = "sigma_y"))
 draws_X_true <- as.matrix(stan_fit, pars = "X_true")
+
+all_pars <- stan_fit@sim$fnames_oi
+if ("sigma_y" %in% all_pars) {
+  draws_sigma_y <- as.vector(as.matrix(stan_fit, pars = "sigma_y"))
+} else {
+  draws_sigma_y <- sqrt(as.vector(as.matrix(stan_fit, pars = "sigma_y_sq")))
+}
 
 # Reconstruct log-likelihood matrix (S x N) in R manually
 # to avoid re-running the 4-hour Stan model to add a generated quantities block.
