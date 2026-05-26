@@ -60,7 +60,23 @@ log_lik.bjlm_fit <- function(object, ...) {
 
   # Apply weighting if applicable
   weight_type <- object$weight_type
-  if (!is.null(weight_type) && weight_type != "none") {
+  
+  # Check if there is treatment variation in the data
+  has_trt_variation <- TRUE
+  if (!is.null(object$propensity_formula)) {
+    prop_vars <- all_vars(object$propensity_formula)
+    if (length(prop_vars) > 0) {
+      trt_var <- prop_vars[1]
+      if (trt_var %in% names(object$data)) {
+        trt_vals <- object$data[[trt_var]]
+        if (length(unique(trt_vals)) <= 1) {
+          has_trt_variation <- FALSE
+        }
+      }
+    }
+  }
+
+  if (!is.null(weight_type) && weight_type != "none" && has_trt_variation) {
     # Reconstruct weights from the draws of alpha
     prop_vars <- all.vars(object$propensity_formula)
     trt_var <- prop_vars[1]

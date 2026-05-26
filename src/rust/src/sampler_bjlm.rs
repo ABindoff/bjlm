@@ -435,14 +435,201 @@ fn sample_gp_state(
 }
 
 
+fn compute_ll_noncentered(
+    a: f64,
+    r: f64,
+    s: f64,
+    gp: &crate::model::GpData,
+    gp_idx: usize,
+    z_list: &[DVector<f64>],
+    mu_full: &DVector<f64>,
+    eta_base: &DVector<f64>,
+    outcome_state: &State,
+    outcome_data: &ModelData,
+    prop_data: &PropensityData,
+    weights_obs: &[f64],
+    inv_sig2_y: f64,
+    center: &Option<DVector<f64>>,
+    beta_b0: f64,
+    beta_b1: f64,
+    beta_prop: f64,
+) -> (f64, Vec<Vec<f64>>) {
+    let mut ll = 0.0;
+    let inv_s2 = 1.0 / (s * s);
+    
+    // Build proposed x_list
+    let mut x_list = Vec::new();
+    for s_idx in 0..gp.subjects.len() {
+        let subj = &gp.subjects[s_idx];
+        let nt = subj.times.len();
+        if nt == 0 {
+            x_list.push(Vec::new());
+            continue;
+        }
+        
+        let cov = crate::gp::compute_cov_matrix(&subj.times, a, r, 1e-6);
+        let chol = match cov.clone().cholesky() {
+            Some(c) => c,
+            None => {
+                let cov_jit = crate::gp::compute_cov_matrix(&subj.times, a, r, 1e-3);
+                cov_jit.cholesky().unwrap_or_else(|| {
+                    DMatrix::identity(nt, nt).cholesky().unwrap()
+                })
+            }
+        };
+        let z = &z_list[s_idx];
+        let x_prop_vec = chol.l() * z;
+        x_list.push(x_prop_vec.iter().cloned().collect::<Vec<f64>>());
+    }
+    
+    // Evaluate total likelihood
+    for s_idx in 0..gp.subjects.len() {
+        let subj = &gp.subjects[s_idx];
+        let nt = subj.times.len();
+        if nt == 0 { continue; }
+        
+        let x_cand = &x_list[s_idx];
+        let current_x = &outcome_state.gp_states[gp_idx].x[s_idx];
+        
+        for i in 0..subj.out_indices.len() {
+            let tidx = subj.out_indices[i];
+            let gidx = subj.out_global[i];
+            let w = weights_obs[gidx];
+            let t_val = if let Some(c) = center {
+                outcome_data.tau[gidx] - c[gidx]
+            } else {
+                outcome_data.tau[gidx]
+            };
+            let eff_beta = beta_b0 + beta_b1 * t_val;
+            
+            let mu_i = mu_full[gidx] - eff_beta * current_x[tidx] + eff_beta * x_cand[tidx];
+            
+            use crate::model::OutcomeFamily;
+            match outcome_data.outcome_family {
+                OutcomeFamily::Gaussian => {
+                    let r_err = outcome_data.y[gidx] - mu_i;
+                    ll += -0.5 * w * inv_sig2_y * r_err * r_err;
+                }
+                OutcomeFamily::Binomial => {
+                    let y = outcome_data.y[gidx];
+                    let log1pexp = if mu_i > 20.0 { mu_i } else { (1.0_f64 + mu_i.exp()).ln() };
+                    ll += w * (y * mu_i - log1pexp);
+                }
+                OutcomeFamily::NegativeBinomial => {
+                    let y = outcome_data.y[gidx];
+                    let r_param = outcome_state.r;
+                    let mu_exp = mu_i.exp();
+                    ll += w * (ln_gamma(y + r_param) - ln_gamma(r_param) - ln_gamma(y + 1.0)
+                        + r_param * (r_param / (r_param + mu_exp)).ln()
+                        + y * (mu_exp / (r_param + mu_exp)).ln());
+                }
+            }
+        }
+        
+        for i in 0..subj.obs_indices.len() {
+            let tidx = subj.obs_indices[i];
+            let gidx = subj.obs_global[i];
+            let diff = gp.obs_val[gidx] - x_cand[tidx];
+            ll += -0.5 * inv_s2 * diff * diff - s.ln();
+        }
+        
+        if beta_prop != 0.0 && !subj.trt_indices.is_empty() {
+            let tidx = subj.trt_indices[0];
+            let eta = eta_base[s_idx] - beta_prop * current_x[tidx] + beta_prop * x_cand[tidx];
+            let trt = prop_data.treatment[s_idx];
+            let log1pexp = if eta > 20.0 { eta } else if eta < -20.0 { 0.0 } else { (1.0 + eta.exp()).ln() };
+            ll += trt * eta - log1pexp;
+        }
+    }
+    
+    ll -= 0.5 * a.ln().powi(2) + a.ln();
+    ll -= 0.5 * r.ln().powi(2) + r.ln();
+    ll -= 0.5 * (s.ln() + 1.0).powi(2) + s.ln();
+    
+    (ll, x_list)
+}
+
 fn sample_gp_hyperparameters(
     outcome_data: &ModelData,
+    prop_data: &PropensityData,
     outcome_state: &mut State,
+    prop_state: &PropensityState,
+    weights_obs: &[f64],
     rng: &mut StdRng,
     adapts: &mut [GpHyperAdapt],
     adapting: bool,
 ) {
     let normal = Normal::new(0.0, 1.0).unwrap();
+    let n = outcome_data.n;
+
+    // Compute base mu excluding ALL GPs
+    let mu_base = outcome_state.means(outcome_data);
+
+    // Propensity eta_base
+    let mut eta_base = DVector::zeros(prop_data.n_subjects);
+    for i in 0..prop_data.n_subjects {
+        let mut eta = 0.0;
+        for j in 0..prop_data.p_prop {
+            eta += prop_data.x_prop[(i, j)] * prop_state.alpha[j];
+        }
+        eta_base[i] = eta;
+    }
+    for (g_idx, gp) in outcome_data.latent_gps.iter().enumerate() {
+        if gp.p_prop_idx >= 0 {
+            let col = gp.p_prop_idx as usize;
+            let beta = prop_state.alpha[col];
+            for s in 0..gp.subjects.len() {
+                let subj = &gp.subjects[s];
+                let gp_x = &outcome_state.gp_states[g_idx].x[s];
+                if !subj.trt_indices.is_empty() {
+                    eta_base[s] += beta * gp_x[subj.trt_indices[0]];
+                }
+            }
+        }
+    }
+
+    // Compute mu_full
+    let mut mu_full = mu_base.clone();
+    for (g_idx, gp) in outcome_data.latent_gps.iter().enumerate() {
+        if gp.p_b0_idx >= 0 {
+            let col = gp.p_b0_idx as usize;
+            let beta = outcome_state.beta_b0[col];
+            for s in 0..gp.subjects.len() {
+                let subj = &gp.subjects[s];
+                let gp_x = &outcome_state.gp_states[g_idx].x[s];
+                for i in 0..subj.out_indices.len() {
+                    let gidx = subj.out_global[i];
+                    mu_full[gidx] += beta * gp_x[subj.out_indices[i]];
+                }
+            }
+        }
+        if gp.p_b1_idx >= 0 {
+            let col = gp.p_b1_idx as usize;
+            let beta = outcome_state.beta_b1[col];
+            if outcome_state.gamma_b1[col] {
+                let center = if outcome_data.n_breakpoints > 0 {
+                    outcome_state.omega_vec(0, &outcome_data.x_om[0])
+                } else {
+                    DVector::zeros(n)
+                };
+                for s in 0..gp.subjects.len() {
+                    let subj = &gp.subjects[s];
+                    let gp_x = &outcome_state.gp_states[g_idx].x[s];
+                    for i in 0..subj.out_indices.len() {
+                        let gidx = subj.out_global[i];
+                        let t_val = if outcome_data.n_breakpoints > 0 {
+                            outcome_data.tau[gidx] - center[gidx]
+                        } else {
+                            outcome_data.tau[gidx]
+                        };
+                        mu_full[gidx] += beta * t_val * gp_x[subj.out_indices[i]];
+                    }
+                }
+            }
+        }
+    }
+
+    let inv_sig2_y = 1.0 / (outcome_state.sigma * outcome_state.sigma);
 
     for (gp_idx, gp) in outcome_data.latent_gps.iter().enumerate() {
         let adapt = &mut adapts[gp_idx];
@@ -450,40 +637,61 @@ fn sample_gp_hyperparameters(
         let mut rho = outcome_state.gp_states[gp_idx].rho;
         let mut sigma_x = outcome_state.gp_states[gp_idx].sigma_x;
 
-        let compute_ll = |a: f64, r: f64, s: f64| -> f64 {
-            let mut ll = 0.0;
-            let inv_s2 = 1.0 / (s * s);
-            for s_idx in 0..gp.subjects.len() {
-                let subj = &gp.subjects[s_idx];
-                let nt = subj.times.len();
-                if nt == 0 { continue; }
-                
-                let cov = crate::gp::compute_cov_matrix(&subj.times, a, r, 1e-6);
-                let chol = cov.cholesky().unwrap_or_else(|| {
-                    DMatrix::identity(nt, nt).cholesky().unwrap()
-                });
-                
-                let x = DVector::from_column_slice(&outcome_state.gp_states[gp_idx].x[s_idx]);
-                let y = chol.l().solve_lower_triangular(&x).unwrap();
-                let quad = y.dot(&y);
-                let log_det: f64 = chol.l().diagonal().iter().map(|v| v.ln()).sum::<f64>() * 2.0;
-                ll -= 0.5 * quad + 0.5 * log_det;
-                
-                for i in 0..subj.obs_indices.len() {
-                    let tidx = subj.obs_indices[i];
-                    let gidx = subj.obs_global[i];
-                    let val = gp.obs_val[gidx];
-                    let err = val - x[tidx];
-                    ll -= 0.5 * err * err * inv_s2 + s.ln();
-                }
-            }
-            ll -= 0.5 * a.ln().powi(2) + a.ln();
-            ll -= 0.5 * r.ln().powi(2) + r.ln();
-            ll -= 0.5 * (s.ln() + 1.0).powi(2) + s.ln();
-            ll
+        let beta_b0 = if gp.p_b0_idx >= 0 { outcome_state.beta_b0[gp.p_b0_idx as usize] } else { 0.0 };
+        let beta_b1 = if gp.p_b1_idx >= 0 && outcome_state.gamma_b1[gp.p_b1_idx as usize] {
+            outcome_state.beta_b1[gp.p_b1_idx as usize]
+        } else { 0.0 };
+        let beta_prop = if gp.p_prop_idx >= 0 { prop_state.alpha[gp.p_prop_idx as usize] } else { 0.0 };
+
+        let center = if outcome_data.n_breakpoints > 0 {
+            Some(outcome_state.omega_vec(0, &outcome_data.x_om[0]))
+        } else {
+            None
         };
 
-        let mut current_ll = compute_ll(alpha, rho, sigma_x);
+        // Extract standardized z vectors
+        let mut z_list = Vec::new();
+        for s_idx in 0..gp.subjects.len() {
+            let subj = &gp.subjects[s_idx];
+            let nt = subj.times.len();
+            if nt == 0 {
+                z_list.push(DVector::zeros(0));
+                continue;
+            }
+            let cov = crate::gp::compute_cov_matrix(&subj.times, alpha, rho, 1e-6);
+            let chol = match cov.clone().cholesky() {
+                Some(c) => c,
+                None => {
+                    let cov_jit = crate::gp::compute_cov_matrix(&subj.times, alpha, rho, 1e-3);
+                    cov_jit.cholesky().unwrap_or_else(|| {
+                        DMatrix::identity(nt, nt).cholesky().unwrap()
+                    })
+                }
+            };
+            let x = DVector::from_column_slice(&outcome_state.gp_states[gp_idx].x[s_idx]);
+            let z = chol.l().solve_lower_triangular(&x).unwrap_or_else(|| DVector::zeros(nt));
+            z_list.push(z);
+        }
+
+        let (mut current_ll, _) = compute_ll_noncentered(
+            alpha,
+            rho,
+            sigma_x,
+            gp,
+            gp_idx,
+            &z_list,
+            &mu_full,
+            &eta_base,
+            outcome_state,
+            outcome_data,
+            prop_data,
+            weights_obs,
+            inv_sig2_y,
+            &center,
+            beta_b0,
+            beta_b1,
+            beta_prop,
+        );
 
         // === Joint proposal on log scale ===
         {
@@ -495,14 +703,58 @@ fn sample_gp_hyperparameters(
             if a_prop.is_finite() && r_prop.is_finite() && s_prop.is_finite()
                 && a_prop > 0.0 && r_prop > 0.0 && s_prop > 0.0
             {
-                let ll_new = compute_ll(a_prop, r_prop, s_prop);
+                let (ll_new, x_prop_list) = compute_ll_noncentered(
+                    a_prop,
+                    r_prop,
+                    s_prop,
+                    gp,
+                    gp_idx,
+                    &z_list,
+                    &mu_full,
+                    &eta_base,
+                    outcome_state,
+                    outcome_data,
+                    prop_data,
+                    weights_obs,
+                    inv_sig2_y,
+                    &center,
+                    beta_b0,
+                    beta_b1,
+                    beta_prop,
+                );
                 let log_ratio = ll_new - current_ll;
                 let accept_prob = if log_ratio.is_nan() { 0.0 } else { log_ratio.exp().min(1.0) };
                 if rng.gen::<f64>() < accept_prob {
+                    for s_idx in 0..gp.subjects.len() {
+                        let subj = &gp.subjects[s_idx];
+                        let nt = subj.times.len();
+                        if nt == 0 { continue; }
+                        let current_x = &outcome_state.gp_states[gp_idx].x[s_idx];
+                        let x_new = &x_prop_list[s_idx];
+                        
+                        for i in 0..subj.out_indices.len() {
+                            let tidx = subj.out_indices[i];
+                            let gidx = subj.out_global[i];
+                            let t_val = if let Some(c) = &center {
+                                outcome_data.tau[gidx] - c[gidx]
+                            } else {
+                                outcome_data.tau[gidx]
+                            };
+                            let eff_beta = beta_b0 + beta_b1 * t_val;
+                            mu_full[gidx] = mu_full[gidx] - eff_beta * current_x[tidx] + eff_beta * x_new[tidx];
+                        }
+                        
+                        if beta_prop != 0.0 && !subj.trt_indices.is_empty() {
+                            let tidx = subj.trt_indices[0];
+                            eta_base[s_idx] = eta_base[s_idx] - beta_prop * current_x[tidx] + beta_prop * x_new[tidx];
+                        }
+                    }
+                    
                     alpha = a_prop;
                     rho = r_prop;
                     sigma_x = s_prop;
                     current_ll = ll_new;
+                    outcome_state.gp_states[gp_idx].x = x_prop_list;
                 }
                 if adapting { adapt.joint_da.update(accept_prob); }
             } else {
@@ -516,12 +768,55 @@ fn sample_gp_hyperparameters(
             let eps = adapt.comp_da[0].epsilon;
             let a_prop = (alpha.ln() + eps * adapt.inv_mass[0].sqrt() * normal.sample(rng)).exp();
             if a_prop.is_finite() && a_prop > 0.0 {
-                let ll_new = compute_ll(a_prop, rho, sigma_x);
+                let (ll_new, x_prop_list) = compute_ll_noncentered(
+                    a_prop,
+                    rho,
+                    sigma_x,
+                    gp,
+                    gp_idx,
+                    &z_list,
+                    &mu_full,
+                    &eta_base,
+                    outcome_state,
+                    outcome_data,
+                    prop_data,
+                    weights_obs,
+                    inv_sig2_y,
+                    &center,
+                    beta_b0,
+                    beta_b1,
+                    beta_prop,
+                );
                 let log_ratio = ll_new - current_ll;
                 let accept_prob = if log_ratio.is_nan() { 0.0 } else { log_ratio.exp().min(1.0) };
                 if rng.gen::<f64>() < accept_prob {
+                    for s_idx in 0..gp.subjects.len() {
+                        let subj = &gp.subjects[s_idx];
+                        let nt = subj.times.len();
+                        if nt == 0 { continue; }
+                        let current_x = &outcome_state.gp_states[gp_idx].x[s_idx];
+                        let x_new = &x_prop_list[s_idx];
+                        
+                        for i in 0..subj.out_indices.len() {
+                            let tidx = subj.out_indices[i];
+                            let gidx = subj.out_global[i];
+                            let t_val = if let Some(c) = &center {
+                                outcome_data.tau[gidx] - c[gidx]
+                            } else {
+                                outcome_data.tau[gidx]
+                            };
+                            let eff_beta = beta_b0 + beta_b1 * t_val;
+                            mu_full[gidx] = mu_full[gidx] - eff_beta * current_x[tidx] + eff_beta * x_new[tidx];
+                        }
+                        
+                        if beta_prop != 0.0 && !subj.trt_indices.is_empty() {
+                            let tidx = subj.trt_indices[0];
+                            eta_base[s_idx] = eta_base[s_idx] - beta_prop * current_x[tidx] + beta_prop * x_new[tidx];
+                        }
+                    }
                     alpha = a_prop;
                     current_ll = ll_new;
+                    outcome_state.gp_states[gp_idx].x = x_prop_list;
                 }
                 if adapting { adapt.comp_da[0].update(accept_prob); }
             } else {
@@ -534,12 +829,55 @@ fn sample_gp_hyperparameters(
             let eps = adapt.comp_da[1].epsilon;
             let r_prop = (rho.ln() + eps * adapt.inv_mass[1].sqrt() * normal.sample(rng)).exp();
             if r_prop.is_finite() && r_prop > 0.0 {
-                let ll_new = compute_ll(alpha, r_prop, sigma_x);
+                let (ll_new, x_prop_list) = compute_ll_noncentered(
+                    alpha,
+                    r_prop,
+                    sigma_x,
+                    gp,
+                    gp_idx,
+                    &z_list,
+                    &mu_full,
+                    &eta_base,
+                    outcome_state,
+                    outcome_data,
+                    prop_data,
+                    weights_obs,
+                    inv_sig2_y,
+                    &center,
+                    beta_b0,
+                    beta_b1,
+                    beta_prop,
+                );
                 let log_ratio = ll_new - current_ll;
                 let accept_prob = if log_ratio.is_nan() { 0.0 } else { log_ratio.exp().min(1.0) };
                 if rng.gen::<f64>() < accept_prob {
+                    for s_idx in 0..gp.subjects.len() {
+                        let subj = &gp.subjects[s_idx];
+                        let nt = subj.times.len();
+                        if nt == 0 { continue; }
+                        let current_x = &outcome_state.gp_states[gp_idx].x[s_idx];
+                        let x_new = &x_prop_list[s_idx];
+                        
+                        for i in 0..subj.out_indices.len() {
+                            let tidx = subj.out_indices[i];
+                            let gidx = subj.out_global[i];
+                            let t_val = if let Some(c) = &center {
+                                outcome_data.tau[gidx] - c[gidx]
+                            } else {
+                                outcome_data.tau[gidx]
+                            };
+                            let eff_beta = beta_b0 + beta_b1 * t_val;
+                            mu_full[gidx] = mu_full[gidx] - eff_beta * current_x[tidx] + eff_beta * x_new[tidx];
+                        }
+                        
+                        if beta_prop != 0.0 && !subj.trt_indices.is_empty() {
+                            let tidx = subj.trt_indices[0];
+                            eta_base[s_idx] = eta_base[s_idx] - beta_prop * current_x[tidx] + beta_prop * x_new[tidx];
+                        }
+                    }
                     rho = r_prop;
                     current_ll = ll_new;
+                    outcome_state.gp_states[gp_idx].x = x_prop_list;
                 }
                 if adapting { adapt.comp_da[1].update(accept_prob); }
             } else {
@@ -552,11 +890,54 @@ fn sample_gp_hyperparameters(
             let eps = adapt.comp_da[2].epsilon;
             let s_prop = (sigma_x.ln() + eps * adapt.inv_mass[2].sqrt() * normal.sample(rng)).exp();
             if s_prop.is_finite() && s_prop > 0.0 {
-                let ll_new = compute_ll(alpha, rho, s_prop);
+                let (ll_new, x_prop_list) = compute_ll_noncentered(
+                    alpha,
+                    rho,
+                    s_prop,
+                    gp,
+                    gp_idx,
+                    &z_list,
+                    &mu_full,
+                    &eta_base,
+                    outcome_state,
+                    outcome_data,
+                    prop_data,
+                    weights_obs,
+                    inv_sig2_y,
+                    &center,
+                    beta_b0,
+                    beta_b1,
+                    beta_prop,
+                );
                 let log_ratio = ll_new - current_ll;
                 let accept_prob = if log_ratio.is_nan() { 0.0 } else { log_ratio.exp().min(1.0) };
                 if rng.gen::<f64>() < accept_prob {
+                    for s_idx in 0..gp.subjects.len() {
+                        let subj = &gp.subjects[s_idx];
+                        let nt = subj.times.len();
+                        if nt == 0 { continue; }
+                        let current_x = &outcome_state.gp_states[gp_idx].x[s_idx];
+                        let x_new = &x_prop_list[s_idx];
+                        
+                        for i in 0..subj.out_indices.len() {
+                            let tidx = subj.out_indices[i];
+                            let gidx = subj.out_global[i];
+                            let t_val = if let Some(c) = &center {
+                                outcome_data.tau[gidx] - c[gidx]
+                            } else {
+                                outcome_data.tau[gidx]
+                            };
+                            let eff_beta = beta_b0 + beta_b1 * t_val;
+                            mu_full[gidx] = mu_full[gidx] - eff_beta * current_x[tidx] + eff_beta * x_new[tidx];
+                        }
+                        
+                        if beta_prop != 0.0 && !subj.trt_indices.is_empty() {
+                            let tidx = subj.trt_indices[0];
+                            eta_base[s_idx] = eta_base[s_idx] - beta_prop * current_x[tidx] + beta_prop * x_new[tidx];
+                        }
+                    }
                     sigma_x = s_prop;
+                    outcome_state.gp_states[gp_idx].x = x_prop_list;
                 }
                 if adapting { adapt.comp_da[2].update(accept_prob); }
             } else {
@@ -564,12 +945,11 @@ fn sample_gp_hyperparameters(
             }
         }
 
-        // Write back
+        // Write back hyperparameters
         outcome_state.gp_states[gp_idx].alpha = alpha;
         outcome_state.gp_states[gp_idx].rho = rho;
         outcome_state.gp_states[gp_idx].sigma_x = sigma_x;
 
-        // Observe for mass matrix estimation
         if adapting {
             let log_theta = [alpha.ln(), rho.ln(), sigma_x.ln()];
             adapt.observe(&log_theta);
@@ -1545,7 +1925,7 @@ pub fn run_chain_bjlm(
             outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng,
         );
         sample_gp_hyperparameters(
-            outcome_data, &mut outcome_state, &mut rng, &mut gp_hyper_adapts, iter < n_warmup,
+            outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng, &mut gp_hyper_adapts, iter < n_warmup,
         );
 
         // === OUTCOME BLOCK (weighted) ===

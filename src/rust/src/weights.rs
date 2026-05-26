@@ -46,6 +46,14 @@ pub fn compute_weights(
 ) -> Vec<f64> {
     let n = treatment.len();
     let p_marginal = treatment.iter().sum::<f64>() / n as f64;
+
+    // If treatment has no variation (all treated or all control),
+    // then propensity weighting is not meaningful/applicable (it's a dummy treatment model).
+    // In this case, we bypass weighting by returning a vector of 1.0.
+    if p_marginal == 0.0 || p_marginal == 1.0 {
+        return vec![1.0; n];
+    }
+
     let mut weights = vec![0.0; n];
 
     for i in 0..n {
