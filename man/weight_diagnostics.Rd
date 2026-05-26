@@ -9,7 +9,12 @@ weight_diagnostics(fit)
 \arguments{
 \item{fit}{A \code{bjlm_fit} object.}
 }
+\value{
+Invisibly, a list containing observation-level mean weights, ESS draws,
+trimmed proportions, and untrimmed max weights.
+}
 \description{
 Reports summary statistics of the IPW weights across posterior draws,
-including checks for positivity violations.
+including checks for positivity violations, Effective Sample Size (ESS),
+trimming proportion, and a text-based distribution histogram.
 }

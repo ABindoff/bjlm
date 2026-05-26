@@ -5,6 +5,30 @@
 #' a weighted outcome model. Implements the "cut posterior"
 #' (modular Bayes) approach to prevent outcome-to-propensity feedback.
 #'
+#' @details
+#' \strong{Warning: Cut-Posterior Overconfidence and Modularity}
+#'
+#' The modular "cut posterior" approach successfully prevents outcome-to-propensity feedback (which
+#' isolates the propensity model from misspecification in the outcome model). However, this modularity
+#' comes with a theoretical trade-off: MCMC draws in the outcome block treat the propensity weights
+#' as conditional on the propensity draws, rather than fully propagating joint uncertainty.
+#'
+#' Consequently, the outcome model's credible intervals reflect uncertainty conditional on the propensity
+#' model estimates. In small samples or weakly identified propensity models (e.g., strong multi-collinearity,
+#' sparse treatments), this conditional inference can underestimate the true posterior variance of causal effects,
+#' leading to **cut-posterior overconfidence** and potentially inflating false-positive rates.
+#'
+#' \strong{Recommended Sensitivity Checks:}
+#' \itemize{
+#'   \item \strong{Doubly Robust AIPW}: Use the doubly robust Augmented Inverse Probability Weighting (AIPW) estimator
+#'         (\code{fitted(fit, type = "aipw_ate")} or \code{fitted(fit, type = "aipw_rr")}) which is more robust and
+#'         computationally stable than pure IPW.
+#'   \item \strong{Prior Sensitivity}: Fit the model with tighter or wider propensity coefficient priors
+#'         (\code{propensity_prior_sd} or \code{priors$propensity}) to test how causal posterior distributions shift.
+#'   \item \strong{Non-parametric Bootstrap}: For critical causal claims in small samples, re-run the \code{bjlm} pipeline
+#'         on bootstrapped datasets to empirically verify the coverage and width of your credible intervals.
+#' }
+#'
 #' @param outcome A two-sided formula of the form \code{y ~ tau}, where
 #'   \code{y} is the outcome variable and \code{tau} is the time variable.
 #' @param b0 A one-sided formula for the intercept model (e.g., \code{~ 1 + Group}).
