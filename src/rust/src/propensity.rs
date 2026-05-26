@@ -106,69 +106,148 @@ pub fn sample_propensity(
         data.x_prop[(i, j)]
     };
 
-    // Step 1: Sample PG latent variables
-    //   ω_i | α ~ PG(1, X_i' α)
-    for i in 0..n {
-        let mut psi = 0.0;
-        for j in 0..p {
-            psi += get_x(i, j) * state.alpha[j];
+    let is_continuous = data.treatment.iter().any(|&t| t != 0.0 && t != 1.0);
+
+    if is_continuous {
+        // --- Continuous exposure: generalized propensity score (GPS) under a normal linear regression model ---
+        let mut sigma_a_sq = state.omega_pg[0];
+        if sigma_a_sq <= 0.0 || sigma_a_sq.is_nan() {
+            sigma_a_sq = 1.0;
         }
-        state.omega_pg[i] = sample_pg(1.0, psi, rng);
-    }
 
-    // Step 2: Build weighted normal equations
-    //   Σ_ω = (X' Ω X + B^{-1})^{-1}
-    //   m_ω = Σ_ω (X' κ + B^{-1} b)
-    //   where κ_i = T_i - 0.5
+        // Build normal equations X' X and X' T
+        let mut xtx = DMatrix::<f64>::zeros(p, p);
+        let mut xtt = DVector::<f64>::zeros(p);
 
-    // X' Ω X
-    let mut xtox = DMatrix::<f64>::zeros(p, p);
-    let mut xtk = DVector::<f64>::zeros(p);
-
-    for i in 0..n {
-        let wi = state.omega_pg[i];
-        let ki = data.treatment[i] - 0.5;
-        for j in 0..p {
-            let xij = get_x(i, j);
-            xtk[j] += xij * ki;
-            for l in j..p {
-                let v = xij * wi * get_x(i, l);
-                xtox[(j, l)] += v;
-                if l != j {
-                    xtox[(l, j)] += v;
+        for i in 0..n {
+            let ti = data.treatment[i];
+            for j in 0..p {
+                let xij = get_x(i, j);
+                xtt[j] += xij * ti;
+                for l in j..p {
+                    let v = xij * get_x(i, l);
+                    xtx[(j, l)] += v;
+                    if l != j {
+                        xtx[(l, j)] += v;
+                    }
                 }
             }
         }
-    }
 
-    // Add prior precision
-    let precision = xtox + &priors.precision;
+        // Precision = X' X / sigma_a_sq + Prior Precision
+        let precision = (&xtx / sigma_a_sq) + &priors.precision;
 
-    // Solve via Cholesky
-    let chol = precision
-        .cholesky()
-        .expect("Propensity precision matrix not positive definite");
+        let chol = precision
+            .cholesky()
+            .expect("Propensity precision matrix not positive definite");
 
-    let rhs = xtk + &priors.precision * &priors.mean;
-    let mean = chol.solve(&rhs);
+        let rhs = (&xtt / sigma_a_sq) + &priors.precision * &priors.mean;
+        let mean = chol.solve(&rhs);
 
-    // Sample α ~ N(mean, precision^{-1})
-    let normal = Normal::new(0.0, 1.0).unwrap();
-    let z = DVector::from_iterator(p, (0..p).map(|_| normal.sample(rng)));
-    // L' * v = z => v = (L')^{-1} z
-    let v = chol
-        .l()
-        .transpose()
-        .solve_upper_triangular(&z)
-        .expect("Failed to solve upper triangular system in propensity sampling");
-    state.alpha = mean + v;
+        // Sample alpha ~ N(mean, precision^{-1})
+        let normal = Normal::new(0.0, 1.0).unwrap();
+        let z = DVector::from_iterator(p, (0..p).map(|_| normal.sample(rng)));
+        let v = chol
+            .l()
+            .transpose()
+            .solve_upper_triangular(&z)
+            .expect("Failed to solve upper triangular system");
+        state.alpha = mean + v;
 
-    // Step 3: Recompute propensity scores
-    for i in 0..n {
-        let mut eta = 0.0;
-        for j in 0..p {
-            eta += get_x(i, j) * state.alpha[j];
+        // Sample sigma_a_sq ~ Inv-Gamma(a_post, b_post)
+        let mut sum_sq_resid = 0.0;
+        for i in 0..n {
+            let mut pred = 0.0;
+            for j in 0..p {
+                pred += get_x(i, j) * state.alpha[j];
+            }
+            let resid = data.treatment[i] - pred;
+            sum_sq_resid += resid * resid;
         }
-        state.pi[i] = crate::model::sigmoid(eta);
+        let a_post = 1.0 + (n as f64) / 2.0;
+        let b_post = 1.0 + 0.5 * sum_sq_resid;
+
+        let gamma_dist = rand_distr::Gamma::new(a_post, 1.0 / b_post).unwrap();
+        let sampled_prec = gamma_dist.sample(rng);
+        let new_sigma_a_sq = 1.0 / sampled_prec;
+        state.omega_pg[0] = new_sigma_a_sq;
+
+        // Recompute propensity conditional densities f(T_i | X_i, alpha, sigma_a_sq)
+        for i in 0..n {
+            let mut pred = 0.0;
+            for j in 0..p {
+                pred += get_x(i, j) * state.alpha[j];
+            }
+            let diff = data.treatment[i] - pred;
+            let density = (1.0 / (2.0 * std::f64::consts::PI * new_sigma_a_sq).sqrt()) * 
+                          (-0.5 * diff * diff / new_sigma_a_sq).exp();
+            state.pi[i] = density;
+        }
+    } else {
+        // --- Binary exposure: logistic regression with PG augmentation ---
+        // Step 1: Sample PG latent variables
+        //   ω_i | α ~ PG(1, X_i' α)
+        for i in 0..n {
+            let mut psi = 0.0;
+            for j in 0..p {
+                psi += get_x(i, j) * state.alpha[j];
+            }
+            state.omega_pg[i] = sample_pg(1.0, psi, rng);
+        }
+
+        // Step 2: Build weighted normal equations
+        //   Σ_ω = (X' Ω X + B^{-1})^{-1}
+        //   m_ω = Σ_ω (X' κ + B^{-1} b)
+        //   where κ_i = T_i - 0.5
+
+        // X' Ω X
+        let mut xtox = DMatrix::<f64>::zeros(p, p);
+        let mut xtk = DVector::<f64>::zeros(p);
+
+        for i in 0..n {
+            let wi = state.omega_pg[i];
+            let ki = data.treatment[i] - 0.5;
+            for j in 0..p {
+                let xij = get_x(i, j);
+                xtk[j] += xij * ki;
+                for l in j..p {
+                    let v = xij * wi * get_x(i, l);
+                    xtox[(j, l)] += v;
+                    if l != j {
+                        xtox[(l, j)] += v;
+                    }
+                }
+            }
+        }
+
+        // Add prior precision
+        let precision = xtox + &priors.precision;
+
+        // Solve via Cholesky
+        let chol = precision
+            .cholesky()
+            .expect("Propensity precision matrix not positive definite");
+
+        let rhs = xtk + &priors.precision * &priors.mean;
+        let mean = chol.solve(&rhs);
+
+        // Sample α ~ N(mean, precision^{-1})
+        let normal = Normal::new(0.0, 1.0).unwrap();
+        let z = DVector::from_iterator(p, (0..p).map(|_| normal.sample(rng)));
+        let v = chol
+            .l()
+            .transpose()
+            .solve_upper_triangular(&z)
+            .expect("Failed to solve upper triangular system in propensity sampling");
+        state.alpha = mean + v;
+
+        // Step 3: Recompute propensity scores
+        for i in 0..n {
+            let mut eta = 0.0;
+            for j in 0..p {
+                eta += get_x(i, j) * state.alpha[j];
+            }
+            state.pi[i] = crate::model::sigmoid(eta);
+        }
     }
 }

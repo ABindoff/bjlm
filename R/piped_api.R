@@ -28,8 +28,10 @@ propensity <- function(model, formula, data = NULL, family = binomial("logit")) 
   
   # Validate family
   if (is.character(family)) family <- get(family, mode = "function", envir = parent.frame())()
-  if (!inherits(family, "family") || family$family != "binomial" || family$link != "logit") {
-    stop("Currently only binomial('logit') is supported for the propensity model.")
+  if (!inherits(family, "family")) stop("family must be a family object.")
+  if (!((family$family == "binomial" && family$link == "logit") || 
+        (family$family == "gaussian" && family$link == "identity"))) {
+    stop("Only binomial('logit') or gaussian('identity') are supported for the propensity model.")
   }
 
   model$propensity <- list(
@@ -450,6 +452,7 @@ fit.bjlm_compiled_model <- function(object, priors = NULL, ...) {
     latent_gps = object$model$latent_gps,
     priors = priors,
     outcome_family = object$model$outcome$family$family %||% "gaussian",
+    propensity_family = object$model$propensity$family$family %||% "binomial",
     ...
   )
 

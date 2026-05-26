@@ -52,6 +52,7 @@ bjlm <- function(
     priors = NULL,
     outcome_priors = NULL,
     outcome_family = "gaussian",
+    propensity_family = "binomial",
     propensity_prior_sd = 2.5,
     chains = 4L,
     iter = 5000L,
@@ -116,7 +117,9 @@ bjlm <- function(
   }
 
   treatment <- subject_data[[treatment_name]]
-  stopifnot("Treatment variable must be binary (0/1)" = all(treatment %in% c(0, 1)))
+  if (propensity_family == "binomial") {
+    stopifnot("Treatment variable must be binary (0/1)" = all(treatment %in% c(0, 1)))
+  }
 
   # Build propensity design matrix
   prop_formula <- reformulate(prop_covariate_names)
