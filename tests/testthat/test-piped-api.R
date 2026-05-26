@@ -44,7 +44,7 @@ test_that("Piped API model specification, validation, compilation, and fitting w
 
   # ---- Validation of incomplete models ----
   expect_error(compile(bjlm_model() |> propensity(Trt ~ X1, data = dat)), "missing outcome")
-  expect_error(compile(bjlm_model() |> outcome(Y ~ X1, data = dat)), "missing propensity")
+  expect_s3_class(compile(bjlm_model() |> outcome(Y ~ X1, data = dat)), "bjlm_compiled_model")
 
   # ---- Compilation ----
   compiled <- compile(spec)

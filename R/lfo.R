@@ -312,8 +312,21 @@ lfo_cv <- function(object, t_var = NULL, t_grid = NULL, min_tau = NULL, k_thresh
   elpd_lfo <- sum(elpd_pointwise[eval_indices], na.rm = TRUE)
   
   # Calculate approximate SE of total ELPD
-  # Assuming independent pointwise observations (standard for cross-validation approximations)
-  elpd_se <- sqrt(length(eval_indices) * stats::var(elpd_pointwise[eval_indices], na.rm = TRUE))
+  sub_var <- object$subject_var
+  if (!is.null(sub_var) && sub_var %in% names(object$data)) {
+    # Cluster-robust standard error: aggregate pointwise ELPD by subject
+    subjects_eval <- object$data[[sub_var]][eval_indices]
+    elpd_by_sub <- tapply(elpd_pointwise[eval_indices], subjects_eval, sum, na.rm = TRUE)
+    J <- length(elpd_by_sub)
+    if (J > 1) {
+      elpd_se <- sqrt(J * stats::var(elpd_by_sub, na.rm = TRUE))
+    } else {
+      elpd_se <- 0
+    }
+  } else {
+    # Standard independent SE: assuming independent pointwise observations
+    elpd_se <- sqrt(length(eval_indices) * stats::var(elpd_pointwise[eval_indices], na.rm = TRUE))
+  }
   
   estimates <- matrix(NA_real_, nrow = 1, ncol = 2)
   rownames(estimates) <- c("elpd_loo")  # Named elpd_loo for compatibility with loo::loo_compare
@@ -337,7 +350,8 @@ lfo_cv <- function(object, t_var = NULL, t_grid = NULL, min_tau = NULL, k_thresh
     t_grid = t_grid,
     min_tau = min_tau,
     min_idx = min_idx,
-    k_threshold = k_threshold
+    k_threshold = k_threshold,
+    subject_var = sub_var
   )
   class(res) <- c("bjlm_lfo", "loo")
   res
@@ -347,7 +361,16 @@ lfo_cv <- function(object, t_var = NULL, t_grid = NULL, min_tau = NULL, k_thresh
 print.bjlm_lfo <- function(x, ...) {
   cat("Leave-Future-Out Cross-Validation (LFO-CV) for BJLM\n")
   cat("===================================================\n")
-  cat("Total LFO ELPD:      ", round(x$elpd_lfo, 3), "\n")
+  
+  elpd_se <- x$estimates["elpd_loo", "SE"]
+  cat("Total LFO ELPD:      ", round(x$elpd_lfo, 3), " (SE = ", round(elpd_se, 3), ")\n", sep = "")
+  
+  if (!is.null(x$subject_var)) {
+    cat("SE Type:             Cluster-robust (grouped by ", x$subject_var, ")\n", sep = "")
+  } else {
+    cat("SE Type:             Independent pointwise (warning: likely underestimated due to repeated measures)\n")
+  }
+  
   cat("Time variable:       ", x$t_var, "\n")
   cat("Time grid points:    ", length(x$t_grid), " (evaluating ", length(x$t_grid) - x$min_idx, " future steps)\n")
   cat("Min training time:   ", x$min_tau, "\n")

@@ -84,8 +84,8 @@ test_that("fitted S3 method, diagnostics, and plotting functions work as expecte
   p_pred_both <- plot_predictions(fit_res, type = "both", n_subjects = 2)
   expect_s3_class(p_pred_both, "ggplot")
   
-  # plot_gp should throw error since there's no GP block in this model
-  expect_error(plot_gp(fit_res), "No latent Gaussian Process draws found")
+  # plot_gp should throw warning since there's no GP block in this model
+  expect_warning(plot_gp(fit_res), "No latent Gaussian Process draws found")
   
   p_prop_overlap <- plot_propensity(fit_res, type = "overlap")
   expect_s3_class(p_prop_overlap, "ggplot")

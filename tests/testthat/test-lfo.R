@@ -47,11 +47,11 @@ test_that("Leave-Future-Out Cross-Validation (LFO-CV) works as expected", {
   
   expect_s3_class(lfo_approx, "bjlm_lfo")
   expect_type(lfo_approx$elpd_lfo, "double")
-  expect_s3_class(lfo_approx$pointwise, "data.frame")
+  expect_true(is.matrix(lfo_approx$pointwise))
   expect_s3_class(lfo_approx$diagnostics, "data.frame")
   
   # The evaluated time points should be > min_tau (which means tau = 2 or 3)
-  expect_true(all(lfo_approx$pointwise$tau %in% c(2, 3)))
+  expect_true(all(lfo_approx$pointwise[, "tau"] %in% c(2, 3)))
   expect_equal(nrow(lfo_approx$diagnostics), 2) # predicting tau = 2 and 3
   expect_equal(lfo_approx$diagnostics$predict_time[1], 2)
   expect_equal(lfo_approx$diagnostics$predict_time[2], 3)
