@@ -876,13 +876,17 @@ fn sample_linear_coefs_weighted(
             inv_sig2_eff = 1.0;
             let c_vec = &x_full * &beta_current;
             let r = state.r;
+            let log_r = r.ln();
             for i in 0..n {
-                let mut c_i = c_vec[i];
+                // psi = X*beta + u (log-mean)
+                let mut psi_i = c_vec[i];
                 let g = if data.group_b0.is_empty() { -1 } else { data.group_b0[i] };
                 if g >= 0 {
-                    c_i += state.u_b0[g as usize];
+                    psi_i += state.u_b0[g as usize];
                 }
-                let omega = crate::polya_gamma::sample_pg(data.y[i] + r, c_i, rng);
+                // NB-PG operates on log-odds: eta = psi - ln(r) = ln(mu/r)
+                let eta_i = psi_i - log_r;
+                let omega = crate::polya_gamma::sample_pg(data.y[i] + r, eta_i, rng);
                 let kappa = (data.y[i] - r) / 2.0;
                 
                 let w_eff = weights[i] * omega;
@@ -891,12 +895,13 @@ fn sample_linear_coefs_weighted(
                     row[j] *= w_eff;
                 }
                 
-                // y_tilde_i = (kappa / omega - u_b0)
-                // w_y[i] = y_tilde_i * w_eff 
-                //        = (kappa / omega - u_b0) * weights[i] * omega 
-                //        = kappa * weights[i] - u_b0 * weights[i] * omega
+                // Pseudo-response on logit scale: z = kappa/omega
+                // But beta is on log-mean scale: psi = X*beta + u = eta + ln(r)
+                // So regression target: z + ln(r) - u_b0
+                // w_y[i] = (kappa/omega + ln(r) - u_b0) * w_eff
+                //        = (kappa + omega*ln(r)) * weights[i] - u_b0 * w_eff
                 let u_b0_val = if g >= 0 { state.u_b0[g as usize] } else { 0.0 };
-                w_y[i] = kappa * weights[i] - u_b0_val * w_eff;
+                w_y[i] = (kappa + omega * log_r) * weights[i] - u_b0_val * w_eff;
             }
         }
     }
@@ -1011,11 +1016,16 @@ fn sample_random_effects_weighted(
                     sum_w[g as usize] += weights[i] * omega;
                 }
                 OutcomeFamily::NegativeBinomial => {
-                    let c_i = mu_fixed[i] + state.u_b0[g as usize];
+                    let psi_i = mu_fixed[i] + state.u_b0[g as usize];
                     let r_param = state.r;
-                    let omega = crate::polya_gamma::sample_pg(data.y[i] + r_param, c_i, rng);
+                    let log_r = r_param.ln();
+                    // NB-PG operates on log-odds: eta = psi - ln(r)
+                    let eta_i = psi_i - log_r;
+                    let omega = crate::polya_gamma::sample_pg(data.y[i] + r_param, eta_i, rng);
                     let kappa = (data.y[i] - r_param) / 2.0;
-                    sum_wr[g as usize] += weights[i] * (kappa - omega * mu_fixed[i]);
+                    // Pseudo-residual for u: (kappa/omega + ln(r) - mu_fixed)
+                    // sum_wr += w * (kappa + omega*ln(r) - omega * mu_fixed)
+                    sum_wr[g as usize] += weights[i] * (kappa + omega * log_r - omega * mu_fixed[i]);
                     sum_w[g as usize] += weights[i] * omega;
                 }
             }
