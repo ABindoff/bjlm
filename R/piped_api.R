@@ -724,40 +724,231 @@ print.bjlm_flowchart <- function(x, ...) {
   structure(flowchart, class = "bjlm_flowchart")
 }
 
+#' Fitted values, G-computation, and Doubly Robust AIPW for bjlm_fit objects
+#'
+#' Estimates marginal counterfactual predictions and causal effects (ATE and marginal Risk Ratio)
+#' using either G-computation (standardisation) or doubly robust Augmented Inverse Probability Weighting (AIPW).
+#'
+#' @details
+#' \subsection{G-Computation vs. IPW}{
+#'   Inverse Probability Weighting (IPW) adjusts for confounding by reweighting the observed sample during MCMC
+#'   to make the treatment independent of measured confounders. This yields conditional causal outcome parameters.
+#'
+#'   G-computation predicts individual-level potential outcomes \eqn{\hat{Y}_i(a)} under a counterfactual treatment
+#'   \eqn{a \in \{0, 1\}} for the target population, then averages them:
+#'   \deqn{\hat{\mu}_a^{\text{G-comp},(s)} = \frac{1}{N} \sum_{i=1}^N \hat{Y}_i(a)^{(s)}}
+#'   The marginal Risk Ratio (RR) and Average Treatment Effect (ATE) are computed as:
+#'   \deqn{\text{RR}^{\text{G-comp},(s)} = \frac{\hat{\mu}_1^{\text{G-comp},(s)}}{\hat{\mu}_0^{\text{G-comp},(s)}}}
+#'   \deqn{\text{ATE}^{\text{G-comp},(s)} = \hat{\mu}_1^{\text{G-comp},(s)} - \hat{\mu}_0^{\text{G-comp},(s)}}
+#' }
+#' \subsection{Augmented Inverse Probability Weighting (AIPW)}{
+#'   AIPW is a doubly robust estimator combining the propensity and outcome models. It is robust to the
+#'   misspecification of either the propensity score or outcome model (but not both). The draw-level
+#'   counterfactual means are estimated as:
+#'   \deqn{\hat{\mu}_1^{\text{AIPW},(s)} = \frac{1}{N} \sum_{i=1}^N \left( \hat{Y}_i(1)^{(s)} + \frac{T_i (Y_i - \hat{Y}_i(1)^{(s)})}{\hat{\pi}_i^{(s)}} \right)}
+#'   \deqn{\hat{\mu}_0^{\text{AIPW},(s)} = \frac{1}{N} \sum_{i=1}^N \left( \hat{Y}_i(0)^{(s)} + \frac{(1 - T_i) (Y_i - \hat{Y}_i(0)^{(s)})}{1 - \hat{\pi}_i^{(s)}} \right)}
+#'   where \eqn{Y_i} is the observed outcome, \eqn{T_i} is the observed binary treatment, \eqn{\hat{\pi}_i^{(s)}} is the
+#'   propensity score at draw \eqn{s}, and \eqn{\hat{Y}_i(a)^{(s)}} is the outcome prediction under treatment \eqn{a}.
+#' }
+#'
+#' @param object A \code{bjlm_fit} object.
+#' @param newdata An optional data frame. If omitted, the training data is used. For AIPW, must contain observed outcome and treatment columns.
+#' @param type The type of prediction or causal effect to return:
+#'   \itemize{
+#'     \item \code{"link"}: Posterior linear predictor draws.
+#'     \item \code{"response"}: Posterior expected value draws on the response scale.
+#'     \item \code{"rr"}: G-computation marginal Risk Ratio.
+#'     \item \code{"ate"}: G-computation Average Treatment Effect.
+#'     \item \code{"aipw_ate"}: Doubly robust AIPW Average Treatment Effect.
+#'     \item \code{"aipw_rr"}: Doubly robust AIPW marginal Risk Ratio.
+#'   }
+#' @param summary Logical; if \code{TRUE} (default), returns a summary data frame of posterior statistics;
+#'   if \code{FALSE}, returns the full posterior draws matrix.
+#' @param link_override Passed to \code{.build_predictions}.
+#' @param truncation Numeric clipping threshold for propensity scores to maintain AIPW numerical stability (default: \code{1e-5}).
+#' @param ... Additional arguments (ignored).
+#'
+#' @return If \code{summary = TRUE}, a data frame. If \code{summary = FALSE}, a matrix of draws.
 #' @export
-fitted.bjlm_fit <- function(object, newdata = NULL, type = c("link", "response", "rr"), summary = TRUE, link_override = NULL, truncation = NULL, ...) {
+fitted.bjlm_fit <- function(object, newdata = NULL, type = c("link", "response", "rr", "ate", "aipw_ate", "aipw_rr"), summary = TRUE, link_override = NULL, truncation = NULL, ...) {
   type <- match.arg(type)
-  if (type == "rr") {
+  data <- if (is.null(newdata)) object$data else newdata
+
+  if (type %in% c("rr", "ate", "aipw_ate", "aipw_rr")) {
     fam <- object$model$outcome$family$family %||% "gaussian"
-    if (fam != "binomial") {
-      stop("type='rr' is only applicable to binomial outcome models.")
+    if (type %in% c("rr", "aipw_rr") && fam != "binomial") {
+      stop("Risk Ratio is only applicable to binomial outcome models.")
     }
-    trt_var <- all.vars(object$model$propensity$formula)[1]
+    
+    prop_formula <- object$propensity_formula
+    if (is.null(prop_formula)) {
+      stop("A causal effect or AIPW estimation requires a fitted propensity score model.")
+    }
+    
+    trt_var <- all.vars(prop_formula)[1]
     if (is.na(trt_var) || is.null(trt_var)) {
       stop("Could not identify treatment variable from propensity formula.")
     }
     
-    data1 <- if (is.null(newdata)) object$data else newdata
+    if (!trt_var %in% names(data)) {
+      stop(sprintf("Observed treatment column '%s' is required in data.", trt_var))
+    }
+    trt <- as.double(data[[trt_var]])
+    
+    if (!all(trt %in% c(0, 1))) {
+      stop("Causal effect estimation for these types is only supported for binary treatments/exposures (treatment must be 0 or 1).")
+    }
+
+    # 1. Compute potential outcomes under Trt=1 and Trt=0
+    data1 <- data
     data1[[trt_var]] <- 1
     p1_draws <- .build_predictions(object, newdata = data1, type = "response", summary = FALSE)
     
-    data0 <- if (is.null(newdata)) object$data else newdata
+    data0 <- data
     data0[[trt_var]] <- 0
     p0_draws <- .build_predictions(object, newdata = data0, type = "response", summary = FALSE)
     
-    p1_marg <- rowMeans(p1_draws)
-    p0_marg <- rowMeans(p0_draws)
-    rr_draws <- as.matrix(p1_marg / p0_marg)
-    colnames(rr_draws) <- "RR"
-    
-    if (!summary) return(rr_draws)
-    return(data.frame(
-      .observation = 1,
-      fitted_mean = mean(rr_draws),
-      fitted_Q2.5 = stats::quantile(rr_draws, 0.025),
-      fitted_Q97.5 = stats::quantile(rr_draws, 0.975)
-    ))
+    n_draws <- nrow(p1_draws)
+    n_obs <- ncol(p1_draws)
+
+    if (type %in% c("rr", "ate")) {
+      # G-computation
+      p1_marg <- rowMeans(p1_draws)
+      p0_marg <- rowMeans(p0_draws)
+      
+      if (type == "rr") {
+        rr_draws <- as.matrix(p1_marg / p0_marg)
+        colnames(rr_draws) <- "RR"
+        if (!summary) return(rr_draws)
+        return(data.frame(
+          .observation = 1,
+          fitted_mean = mean(rr_draws),
+          fitted_Q2.5 = stats::quantile(rr_draws, 0.025),
+          fitted_Q97.5 = stats::quantile(rr_draws, 0.975)
+        ))
+      } else {
+        ate_draws <- as.matrix(p1_marg - p0_marg)
+        colnames(ate_draws) <- "ATE"
+        if (!summary) return(ate_draws)
+        return(data.frame(
+          .observation = 1,
+          fitted_mean = mean(ate_draws),
+          fitted_Q2.5 = stats::quantile(ate_draws, 0.025),
+          fitted_Q97.5 = stats::quantile(ate_draws, 0.975)
+        ))
+      }
+    } else {
+      # AIPW (Doubly Robust)
+      outcome_vars <- all.vars(object$outcome_formula)
+      y_name <- outcome_vars[1]
+      if (!y_name %in% names(data)) {
+        stop(sprintf("Observed outcome column '%s' is required in data for AIPW estimation.", y_name))
+      }
+      y_obs <- as.double(data[[y_name]])
+
+      # Reconstruct propensity scores
+      subject_var <- object$subject_var
+      subject_data <- if (!is.null(subject_var) && subject_var %in% names(data)) {
+        data[!duplicated(data[[subject_var]]), , drop = FALSE]
+      } else {
+        data
+      }
+      
+      rhs_formula <- formula(delete.response(terms(prop_formula)))
+      x_prop <- model.matrix(rhs_formula, data = subject_data)
+      
+      # Extract alpha draws
+      alpha_names <- object$propensity_names
+      if (is.null(alpha_names)) {
+        alpha_names <- colnames(posterior::as_draws_matrix(object$draws))
+        alpha_names <- alpha_names[grepl("^alpha_", alpha_names)]
+      }
+      
+      if (length(alpha_names) == 0) {
+        stop("Could not find propensity parameter draws (alpha) in the fitted model.")
+      }
+      
+      alpha_draws <- posterior::subset_draws(object$draws, variable = alpha_names)
+      alpha_mat <- posterior::as_draws_matrix(alpha_draws)
+      
+      # Ensure column order matches colnames(x_prop)
+      colnames_alpha <- colnames(alpha_mat)
+      col_indices <- sapply(colnames(x_prop), function(col) {
+        target <- paste0("alpha_", col)
+        idx <- which(colnames_alpha == target)
+        if (length(idx) == 0) {
+          idx <- which(grepl(col, colnames_alpha, fixed = TRUE))
+        }
+        if (length(idx) == 0) {
+          stop(sprintf("Could not find propensity coefficient for covariate '%s' in posterior draws.", col))
+        }
+        idx[1]
+      })
+      
+      alpha_mat <- alpha_mat[, col_indices, drop = FALSE]
+      class(alpha_mat) <- "matrix"
+
+      # Vectorized linear predictor calculation
+      eta_mat <- alpha_mat %*% t(x_prop)
+      pi_mat <- 1 / (1 + exp(-eta_mat))
+      
+      # Propensity Score Truncation / Clipping
+      trunc_min <- 1e-5
+      trunc_max <- 1 - 1e-5
+      if (!is.null(truncation)) {
+        if (length(truncation) == 1) {
+          trunc_min <- truncation
+          trunc_max <- 1 - truncation
+        } else if (length(truncation) == 2) {
+          trunc_min <- truncation[1]
+          trunc_max <- truncation[2]
+        }
+      }
+      pi_mat <- pmax(pmin(pi_mat, trunc_max), trunc_min)
+      
+      # Expand to observation level
+      if (!is.null(subject_var) && subject_var %in% names(data)) {
+        obs_subjects <- data[[subject_var]]
+        subj_indices <- match(obs_subjects, subject_data[[subject_var]])
+        pi_obs <- pi_mat[, subj_indices, drop = FALSE]
+      } else {
+        pi_obs <- pi_mat
+      }
+
+      # Compute individual AIPW terms fully vectorized
+      trt_mat <- matrix(trt, nrow = n_draws, ncol = n_obs, byrow = TRUE)
+      y_mat <- matrix(y_obs, nrow = n_draws, ncol = n_obs, byrow = TRUE)
+      
+      aipw1_mat <- p1_draws + (trt_mat * (y_mat - p1_draws)) / pi_obs
+      aipw0_mat <- p0_draws + ((1 - trt_mat) * (y_mat - p0_draws)) / (1 - pi_obs)
+      
+      mu1_aipw <- rowMeans(aipw1_mat)
+      mu0_aipw <- rowMeans(aipw0_mat)
+      
+      if (type == "aipw_ate") {
+        aipw_ate_draws <- as.matrix(mu1_aipw - mu0_aipw)
+        colnames(aipw_ate_draws) <- "AIPW_ATE"
+        if (!summary) return(aipw_ate_draws)
+        return(data.frame(
+          .observation = 1,
+          fitted_mean = mean(aipw_ate_draws),
+          fitted_Q2.5 = stats::quantile(aipw_ate_draws, 0.025),
+          fitted_Q97.5 = stats::quantile(aipw_ate_draws, 0.975)
+        ))
+      } else {
+        aipw_rr_draws <- as.matrix(mu1_aipw / mu0_aipw)
+        colnames(aipw_rr_draws) <- "AIPW_RR"
+        if (!summary) return(aipw_rr_draws)
+        return(data.frame(
+          .observation = 1,
+          fitted_mean = mean(aipw_rr_draws),
+          fitted_Q2.5 = stats::quantile(aipw_rr_draws, 0.025),
+          fitted_Q97.5 = stats::quantile(aipw_rr_draws, 0.975)
+        ))
+      }
+    }
   }
+
   .build_predictions(object, newdata, type, summary, ...)
 }
 
