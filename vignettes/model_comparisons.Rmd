@@ -105,7 +105,7 @@ if (file.exists("sim1_brms_fit.rds")) {
 } else {
   brms_fit <- brm(
     brms_form, data = dat_nb, family = negbinomial(),
-    prior = bpriors, chains = 4, iter = 2000, warmup = 1000,
+    prior = bpriors, chains = 4, iter = 10000, warmup = 5000,
     cores = 4, seed = 42, backend = "rstan", silent = 2, refresh = 0
   )
   saveRDS(brms_fit, "sim1_brms_fit.rds")
@@ -145,7 +145,7 @@ if (file.exists("sim1_bjlm_fit.rds")) {
       family = "negative_binomial"
     ) |>
     compile() |>
-    fit(chains = 4, iter = 4000, warmup = 3000, cores = 4, seed = 42, priors = my_priors, weights = "ate")
+    fit(chains = 4, iter = 10000, warmup = 5000, cores = 4, seed = 42, priors = my_priors, weights = "ate")
   saveRDS(bjlm_fit_nb, "sim1_bjlm_fit.rds")
 }
 ```
@@ -275,7 +275,7 @@ if (file.exists("sim2_bjlm_fit.rds")) {
       time_trt_var = "time"
     ) |>
     compile() |>
-    fit(chains = 4, iter = 4000, warmup = 3000, cores = 4, seed = 42)
+    fit(chains = 4, iter = 10000, warmup = 5000, cores = 4, seed = 42)
   saveRDS(bjlm_fit_gp, "sim2_bjlm_fit.rds")
 }
 ```
@@ -305,8 +305,8 @@ if (file.exists("sim2_stan_fit.rds")) {
     file = "../benchmarks/joint_gp_multi.stan",
     data = stan_data,
     chains = 4,
-    iter = 2000,
-    warmup = 1000,
+    iter = 10000,
+    warmup = 5000,
     cores = 4,
     seed = 42
   )
