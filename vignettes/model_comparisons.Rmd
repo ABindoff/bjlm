@@ -145,7 +145,7 @@ if (file.exists("sim1_bjlm_fit.rds")) {
       family = "negative_binomial"
     ) |>
     compile() |>
-    fit(chains = 4, iter = 2000, warmup = 1000, cores = 4, seed = 42, priors = my_priors)
+    fit(chains = 4, iter = 4000, warmup = 3000, cores = 4, seed = 42, priors = my_priors)
   saveRDS(bjlm_fit_nb, "sim1_bjlm_fit.rds")
 }
 ```
@@ -277,7 +277,7 @@ if (file.exists("sim2_bjlm_fit.rds")) {
       time_trt_var = "time"
     ) |>
     compile() |>
-    fit(chains = 4, iter = 2000, warmup = 1000, cores = 4, seed = 42)
+    fit(chains = 4, iter = 4000, warmup = 3000, cores = 4, seed = 42)
   saveRDS(bjlm_fit_gp, "sim2_bjlm_fit.rds")
 }
 ```
