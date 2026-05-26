@@ -35,22 +35,46 @@
   spec
 }
 
-#' Helper to compute out-of-sample pointwise log-likelihood matrix
-#'
-#' @param fit_active A fitted `bjlm_fit` model.
-#' @param validation_data A data frame containing held-out observations.
-#' @param y_name Character. Name of response variable.
-#' @return An S x N matrix of log-likelihoods.
-#' @keywords internal
 .compute_oos_log_lik <- function(fit_active, validation_data, y_name) {
   pred_draws <- fitted(fit_active, newdata = validation_data, summary = FALSE)
-  sigma_draws <- as.numeric(posterior::as_draws_matrix(fit_active$draws)[, "sigma"])
   
-  y_obs <- as.double(validation_data[[y_name]])
-  ll_matrix <- matrix(0, nrow = nrow(pred_draws), ncol = nrow(validation_data))
-  for (i in seq_along(y_obs)) {
-    ll_matrix[, i] <- stats::dnorm(y_obs[i], mean = pred_draws[, i], sd = sigma_draws, log = TRUE)
+  family <- fit_active$outcome_family
+  if (is.null(family)) {
+    if (!is.null(fit_active$model$outcome$family$family)) {
+      family <- fit_active$model$outcome$family$family
+    } else {
+      family <- "gaussian"
+    }
   }
+
+  y_obs <- as.double(validation_data[[y_name]])
+  S <- nrow(pred_draws)
+  N <- nrow(validation_data)
+  ll_matrix <- matrix(NA_real_, nrow = S, ncol = N)
+  
+  draws_mat <- posterior::as_draws_matrix(fit_active$draws)
+  
+  if (family == "gaussian") {
+    sigma_draws <- as.numeric(draws_mat[, "sigma"])
+    for (i in seq_len(N)) {
+      ll_matrix[, i] <- stats::dnorm(y_obs[i], mean = pred_draws[, i], sd = sigma_draws, log = TRUE)
+    }
+  } else if (family == "negative_binomial") {
+    r_draws <- as.numeric(draws_mat[, "r"])
+    mu_draws <- exp(pred_draws) # Exponentiate link-scale to get response-scale mean
+    for (i in seq_len(N)) {
+      ll_matrix[, i] <- stats::dnbinom(y_obs[i], size = r_draws, mu = mu_draws[, i], log = TRUE)
+    }
+  } else if (family == "binomial") {
+    p_draws <- 1 / (1 + exp(-pred_draws)) # Sigmoid link-scale to get probability
+    trials <- rep(1, N)
+    for (i in seq_len(N)) {
+      ll_matrix[, i] <- stats::dbinom(y_obs[i], size = trials[i], prob = p_draws[, i], log = TRUE)
+    }
+  } else {
+    stop("Unsupported family for out-of-sample log-likelihood: ", family)
+  }
+  
   ll_matrix
 }
 
