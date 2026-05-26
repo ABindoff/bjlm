@@ -877,6 +877,13 @@ fitted.smoothbp_fit <- function(object, newdata = NULL, type = c("link", "respon
 
 #' @export
 log_lik.bjlm_fit <- function(object, ...) {
+  # Use Rust-side pre-computed log-lik matrix if available
+  # (includes GP contributions that the R-side fitted() misses)
+  if (!is.null(object$log_lik_matrix)) {
+    return(object$log_lik_matrix)
+  }
+
+  # Fallback: R-side computation (for backward compatibility with old fits)
   outcome_vars <- all.vars(object$outcome_formula)
   y_name <- outcome_vars[1]
   y_obs <- as.double(object$data[[y_name]])

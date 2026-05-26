@@ -770,7 +770,7 @@ fn run_bjlm(
     let base_seed = seed as u64;
     let n_cores_val = (n_cores as usize).max(1);
 
-    let results: Vec<(DMatrix<f64>, usize)> = if n_cores_val > 1 && n_chains > 1 {
+    let results: Vec<(DMatrix<f64>, DMatrix<f64>, usize)> = if n_cores_val > 1 && n_chains > 1 {
         let pool = rayon::ThreadPoolBuilder::new().num_threads(n_cores_val).build().unwrap();
         pool.install(|| {
             (0..n_chains).into_par_iter().map(|c| {
@@ -793,14 +793,24 @@ fn run_bjlm(
         }).collect()
     };
 
-    let chain_results: Vec<Robj> = results.into_iter().map(|(draws, _)| {
+    let mut chain_results: Vec<Robj> = Vec::with_capacity(n_chains);
+    let mut ll_results: Vec<Robj> = Vec::with_capacity(n_chains);
+
+    for (draws, ll, _) in results.into_iter() {
+        // Parameter draws
         let nr = draws.nrows();
         let nc = draws.ncols();
         let flat: Vec<f64> = draws.iter().cloned().collect();
-        RMatrix::new_matrix(nr, nc, |r, c| flat[c * nr + r]).into()
-    }).collect();
+        chain_results.push(RMatrix::new_matrix(nr, nc, |r, c| flat[c * nr + r]).into());
 
-    list!(draws = chain_results)
+        // Log-likelihood matrix
+        let lr = ll.nrows();
+        let lc = ll.ncols();
+        let flat_ll: Vec<f64> = ll.iter().cloned().collect();
+        ll_results.push(RMatrix::new_matrix(lr, lc, |r, c| flat_ll[c * lr + r]).into());
+    }
+
+    list!(draws = chain_results, log_lik = ll_results)
 }
 
 extendr_module! {

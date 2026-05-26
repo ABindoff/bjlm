@@ -331,9 +331,17 @@ bjlm <- function(
     draws_array <- draws_list
   }
 
+  # Extract log-likelihood matrices (one per chain), stack into 3D array for loo
+  ll_list <- raw$log_lik
+  n_post_ll <- nrow(ll_list[[1]])
+  n_obs_ll <- ncol(ll_list[[1]])
+  # Combine chains: stack into (n_post * n_chains) x n_obs matrix
+  log_lik_matrix <- do.call(rbind, ll_list)
+
   structure(
     list(
       draws = draws_array,
+      log_lik_matrix = log_lik_matrix,
       outcome_names = outcome_names,
       propensity_names = prop_names,
       weight_name = "mean_weight",
