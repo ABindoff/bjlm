@@ -197,6 +197,15 @@ fn sample_sigma_u(priors: &Priors, state: &mut State, rng: &mut StdRng) {
     state.sigma_u = 1.0 / gamma_dist.sample(rng).sqrt();
 }
 
+// ---------------------------------------------------------------------------
+// Spike-and-slab samplers
+// The SpikeSlabConfig struct, sample_pi, sample_gamma, and run_chain_ss are
+// ported from the smoothbp package (Bindoff, A. D., CRAN submission 2025).
+// smoothbp implements the Kuo-Mallick formulation where gamma indicators
+// gate coefficients by zeroing them in the design matrix (handled in
+// sample_linear_coefs) and the gamma step updates inclusion probabilities.
+// ---------------------------------------------------------------------------
+
 pub fn sample_pi(ss: &SpikeSlabConfig, state: &mut State, rng: &mut StdRng) {
     let mut n1 = 0.0;
     let mut n0 = 0.0;

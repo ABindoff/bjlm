@@ -221,7 +221,9 @@ space_omega_priors <- function(K, tau_min, tau_max) {
 #' Specify a spike-and-slab prior for variable selection
 #'
 #' Used with spike-and-slab models to place a point-mass spike at zero on selected
-#' coefficients.
+#' coefficients (Kuo-Mallick formulation). The underlying Rust samplers
+#' (`sample_pi`, `sample_gamma`) and the `smoothbp_spike_slab` / `smoothbp_pip`
+#' classes originate from the \pkg{smoothbp} package (Bindoff 2025).
 #'
 #' @param pi Prior inclusion probability. Default `0.5`.
 #' @param slab A [prior_normal()] object for the slab component.
@@ -230,6 +232,7 @@ space_omega_priors <- function(K, tau_min, tau_max) {
 #' @param b Shape parameter for the Beta hyperprior. Default `1`.
 #'
 #' @return A `smoothbp_spike_slab` object.
+#' @seealso [pip()] to extract posterior inclusion probabilities after fitting.
 #' @export
 prior_spike_slab <- function(pi = 0.5, slab = prior_normal(0, 2),
                              learn_pi = FALSE, a = 1, b = 1) {

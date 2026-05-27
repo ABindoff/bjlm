@@ -28,5 +28,10 @@ A \code{smoothbp_spike_slab} object.
 }
 \description{
 Used with spike-and-slab models to place a point-mass spike at zero on selected
-coefficients.
+coefficients (Kuo-Mallick formulation). The underlying Rust samplers
+(\code{sample_pi}, \code{sample_gamma}) and the \code{smoothbp_spike_slab} / \code{smoothbp_pip}
+classes originate from the \pkg{smoothbp} package (Bindoff 2025).
+}
+\seealso{
+\code{\link[=pip]{pip()}} to extract posterior inclusion probabilities after fitting.
 }

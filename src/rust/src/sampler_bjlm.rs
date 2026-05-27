@@ -2027,7 +2027,8 @@ pub fn run_chain_bjlm(
 
 // ---------------------------------------------------------------------------
 // Weighted spike-and-slab gamma sampler (bjlm version)
-// Like sample_gamma from sampler.rs but uses IPW-weighted residuals
+// Adapted from sample_gamma in sampler.rs (ported from smoothbp).
+// Extends to IPW-weighted residuals for the joint propensity-outcome model.
 // ---------------------------------------------------------------------------
 
 fn sample_gamma_weighted(

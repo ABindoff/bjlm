@@ -383,12 +383,18 @@ weight_diagnostics <- function(fit) {
 
 #' Extract Posterior Inclusion Probabilities from a spike-and-slab bjlm fit
 #'
+#' Computes the posterior inclusion probability (PIP) for each coefficient
+#' that was assigned a spike-and-slab prior. The result carries the
+#' `smoothbp_pip` class (from the \pkg{smoothbp} package) so that
+#' [plot.smoothbp_pip()] can be used directly.
+#'
 #' @param x A `bjlm_fit` object fitted with `spike = prior_spike_slab(...)`.
 #' @param ... Unused.
 #'
 #' @return A data frame of class `smoothbp_pip` with columns `parameter`,
 #'   `pip`, `lower`, and `upper` (95\% credible interval on the inclusion
 #'   probability, derived from a Beta posterior).
+#' @seealso [prior_spike_slab()], [plot.smoothbp_pip()]
 #' @export
 pip <- function(x, ...) UseMethod("pip")
 

@@ -9,7 +9,9 @@ Description: Fits Bayesian joint longitudinal models combining propensity-weight
     sampling with a modular cut posterior to prevent outcome-to-propensity
     feedback. Provides a piped declarative API for model specification, subject
     alignment, prior construction, causal effect estimation (G-computation and
-    doubly robust AIPW), and census-weighted population inference.
+    doubly robust AIPW), and census-weighted population inference. The
+    spike-and-slab Rust samplers and associated R generics (smoothbp_pip,
+    prior_spike_slab) are adapted from the smoothbp package (Bindoff 2025).
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)

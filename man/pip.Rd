@@ -17,5 +17,11 @@ A data frame of class \code{smoothbp_pip} with columns \code{parameter},
 probability, derived from a Beta posterior).
 }
 \description{
-Extract Posterior Inclusion Probabilities from a spike-and-slab bjlm fit
+Computes the posterior inclusion probability (PIP) for each coefficient
+that was assigned a spike-and-slab prior. The result carries the
+\code{smoothbp_pip} class (from the \pkg{smoothbp} package) so that
+\code{\link[=plot.smoothbp_pip]{plot.smoothbp_pip()}} can be used directly.
+}
+\seealso{
+\code{\link[=prior_spike_slab]{prior_spike_slab()}}, \code{\link[=plot.smoothbp_pip]{plot.smoothbp_pip()}}
 }
