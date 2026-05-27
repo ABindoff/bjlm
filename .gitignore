@@ -25,3 +25,11 @@ scratch/
 
 # Paper draft (work in progress, not part of the R package)
 paper/
+
+# Cached fitted model objects (large binaries, reproducible from vignettes)
+*.rds
+vignettes/model_comparisons_cache/
+
+# Word documents (scientific review drafts, not part of the R package)
+*.docx
+~$*

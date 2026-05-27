@@ -19,3 +19,6 @@
 ^tests/sim_test_longitudinal\.R$
 ^design\.md$
 ^compile_report\.md$
+^.*\.docx$
+^.*\.rds$
+^vignettes/model_comparisons_cache$

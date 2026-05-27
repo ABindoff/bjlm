@@ -4,12 +4,12 @@ Version: 0.2.0
 Authors@R:
     person("Aidan D", "Bindoff", , "aidan.bindoff@utas.edu.au", role = c("aut", "cre"),
            comment = c(ORCID = "0000-0002-0943-2702"))
-Description: Fits Bayesian joint longitudinal propensity-weighted and piecewise 
-    change-point models using Pólya-Gamma augmented Gibbs sampling and 
-    weighted MCMC. Implements a modular "cut posterior" to prevent 
-    outcome-to-propensity feedback. Provides a premium piped declarative API 
-    for subject alignment, demographic and longitudinal outcome merging, 
-    prior construction, and highly efficient zero-breakpoint mixed-effects models.
+Description: Fits Bayesian joint longitudinal models combining propensity-weighted
+    and piecewise change-point outcome models. Uses Pólya-Gamma augmented Gibbs
+    sampling with a modular cut posterior to prevent outcome-to-propensity
+    feedback. Provides a piped declarative API for model specification, subject
+    alignment, prior construction, causal effect estimation (G-computation and
+    doubly robust AIPW), and census-weighted population inference.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
@@ -31,12 +31,9 @@ Suggests:
     knitr,
     rmarkdown,
     brms,
-    mcp,
     dplyr,
     gt,
-    tidyr,
-    scales,
-    rjags
+    tidyr
 Config/testthat/edition: 3
 VignetteBuilder: knitr
 URL: https://github.com/ABindoff/bjlm
