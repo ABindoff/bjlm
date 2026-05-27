@@ -691,12 +691,12 @@ print.bjlm_compiled_model <- function(x, ...) {
 
   if (!is.null(subject_var)) {
     flowchart <- paste0(flowchart, "    %% Alignment & Merging\n")
-    flowchart <- paste0(flowchart, "    PD -->|\"Align by subject ID: ", subject_var, "\"| OD:::align\n")
+    flowchart <- paste0(flowchart, "    PD -->|\"Align by subject ID: ", subject_var, "\"| OD\n")
     if (length(merged_cols) > 0) {
-      flowchart <- paste0(flowchart, "    PD -.->|\"Expand subject-level: ", paste(merged_cols, collapse = ", "), "\"| OD:::align\n")
+      flowchart <- paste0(flowchart, "    PD -.->|\"Expand subject-level: ", paste(merged_cols, collapse = ", "), "\"| OD\n")
     }
   } else {
-    flowchart <- paste0(flowchart, "    PD -->|\"Cross-sectional alignment<br/>(1:1 rows mapping)\"| OD:::align\n")
+    flowchart <- paste0(flowchart, "    PD -->|\"Cross-sectional alignment (1:1 rows)\"| OD\n")
   }
 
   if (length(shared_cols) > 0) {
@@ -807,17 +807,17 @@ view_flowchart <- function(x, ...) {
   fc <- if (inherits(x, "bjlm_flowchart")) x else flowchart(x)
   mermaid_src <- as.character(fc)
 
-  if (requireNamespace("DiagrammeR", quietly = TRUE)) {
-    print(DiagrammeR::mermaid(mermaid_src))
-  } else if (requireNamespace("htmltools", quietly = TRUE)) {
+  if (requireNamespace("htmltools", quietly = TRUE)) {
     html <- htmltools::browsable(htmltools::HTML(paste0(
       '<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>',
       '<div class="mermaid">', mermaid_src, '</div>',
-      '<script>mermaid.initialize({startOnLoad:true})</script>'
+      '<script>mermaid.initialize({startOnLoad:true,theme:"default"})</script>'
     )))
     print(html)
+  } else if (requireNamespace("DiagrammeR", quietly = TRUE)) {
+    print(DiagrammeR::mermaid(mermaid_src))
   } else {
-    stop("Install 'DiagrammeR' or 'htmltools' to view flowcharts in the Viewer pane.")
+    stop("Install 'htmltools' (recommended) or 'DiagrammeR' to view flowcharts in the Viewer pane.")
   }
 
   invisible(x)
@@ -865,12 +865,12 @@ view_flowchart <- function(x, ...) {
 
   if (!is.null(subject_var)) {
     flowchart <- paste0(flowchart, "    %% Alignment & Merging\n")
-    flowchart <- paste0(flowchart, "    PD -->|\"Align by subject ID: ", subject_var, "\"| OD:::align\n")
+    flowchart <- paste0(flowchart, "    PD -->|\"Align by subject ID: ", subject_var, "\"| OD\n")
     if (length(merged_cols) > 0) {
-      flowchart <- paste0(flowchart, "    PD -.->|\"Expand subject-level: ", paste(merged_cols, collapse = ", "), "\"| OD:::align\n")
+      flowchart <- paste0(flowchart, "    PD -.->|\"Expand subject-level: ", paste(merged_cols, collapse = ", "), "\"| OD\n")
     }
   } else {
-    flowchart <- paste0(flowchart, "    PD -->|\"Cross-sectional alignment<br/>(1:1 rows mapping)\"| OD:::align\n")
+    flowchart <- paste0(flowchart, "    PD -->|\"Cross-sectional alignment (1:1 rows)\"| OD\n")
   }
 
   if (length(shared_cols) > 0) {
