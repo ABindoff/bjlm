@@ -258,7 +258,6 @@ if (file.exists("sim2_bjlm_fit.rds")) {
   bjlm_fit_gp <- readRDS("sim2_bjlm_fit.rds")
 } else {
   bjlm_fit_gp <- bjlm_model() |>
-    propensity(dummy_trt ~ 1, data = dat_gp) |>
     outcome(
       Y ~ time,
       b0 = ~ 1 + X_obs,

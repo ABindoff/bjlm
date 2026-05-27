@@ -14,7 +14,7 @@
 - **G-computation and AIPW** — doubly robust Average Treatment Effect and marginal Risk Ratio
 - **Population inference** — census-weighted G-computation for Population Average Treatment Effect via the `population()` block
 - **Latent GP confounders** — models time-varying confounders as continuous-time Gaussian Processes for time-mismatched data
-- **Spike-and-slab breakpoint selection** — `smoothbp_ss()` returns posterior inclusion probabilities for candidate change-points
+- **Spike-and-slab variable selection** — Kuo-Mallick gamma indicators gate each change-point modifier; `pip(fit)` returns posterior inclusion probabilities; operates inside the IPW block so the Bayesian Cut is preserved
 - **Leave-Future-Out CV** — longitudinally-appropriate predictive validation via `lfo_cv()`
 
 ## Installation
@@ -118,13 +118,60 @@ plot_propensity(fit, type = "both")   # overlap and weight distribution
 weight_diagnostics(fit)               # ESS, trimming advice, positivity
 ```
 
+## Model flowchart
+
+`flowchart()` generates a [Mermaid](https://mermaid.js.org/) diagram of the compiled model's data flow — useful for verifying alignment, shared-covariate scoping, and the cut-posterior boundary.
+
+```r
+compiled_model <- bjlm_model() |>
+  propensity(Trt ~ sev, data = dat) |>
+  outcome(
+    Y ~ tau,
+    b0     = ~ 1 + Trt + sev + (1 | id),
+    b1     = ~ 1,
+    deltas = list(~ 1 + Trt + sev + age_z + male),
+    omega  = list(~ 1),
+    rho    = list(~ 1),
+    data   = dat
+  ) |>
+  compile()
+
+flowchart(compiled_model)
+```
+
+```mermaid
+graph TD
+    classDef prop fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px;
+    classDef out fill:#e3f2fd,stroke:#1565c0,stroke-width:1px;
+    classDef align fill:#fff3e0,stroke:#ef6c00,stroke-width:2px;
+    classDef collision fill:#ffebee,stroke:#c62828,stroke-width:1px;
+
+    subgraph "Propensity Block (Subject-level)"
+        PD["Propensity Data<br/>60 subjects"]:::prop
+        PF["Formula: Trt ~ sev"]:::prop
+        PD --> PF
+    end
+
+    subgraph "Outcome Block (Observation-level)"
+        OD["Outcome Data<br/>360 observations"]:::out
+        OF["Formula: Y ~ tau"]:::out
+        OD --> OF
+    end
+
+    PD -->|"Align by subject ID: id"| OD:::align
+    PD -.->|"Expand subject-level: Trt, sev, age_z, male"| OD:::align
+    SC["Shared variables: sev<br/>Independent Block-Scoping"]:::collision
+    PF -.-> SC
+    OF -.-> SC
+```
+
+The green subgraph is the propensity block; blue is the outcome block. The orange arrow shows how subject-level covariates are expanded to observation-level. The red node flags shared covariates that appear in both models — these are scoped independently under the Bayesian Cut.
+
 ## Vignettes
 
 | Vignette | Topic |
 |----------|-------|
 | `vignette("getting-started", package = "bjlm")` | GP confounders, LFO-CV, full walkthrough |
 | `vignette("population-inference", package = "bjlm")` | Census-weighted PATE |
-| `vignette("spike-and-slab", package = "bjlm")` | Automatic breakpoint selection |
-| `vignette("intervention-analysis", package = "bjlm")` | RDD and stepped-wedge designs |
-| `vignette("advanced-modeling", package = "bjlm")` | Structural event timing, hierarchical discovery |
-| `vignette("brms-comparison", package = "bjlm")` | Validation against brms and mcp |
+| `vignette("spike-and-slab", package = "bjlm")` | Variable selection at the change-point via spike-and-slab |
+| `vignette("model_comparisons", package = "bjlm")` | Validation against brms and Stan |
