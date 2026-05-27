@@ -8,7 +8,7 @@ vignette: >
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(collapse = TRUE, comment = "#>", eval = FALSE)
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", eval = TRUE)
 ```
 
 ## Overview
@@ -28,8 +28,6 @@ By performing joint estimation, `bjlm` automatically propagates the uncertainty 
 The package features an elegant, block-based declarative builder API that leverages R's native pipe operator (`|>`):
 
 ```R
-library(bjlm)
-
 fit <- bjlm_model() |>
   propensity(Trt ~ X_gp, data = dat_treatment) |>
   latent_gp(name = "X_gp", time = "tau", subject = "id", kernel = "se") |>
@@ -41,7 +39,7 @@ fit <- bjlm_model() |>
 ### Pipelines and Modular Steps
 
 * **`bjlm_model()`**: Initializes an empty model specification builder.
-* **`propensity(model, formula, data)`**: Stages the treatment assignment model (LHS must be binary `0`/`1`).
+* **`propensity(model, formula, data, family)`**: Stages the treatment assignment model. Use the default `family = binomial("logit")` for binary treatments, or `family = gaussian("identity")` for continuous treatments (generalized propensity score weighting).
 * **`latent_gp(model, name, time, subject, kernel = "se")`**: Registers continuous-time latent Gaussian Process confounders.
 * **`outcome(model, formula, b0, b1, deltas, omega, rho, data)`**: Stages the outcome model. Can fit standard linear regressions or piecewise change-point models.
 * **`compile(model)`**: Validates GP structures, aligns time-points, and enforces the strict Bayesian Cut to prevent outcome-to-propensity feedback.
@@ -79,6 +77,7 @@ While it may seem simpler to just linearly interpolate a covariate between its o
 Let's simulate a scenario where a time-varying covariate $X$, treatment $Trt$, and outcome $Y$ are measured at different, mismatched time points:
 
 ```{r simulate-mismatched}
+library(bjlm)
 set.seed(42)
 n_subj <- 30
 
