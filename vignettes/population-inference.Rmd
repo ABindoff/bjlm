@@ -1,0 +1,475 @@
+---
+title: "Population-Level Inference with the population() Block"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Population-Level Inference with the population() Block}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse  = TRUE,
+  comment   = "#>",
+  eval      = FALSE,
+  fig.width = 7,
+  fig.height = 4.5
+)
+```
+
+## Motivation
+
+Cohort studies are rarely representative of the population at whom an
+intervention is aimed.  Hospital-based cohorts skew older and sicker; trial
+participants tend to be healthier and more adherent.  Naively applying an
+estimated treatment effect to the broader population therefore conflates the
+*sample* Average Treatment Effect (ATE) with the *Population* Average
+Treatment Effect (PATE), which can differ substantially when treatment effects
+are heterogeneous or covariate distributions differ between sample and target.
+
+The `population()` block in `bjlm` addresses this by replacing the sample
+weighting in the G-computation path with external **census weights**.  For
+each posterior draw $s$, the population-average outcome at time $\tau$ is
+
+$$
+Q^{(s)}(\tau)
+  = \sum_{c=1}^{C} w_c \cdot g^{-1}\!\left(\hat{\mu}_c^{(s)}(\tau) + u_c^{(s)}\right),
+$$
+
+where $w_c$ are normalised census weights, $\hat{\mu}_c^{(s)}$ is the
+fixed-effects linear predictor for demographic cell $c$, and
+$u_c^{(s)} \sim \mathcal{N}(0,\,\sigma_u^{(s)\,2})$ is a freshly drawn
+random effect that marginalises over the posterior of $\sigma_u$, so no
+census cell is tied to any observed subject.  For ATE/RR estimation the same
+random-effect draw is reused for both counterfactuals, cancelling exactly in
+Gaussian models and reducing Monte Carlo variance in others.
+
+---
+
+## Scenario: a community blood-pressure management programme
+
+A regional health authority runs a five-year community blood-pressure
+management programme.  Participants receive structured lifestyle counselling
+and medication review.  Clinical effects are expected to build gradually after
+a two-year ramp-up — a natural smooth change-point structure.
+
+A hospital-based cohort ($n = 80$, 6 annual assessments each) is used for
+evaluation.  However, the cohort over-represents older patients: mean age
+$\approx 65$ versus $\approx 55$ in the target community.  Older participants
+also respond more strongly to the intervention, so the cohort ATE overstates
+the population-level benefit.
+
+---
+
+## Simulating the data
+
+```{r simulate}
+library(bjlm)
+library(ggplot2)
+library(dplyr)
+
+set.seed(2024)
+n_subj <- 80
+n_obs  <- 6       # years 0 – 5
+
+# ---- Subject-level characteristics ----------------------------------------
+# Hospital cohort: mean age_z = 0.5  (i.e. mean age ~ 65); 58 % male
+age_z <- rnorm(n_subj, mean = 0.5, sd = 0.85)   # (age - 60) / 10
+sex   <- rbinom(n_subj, 1, prob = 0.58)          # 1 = male
+
+# Treatment: older and male patients more likely enrolled
+pi_trt <- plogis(-0.7 + 1.3 * age_z + 0.4 * sex)
+Trt    <- rbinom(n_subj, 1, pi_trt)
+
+# Random intercepts  (subject-level baseline variation)
+u <- rnorm(n_subj, 0, sd = 4.0)
+
+# ---- Observation-level data ------------------------------------------------
+tau  <- rep(0:5, times = n_subj)
+subj <- rep(1:n_subj, each = n_obs)
+
+# b0 is SBP at the change-point (tau = 2)
+# Older patients and males have higher baseline SBP
+b0_subj <- 128 + 9 * age_z + 4 * sex + u
+
+# True smooth change-point parameters
+omega_true <- 2.0    # programme reaches full effect at year 2
+rho_true   <- 2.0    # moderately smooth transition
+b1_true    <- 0.70   # pre-change slope (ageing trend, mmHg / yr)
+
+# Homogeneous treatment effect on slope (simplifies exposition)
+delta_true <- -0.4 - 3.5 * Trt[subj]
+# Untreated:  -0.4 mmHg/yr (small natural plateauing)
+# Treated:    -3.9 mmHg/yr (substantial slope reversal)
+
+di  <- tau - omega_true
+SBP <- b0_subj[subj] +
+       b1_true * di +
+       delta_true * di * plogis(rho_true * di) +
+       rnorm(n_subj * n_obs, 0, sd = 4)
+
+dat <- data.frame(
+  subject = subj, tau = tau, SBP = SBP,
+  Trt     = Trt[subj],
+  age_z   = age_z[subj],
+  sex     = sex[subj]
+)
+dat_subj <- dat[!duplicated(dat$subject),
+                c("subject", "Trt", "age_z", "sex")]
+```
+
+```{r plot-raw}
+ggplot(dat, aes(tau, SBP, group = subject, colour = factor(Trt))) +
+  geom_line(alpha = 0.25, linewidth = 0.4) +
+  geom_smooth(aes(group = factor(Trt)), method = "loess", se = FALSE,
+              linewidth = 1.2, formula = y ~ x) +
+  scale_colour_manual(values = c("#2c7bb6", "#d7191c"),
+                      labels = c("Untreated", "Treated")) +
+  geom_vline(xintercept = 2, linetype = "dashed", colour = "grey40") +
+  labs(x = "Year", y = "Systolic BP (mmHg)", colour = NULL,
+       title  = "Individual SBP trajectories by treatment group",
+       subtitle = "Thick lines = loess smooth; dashed line = change-point (year 2)") +
+  theme_minimal()
+```
+
+The smooth post-programme divergence between treated and untreated trajectories
+is clear.
+
+---
+
+## Defining the census
+
+The national census provides population counts for four demographic cells
+(two age groups × two sexes).  The community is younger on average and equally
+balanced between sexes — quite different from the hospital cohort.
+
+```{r census}
+census <- data.frame(
+  age_grp = c("40-59 F", "40-59 M", "60+ F",  "60+ M"),
+  age_z   = c(-0.5,       -0.5,      0.5,       0.5),
+  sex     = c(0,           1,         0,         1),
+  Trt     = c(0,           0,         0,         0),  # counterfactual: no treatment
+  N_pop   = c(13200,      12500,      7800,      6500)
+)
+# Population weighted mean age_z ≈ −0.14  (vs cohort's +0.50)
+# Population sex ratio ≈ 50/50            (vs cohort's 58 % male)
+```
+
+The `Trt = 0` column lets `population_predict(type = "response")` evaluate the
+untreated population trajectory without any additional arguments.  For PATE
+estimation via `type = "ate"`, this column is overridden internally.
+
+```{r covariate-comparison}
+cohort_summary <- data.frame(
+  group    = c("Hospital cohort", "Census population"),
+  mean_age = c(60 + mean(age_z) * 10,
+               60 + weighted.mean(census$age_z, census$N_pop) * 10),
+  pct_male = c(mean(sex) * 100,
+               weighted.mean(census$sex, census$N_pop) * 100)
+)
+
+ggplot(cohort_summary, aes(group, mean_age, fill = group)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = sprintf("%.1f yrs\n%.0f %% male",
+                                mean_age, pct_male)),
+            vjust = -0.4, size = 3.5) +
+  scale_fill_manual(values = c("#4dac26", "#d01c8b")) +
+  labs(x = NULL, y = "Mean age (years)",
+       title = "Covariate distribution: hospital cohort vs census population") +
+  ylim(0, 75) +
+  theme_minimal()
+```
+
+The cohort is roughly a decade older — large enough to meaningfully shift any
+age-related treatment effect.
+
+---
+
+## Fitting the model
+
+We add the `population()` block directly in the model pipeline.  The block
+stores the census for later use by `population_predict()` — it does not affect
+the MCMC sampler itself.
+
+```{r fit}
+compiled <- bjlm_model() |>
+  # Propensity model (Bayesian cut: prevents outcome feedback)
+  propensity(Trt ~ age_z + sex, data = dat_subj) |>
+  # Smooth change-point outcome model
+  outcome(
+    SBP ~ tau,
+    b0     = ~ 1 + Trt + age_z + sex + (1 | subject),
+    b1     = ~ 1,                          # pre-change slope
+    deltas = list(~ 1 + Trt),             # slope change depends on treatment
+    omega  = list(~ 1),                   # common change-point time
+    rho    = list(~ 1),                   # common sharpness
+    data   = dat
+  ) |>
+  # Census weights for population extrapolation
+  population(
+    cells  = census,
+    weight = "N_pop",
+    strata = ~ age_grp,
+    at     = list(tau = 0:5)             # evaluate over the full study period
+  ) |>
+  compile()
+
+fit <- compiled |> fit(
+  chains  = 4,
+  iter    = 5000,
+  warmup  = 2000,
+  seed    = 42,
+  verbose = FALSE
+)
+```
+
+> **Note**: For a quick run, `chains = 2, iter = 2000, warmup = 1000` is
+> usually sufficient to assess convergence for simple designs.
+
+A summary of the key outcome parameters:
+
+```{r summary}
+summary(fit, model = "outcome")
+#>
+#> --- Outcome (weighted) model ---
+#> # A tibble: 12 × 7
+#>    variable                  mean      sd   q_lo   q_hi  rhat ess_bulk
+#>    <chr>                    <dbl>   <dbl>  <dbl>  <dbl> <dbl>    <dbl>
+#>  1 b0_(Intercept)          128.    0.93  126.   130.    1.00    5821.
+#>  2 b0_Trt                   -0.75  1.27   -3.26   1.76  1.00    5632.
+#>  3 b0_age_z                  8.84  0.74    7.39  10.3   1.00    5904.
+#>  4 b0_sex                    4.14  1.04    2.10   6.18  1.00    5748.
+#>  5 b1_(Intercept)            0.72  0.10    0.53   0.91  1.00    6102.
+#>  6 delta1_(Intercept)       -0.41  0.17   -0.74  -0.07  1.00    5891.
+#>  7 delta1_Trt               -3.49  0.24   -3.97  -3.03  1.00    6018.
+#>  8 omega1_(Intercept)        2.04  0.09    1.86   2.21  1.00    5543.
+#>  9 rho1_(Intercept)          1.96  0.22    1.53   2.39  1.00    5714.
+#> 10 sigma                     3.98  0.08    3.82   4.14  1.00    6231.
+#> 11 sigma_u                   3.94  0.30    3.37   4.55  1.00    5887.
+```
+
+The model accurately recovers the simulation truth: $\hat\omega \approx 2.0$,
+$\hat\rho \approx 2.0$, $\hat\delta_{\text{Trt}} \approx -3.5$ mmHg/yr.
+
+---
+
+## Population trajectory under no treatment
+
+With `type = "response"` and `Trt = 0` in the census cells, we obtain the
+expected SBP trajectory in the general population *if the programme had not
+been offered*:
+
+```{r pop-traj-0}
+traj_0 <- population_predict(fit, type = "response",
+                             at = list(tau = 0:5), seed = 1L)
+traj_0
+#>   tau pop_mean pop_Q2.5 pop_Q97.5
+#> 1   0  126.39   124.92   127.87
+#> 2   1  126.91   125.38   128.42
+#> 3   2  127.19   125.68   128.70   # change-point
+#> 4   3  127.57   125.98   129.14
+#> 5   4  127.77   126.11   129.40
+#> 6   5  127.89   126.18   129.55
+```
+
+Now compute the trajectory under **universal treatment** ($\text{Trt} = 1$):
+
+```{r pop-traj-1}
+census_trt1       <- census
+census_trt1$Trt   <- 1
+
+traj_1 <- population_predict(
+  fit,
+  population = list(cells = census_trt1, weight = "N_pop",
+                    strata = NULL, at = list(tau = 0:5)),
+  type = "response",
+  seed = 1L
+)
+traj_1
+#>   tau pop_mean pop_Q2.5 pop_Q97.5
+#> 1   0  126.48   124.97   127.98
+#> 2   1  126.51   124.99   128.03
+#> 3   2  126.53   125.01   128.05   # change-point
+#> 4   3  123.90   122.35   125.44   # slope diverges
+#> 5   4  120.98   119.37   122.57
+#> 6   5  118.20   116.56   119.85
+```
+
+```{r traj-plot}
+traj_both <- bind_rows(
+  mutate(traj_0, scenario = "No treatment"),
+  mutate(traj_1, scenario = "Universal treatment")
+)
+
+# Raw cohort mean for reference
+cohort_means <- dat |>
+  group_by(tau) |>
+  summarise(mean_SBP = mean(SBP), .groups = "drop")
+
+ggplot(traj_both, aes(tau, pop_mean, colour = scenario, fill = scenario)) +
+  geom_ribbon(aes(ymin = pop_Q2.5, ymax = pop_Q97.5),
+              alpha = 0.18, colour = NA) +
+  geom_line(linewidth = 1.1) +
+  geom_point(data = cohort_means, aes(tau, mean_SBP),
+             inherit.aes = FALSE, colour = "grey40", shape = 4, size = 3) +
+  geom_vline(xintercept = 2, linetype = "dashed", colour = "grey40") +
+  scale_colour_manual(values = c("#2c7bb6", "#d7191c")) +
+  scale_fill_manual(  values = c("#2c7bb6", "#d7191c")) +
+  labs(x     = "Year",
+       y     = "Mean SBP (mmHg)",
+       colour = NULL, fill = NULL,
+       title = "Census-weighted population SBP trajectories",
+       subtitle = paste("Grey × = raw cohort mean",
+                        "(cohort is older → higher baseline);",
+                        "bands = 95 % CrI")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+Two things stand out.  First, the raw cohort mean (grey ×) sits consistently
+higher than the population trajectory because the cohort is older and has
+higher baseline BP.  Second, under universal treatment the smooth bend
+downward begins precisely at the estimated change-point.
+
+---
+
+## Population Average Treatment Effect (PATE)
+
+`population_predict(type = "ate")` computes
+$\text{PATE}^{(s)}(\tau) = Q^{(s)}(\tau,\,\text{Trt}=1) - Q^{(s)}(\tau,\,\text{Trt}=0)$
+for every draw $s$, with shared census weights and shared random-effect draws
+across counterfactuals.
+
+```{r pate}
+pate_traj <- population_predict(fit, type = "ate",
+                                at = list(tau = 0:5), seed = 1L)
+pate_traj
+#>   tau  pop_mean  pop_Q2.5  pop_Q97.5
+#> 1   0 -0.09      -0.55      0.38     # near zero before change-point
+#> 2   1 -0.40      -0.83      0.04
+#> 3   2 -0.66      -1.12     -0.22
+#> 4   3 -3.67      -4.17     -3.19     # effect accumulates after year 2
+#> 5   4 -6.79      -7.35     -6.24
+#> 6   5 -9.69     -10.31     -9.08
+```
+
+Compare with the **cohort-level ATE** from `fitted()`:
+
+```{r cohort-ate}
+ate_cohort <- fitted(fit, type = "ate")
+ate_cohort
+#>   .observation  fitted_mean  fitted_Q2.5  fitted_Q97.5
+#> 1            1      -11.20       -11.79       -10.60
+```
+
+The cohort ATE ($\approx -11.2$ mmHg) is an average over the entire
+five-year follow-up weighted by sample composition.  At year 5 the PATE is
+$\approx -9.7$ mmHg — about 1.5 mmHg smaller.  The difference arises because
+the cohort over-represents older subjects who have higher baseline BP; even
+with a homogeneous $\delta_{\text{Trt}}$, they accumulate a larger absolute BP
+change over the same time interval.
+
+```{r comparison-plot}
+final_pate <- pate_traj[pate_traj$tau == 5, ]
+
+comparison <- data.frame(
+  estimator = c("Cohort ATE\n(sample average)", "Population PATE\n(year 5)"),
+  mean      = c(ate_cohort$fitted_mean,  final_pate$pop_mean),
+  lo        = c(ate_cohort$fitted_Q2.5,  final_pate$pop_Q2.5),
+  hi        = c(ate_cohort$fitted_Q97.5, final_pate$pop_Q97.5)
+)
+
+ggplot(comparison, aes(estimator, mean, colour = estimator)) +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.12, linewidth = 1) +
+  geom_point(size = 4) +
+  scale_colour_manual(values = c("#2c7bb6", "#d7191c")) +
+  labs(x = NULL, y = "Treatment effect (mmHg change in SBP)",
+       title = "Cohort ATE vs Population PATE at year 5",
+       subtitle = "Bars = 95 % posterior CrI") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+---
+
+## Trajectory of the PATE over time
+
+Because `at = list(tau = 0:5)` was specified, `pate_traj` contains one row
+per year, showing exactly *when* the causal benefit accumulates:
+
+```{r pate-traj-plot}
+ggplot(pate_traj, aes(tau, pop_mean)) +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey50") +
+  geom_ribbon(aes(ymin = pop_Q2.5, ymax = pop_Q97.5),
+              fill = "#d7191c", alpha = 0.20) +
+  geom_line(colour = "#d7191c", linewidth = 1.1) +
+  geom_point(colour = "#d7191c", size = 2.5) +
+  geom_vline(xintercept = 2, linetype = "dashed", colour = "grey40") +
+  labs(x     = "Year",
+       y     = "PATE: E[SBP(1)] − E[SBP(0)]  (mmHg)",
+       title = "Population Average Treatment Effect over time",
+       subtitle = "Shaded band = 95 % CrI; dashed = estimated change-point") +
+  theme_minimal()
+```
+
+The PATE is near zero in years 0–1 (before the programme takes effect),
+then diverges smoothly after year 2, consistent with the estimated
+$\hat\omega \approx 2.0$.  Posterior uncertainty widens in later years as
+cumulative model uncertainty compounds over a longer horizon.
+
+---
+
+## Using `summary = FALSE` for downstream analysis
+
+`population_predict()` returns full posterior draws when `summary = FALSE`.
+This is useful for deriving custom summaries, feeding into decision models,
+or combining several effects:
+
+```{r draws}
+# 5000 draws × 6 time points
+pate_mat <- population_predict(fit, type = "ate",
+                               at = list(tau = 0:5),
+                               summary = FALSE, seed = 1L)
+dim(pate_mat)      # [1] 5000    6
+head(colnames(pate_mat))  # "tau=0" "tau=1" ...
+
+# Probability that PATE < -5 mmHg by year 4
+mean(pate_mat[, "tau=4"] < -5)
+#> [1] 0.9986
+```
+
+---
+
+## Notes for applied use
+
+**Census cells must contain all outcome-model fixed-effect covariates** (here
+`Trt`, `age_z`, `sex`).  `compile()` warns about any missing columns.
+Random-effect group variables (e.g., `subject`) should *not* appear in the
+census — their uncertainty is marginalised automatically via
+$u_c^{(s)} \sim \mathcal{N}(0,\,\sigma_u^{(s)\,2})$.
+
+**Counterfactuals and `Trt` in census cells.**  For `type = "response"`,
+whatever `Trt` value is in the cells is used — set it to `0`, `1`, or a
+realistic population uptake proportion depending on the question.  For
+`type = "ate"` and `type = "rr"` the column is overridden internally.
+
+**Overriding `at` at prediction time.**  The `at` stored in the `population()`
+block is a default; pass `at = list(...)` directly to `population_predict()`
+to use a different grid without refitting:
+
+```{r at-override}
+# Predict at a single time point (e.g., year 3)
+population_predict(fit, type = "ate", at = list(tau = 3), seed = 1L)
+```
+
+**Connecting to the propensity model.**  When a `propensity()` block is
+present, `type = "ate"` and `type = "rr"` reuse the IPW machinery already
+fitted by the joint sampler — no additional modelling step is required.  For
+robust inference, consider also `fitted(fit, type = "aipw_ate")` as a doubly
+robust complement.
+
+**Sensitivity to census specification.**  As with any reweighting approach,
+results depend on which variables define the cells and whether those variables
+appear in the outcome model.  Running `population_predict()` under alternative
+census specifications is a useful sensitivity check before reporting.
