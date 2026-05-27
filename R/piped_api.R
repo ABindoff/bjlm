@@ -154,6 +154,82 @@ latent_gp <- function(model, name, data, obs_var, time_var, time_trt_var, time_o
   model
 }
 
+#' Add a population calibration block to a BJLM model
+#'
+#' Enables population-level G-computation via census weights. After fitting,
+#' use \code{\link{population_predict}} to estimate population-average outcome
+#' trajectories and Population Average Treatment Effects (PATE).
+#'
+#' @details
+#' The population block replaces sample weights with census weights in the
+#' G-computation path. For each posterior draw \eqn{s}, the population-average
+#' outcome at time \eqn{\tau} is:
+#' \deqn{Q^{(s)}(\tau) = \sum_c w_c \cdot g^{-1}\!\left(\hat{\mu}_c^{(s)}(\tau) + u_c^{(s)}\right)}
+#' where \eqn{w_c} are normalised census weights, \eqn{\hat{\mu}_c^{(s)}} is the
+#' fixed-effects linear predictor for cell \eqn{c}, and
+#' \eqn{u_c^{(s)} \sim \mathcal{N}(0,\,\sigma_u^{(s)\,2})} is a freshly drawn
+#' random effect that marginalises over the posterior of \eqn{\sigma_u} rather
+#' than conditioning on any observed subject.
+#'
+#' For PATE/RR estimation (\code{type = "ate"} or \code{type = "rr"} in
+#' \code{\link{population_predict}}), the \emph{same} random-effect draw is
+#' applied to both counterfactuals, so RE terms cancel exactly for Gaussian
+#' outcomes and variance is reduced for other families.
+#'
+#' @param model A \code{bjlm_model} object.
+#' @param cells A data frame of census cells, one row per demographic stratum.
+#'   Must contain all fixed-effect covariates referenced in the outcome model.
+#'   Random-effect group variables should \emph{not} be included; their
+#'   uncertainty is marginalised automatically.
+#' @param weight Character name of the column in \code{cells} containing
+#'   population counts or sampling weights. Weights are normalised to sum to
+#'   one internally. If \code{NULL}, all cells are weighted equally.
+#' @param strata A one-sided formula documenting the stratification variables
+#'   (e.g., \code{~ age + sex + region}). Informational; used for validation
+#'   and display only. All named variables must be present in \code{cells}.
+#' @param at A named list of covariate overrides applied to \code{cells} before
+#'   prediction. Typical use: \code{at = list(tau = 3)} to evaluate at a fixed
+#'   time point, or \code{at = list(tau = 0:5)} for a population trajectory.
+#'
+#' @return The modified \code{bjlm_model} object.
+#' @export
+population <- function(model, cells, weight = NULL, strata = NULL, at = list()) {
+  if (!inherits(model, "bjlm_model")) stop("First argument must be a bjlm_model object.")
+  if (!is.data.frame(cells)) stop("'cells' must be a data frame.")
+  if (nrow(cells) == 0L) stop("'cells' must have at least one row.")
+
+  if (!is.null(weight)) {
+    if (!is.character(weight) || length(weight) != 1L)
+      stop("'weight' must be a single string naming a column in 'cells'.")
+    if (!weight %in% names(cells))
+      stop(sprintf("Weight column '%s' not found in 'cells'.", weight))
+    wv <- cells[[weight]]
+    if (anyNA(wv) || any(wv < 0))
+      stop("Population weights must be non-negative and non-missing.")
+    if (sum(wv) == 0)
+      stop("Population weights must sum to a positive value.")
+  }
+
+  if (!is.null(strata)) {
+    if (!inherits(strata, "formula"))
+      stop("'strata' must be a one-sided formula (e.g., ~ age + sex + region).")
+    missing_sv <- setdiff(all.vars(strata), names(cells))
+    if (length(missing_sv) > 0)
+      stop(sprintf("Strata variable(s) not found in 'cells': %s.",
+                   paste(missing_sv, collapse = ", ")))
+  }
+
+  if (!is.list(at)) stop("'at' must be a named list (e.g., list(tau = 0:5)).")
+
+  model$population <- list(
+    cells  = cells,
+    weight = weight,
+    strata = strata,
+    at     = at
+  )
+  model
+}
+
 #' Compile a BJLM model
 #'
 #' Performs key alignment, demographic matching, strict Bayesian Cut validation,
@@ -356,6 +432,42 @@ compile <- function(model) {
     shortcut_priors <- NULL
   }
 
+  # ---- Population block validation ----
+  if (!is.null(model$population)) {
+    pop_cells <- model$population$cells
+    pop_at    <- model$population$at %||% list()
+
+    # Collect fixed-effect covariate names from outcome sub-formulas
+    fv <- character(0)
+    if (model$outcome$zero_breakpoint) {
+      fv <- c(fv, all.vars(re_info$fixed))
+    } else {
+      if (!is.null(re_info$fixed)) fv <- c(fv, all.vars(re_info$fixed))
+      if (!is.null(model$outcome$b1)) fv <- c(fv, all.vars(model$outcome$b1))
+      for (f in c(model$outcome$deltas, model$outcome$omega, model$outcome$rho)) {
+        fv <- c(fv, all.vars(f))
+      }
+    }
+    fv <- unique(setdiff(fv, c(outcome_lhs, subject_var %||% character(0))))
+    missing_fv <- setdiff(fv, names(pop_cells))
+    if (length(missing_fv) > 0) {
+      warning(sprintf(
+        "Census cells are missing fixed-effect covariate(s) used in the outcome model: %s. Ensure these are present before calling population_predict().",
+        paste(missing_fv, collapse = ", ")
+      ), call. = FALSE)
+    }
+
+    if (!model$outcome$zero_breakpoint && length(outcome_vars) >= 2) {
+      tau_nm_pop <- outcome_vars[2]
+      if (!tau_nm_pop %in% names(pop_cells) && is.null(pop_at[["tau"]])) {
+        warning(sprintf(
+          "Census cells do not contain the time variable '%s' and 'at$tau' is not set in population(). Specify at = list(tau = ...) or add '%s' to cells.",
+          tau_nm_pop, tau_nm_pop
+        ), call. = FALSE)
+      }
+    }
+  }
+
   compiled <- list(
     model = model,
     y = y,
@@ -375,7 +487,8 @@ compile <- function(model) {
     zero_breakpoint = model$outcome$zero_breakpoint,
     subject_var = subject_var,
     merged_cols = merged_cols,
-    shared_cols = shared_cols
+    shared_cols = shared_cols,
+    population  = model$population
   )
   class(compiled) <- "bjlm_compiled_model"
   
@@ -472,6 +585,7 @@ fit.bjlm_compiled_model <- function(object, priors = NULL, ...) {
   fit_obj$deltas <- object$deltas
   fit_obj$omega <- object$omega
   fit_obj$rho <- object$rho
+  fit_obj$population <- object$population
 
   fit_obj
 }
@@ -506,11 +620,23 @@ print.bjlm_model <- function(x, ...) {
   if (length(x$latent_gps) > 0) {
     cat("Latent Gaussian Processes:\n")
     for (gp in x$latent_gps) {
-      cat(sprintf("  - %s (time=%s, obs=%s, subject=%s, kernel=%s)\n", 
+      cat(sprintf("  - %s (time=%s, obs=%s, subject=%s, kernel=%s)\n",
                   gp$name, gp$time_var, gp$obs_var, gp$subject, gp$kernel))
     }
   }
-  
+
+  if (!is.null(x$population)) {
+    pop <- x$population
+    cat("Population Block:\n")
+    cat(sprintf("  Census cells: %d rows\n", nrow(pop$cells)))
+    if (!is.null(pop$weight)) cat(sprintf("  Weight column: %s\n", pop$weight))
+    if (!is.null(pop$strata)) cat(sprintf("  Strata: %s\n", deparse(pop$strata)))
+    if (length(pop$at) > 0) {
+      at_desc <- paste(names(pop$at), collapse = ", ")
+      cat(sprintf("  at: %s\n", at_desc))
+    }
+  }
+
   invisible(x)
 }
 
@@ -529,7 +655,10 @@ print.bjlm_compiled_model <- function(x, ...) {
   } else {
     cat("Piecewise change-point model with ", length(x$deltas), " breakpoint(s)\n")
   }
-  
+  if (!is.null(x$population)) {
+    cat("Census cells: ", nrow(x$population$cells), "\n")
+  }
+
   invisible(x)
 }
 
@@ -958,13 +1087,223 @@ fitted.smoothbp_fit <- function(object, newdata = NULL, type = c("link", "respon
   .build_predictions(object, newdata, type, summary, ...)
 }
 
+#' Population-level G-computation for bjlm_fit objects
+#'
+#' Estimates the population-average outcome trajectory or the Population Average
+#' Treatment Effect (PATE) by applying census weights to G-computation
+#' predictions. Random effects for census cells are marginalised over the
+#' posterior of \eqn{\sigma_u} via Monte Carlo rather than conditioned on any
+#' observed subject.
+#'
+#' @param object A \code{bjlm_fit} object. Should have been fitted from a model
+#'   with a \code{\link{population}} block, or the \code{population} argument
+#'   must be supplied here.
+#' @param ... Additional arguments (ignored).
+#' @export
+population_predict <- function(object, ...) UseMethod("population_predict")
+
+#' @rdname population_predict
+#'
+#' @param population Optional population spec (a list with fields \code{cells},
+#'   \code{weight}, \code{strata}, \code{at}) to use instead of the one stored
+#'   in \code{object$population}.
+#' @param type Character. One of:
+#'   \itemize{
+#'     \item \code{"response"}: Population-weighted mean outcome on the response
+#'       scale, marginalising over random effects.
+#'     \item \code{"ate"}: Population Average Treatment Effect (PATE),
+#'       \eqn{E_{\text{pop}}[Y(1)] - E_{\text{pop}}[Y(0)]}. Requires a
+#'       propensity model.
+#'     \item \code{"rr"}: Population marginal Risk Ratio,
+#'       \eqn{E_{\text{pop}}[Y(1)] / E_{\text{pop}}[Y(0)]}. Requires a
+#'       propensity model and a binomial outcome.
+#'   }
+#' @param at Named list of covariate overrides applied to the census cells
+#'   before prediction, overriding any \code{at} stored in the population spec.
+#'   Use \code{at = list(tau = 0:5)} to obtain a population trajectory.
+#' @param summary Logical. If \code{TRUE} (default), returns a data frame of
+#'   posterior statistics (\code{pop_mean}, \code{pop_Q2.5}, \code{pop_Q97.5},
+#'   plus a \code{tau} column when \code{at$tau} has length > 1). If
+#'   \code{FALSE}, returns a numeric vector of posterior draws (or a matrix with
+#'   one column per tau value).
+#' @param seed Integer seed for the Monte Carlo marginalisation of random
+#'   effects. Set for reproducibility.
+#'
+#' @return A data frame (if \code{summary = TRUE}) or a numeric vector/matrix
+#'   (if \code{summary = FALSE}).
+#' @export
+population_predict.bjlm_fit <- function(
+  object,
+  population = NULL,
+  type       = c("response", "ate", "rr"),
+  at         = NULL,
+  summary    = TRUE,
+  seed       = NULL,
+  ...
+) {
+  type <- match.arg(type)
+
+  pop_spec <- population %||% object$population
+  if (is.null(pop_spec)) {
+    stop("No population specification found. Add a population() block to the model, or supply the 'population' argument.")
+  }
+
+  cells      <- pop_spec$cells
+  weight_col <- pop_spec$weight
+  at_vals    <- at %||% pop_spec$at %||% list()
+
+  # Normalised census weights
+  w <- if (!is.null(weight_col) && weight_col %in% names(cells)) {
+    wv <- as.double(cells[[weight_col]])
+    wv / sum(wv)
+  } else {
+    rep(1.0 / nrow(cells), nrow(cells))
+  }
+
+  fam <- object$model$outcome$family$family %||% "gaussian"
+
+  if (type == "rr" && fam != "binomial") {
+    stop("type = 'rr' requires a binomial outcome model.")
+  }
+  if (type %in% c("ate", "rr")) {
+    if (is.null(object$propensity_formula)) {
+      stop(sprintf("type = '%s' requires a fitted propensity model.", type))
+    }
+    trt_var <- all.vars(object$propensity_formula)[1]
+    if (!trt_var %in% names(cells)) {
+      stop(sprintf(
+        "Treatment variable '%s' not found in census cells. Include it to define the population treatment distribution.",
+        trt_var
+      ))
+    }
+  }
+
+  # For zero-breakpoint models the outcome formula is Y ~ dummy_tau; inject it.
+  if (isTRUE(object$zero_breakpoint)) cells[["dummy_tau"]] <- 0.0
+
+  # Apply non-tau at_vals overrides to cells now (tau is handled per-iteration below)
+  for (var_nm in setdiff(names(at_vals), "tau")) {
+    cells[[var_nm]] <- at_vals[[var_nm]]
+  }
+
+  outcome_vars   <- all.vars(object$outcome_formula)
+  tau_name_local <- outcome_vars[2]
+
+  tau_grid <- if (!is.null(at_vals[["tau"]]) && !isTRUE(object$zero_breakpoint)) {
+    as.double(at_vals[["tau"]])
+  } else {
+    NA_real_
+  }
+
+  if (!is.null(seed)) set.seed(seed)
+
+  draw_mat  <- posterior::as_draws_matrix(object$draws)
+  col_names <- colnames(draw_mat)
+  n_draws   <- nrow(draw_mat)
+  n_cells   <- nrow(cells)
+
+  sigma_u_col <- match("sigma_u", col_names)
+  has_re <- !is.null(object$subject_var) && !is.na(sigma_u_col)
+
+  # Pre-draw standard normals for RE marginalisation once; scale per draw inside.
+  # z_mat[s, c] * sigma_u_draws[s] gives u_c^(s) ~ N(0, sigma_u^(s)).
+  z_mat          <- NULL
+  sigma_u_draws  <- NULL
+  if (has_re) {
+    z_mat         <- matrix(rnorm(n_draws * n_cells), nrow = n_draws, ncol = n_cells)
+    sigma_u_draws <- as.numeric(draw_mat[, sigma_u_col])
+  }
+
+  inv_link <- switch(fam,
+    gaussian          = identity,
+    binomial          = function(x) 1 / (1 + exp(-x)),
+    negative_binomial = exp,
+    identity
+  )
+
+  # Returns n_draws x n_cells link-scale prediction matrix, no observed RE applied.
+  .lp_mat <- function(cells_eval) {
+    .build_predictions(object, newdata = cells_eval, type = "link", summary = FALSE)
+  }
+
+  # Applies RE marginalisation and census weighting; returns n_draws-length vector.
+  .weighted_response <- function(lp_mat, re_mat) {
+    if (!is.null(re_mat)) lp_mat <- lp_mat + re_mat
+    as.vector(inv_link(lp_mat) %*% w)
+  }
+
+  # Core computation for a single tau value (NA = use tau column already in cells).
+  .pop_draws_at_tau <- function(tau_val) {
+    cells_eval <- cells
+    if (!is.na(tau_val)) cells_eval[[tau_name_local]] <- tau_val
+
+    # RE matrix: same draw used for both counterfactuals to reduce variance.
+    re_mat <- if (has_re) sweep(z_mat, 1, sigma_u_draws, `*`) else NULL
+
+    if (type == "response") {
+      return(.weighted_response(.lp_mat(cells_eval), re_mat))
+    }
+
+    # PATE / Population RR
+    cells_1 <- cells_eval; cells_1[[trt_var]] <- 1.0
+    cells_0 <- cells_eval; cells_0[[trt_var]] <- 0.0
+
+    q1 <- .weighted_response(.lp_mat(cells_1), re_mat)
+    q0 <- .weighted_response(.lp_mat(cells_0), re_mat)
+
+    if (type == "ate") q1 - q0 else q1 / q0
+  }
+
+  # Handle trajectory (at$tau vector) vs single-point
+  if (length(tau_grid) > 1) {
+    draws_list <- lapply(tau_grid, .pop_draws_at_tau)
+
+    if (!summary) {
+      out_mat <- do.call(cbind, draws_list)
+      colnames(out_mat) <- paste0("tau=", tau_grid)
+      return(out_mat)
+    }
+
+    rows <- lapply(seq_along(tau_grid), function(i) {
+      d <- draws_list[[i]]
+      data.frame(
+        tau       = tau_grid[i],
+        pop_mean  = mean(d),
+        pop_Q2.5  = stats::quantile(d, 0.025),
+        pop_Q97.5 = stats::quantile(d, 0.975)
+      )
+    })
+    return(do.call(rbind, rows))
+  }
+
+  pop_draws <- .pop_draws_at_tau(if (is.na(tau_grid)) NA_real_ else tau_grid)
+
+  if (!summary) return(pop_draws)
+
+  data.frame(
+    pop_mean  = mean(pop_draws),
+    pop_Q2.5  = stats::quantile(pop_draws, 0.025),
+    pop_Q97.5 = stats::quantile(pop_draws, 0.975)
+  )
+}
+
 .build_predictions_dm <- function(object, data) {
   b0_fml <- object$b0_formula
   b1_fml <- object$b1_formula
   deltas_fml <- object$deltas
   omega_fml <- object$omega
   rho_fml <- object$rho
-  
+
+  # For zero-breakpoint models, b0_formula is stored as the two-sided outcome
+  # formula (e.g. Y ~ X1). Strip the LHS so model.matrix doesn't look for the
+  # response in newdata (which may not have it, e.g. census cells).
+  if (length(b0_fml) == 3L) {
+    b0_fml <- stats::as.formula(
+      paste("~", paste(deparse(b0_fml[[3L]]), collapse = " ")),
+      env = environment(b0_fml)
+    )
+  }
+
   X_b0 <- stats::model.matrix(b0_fml, data = data)
   if (is.null(b1_fml)) {
     X_b1 <- stats::model.matrix(~ 0, data = data)

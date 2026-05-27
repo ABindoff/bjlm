@@ -251,3 +251,150 @@ test_that("flowchart S3 methods extract and format Mermaid diagrams correctly", 
   expect_true(grepl("Shared variables:.*X_shared", fc_fit))
 })
 
+test_that("population() block builds correctly and population_predict() returns valid draws", {
+  skip_if_not_installed("posterior")
+
+  set.seed(42)
+  n <- 60
+
+  age  <- sample(c("young", "old"), n, replace = TRUE)
+  sex  <- sample(c("M", "F"),       n, replace = TRUE)
+  X1   <- ifelse(age == "old", 1, 0) + rnorm(n, sd = 0.5)
+  pi_t <- plogis(0.3 + 0.5 * X1)
+  Trt  <- rbinom(n, 1, pi_t)
+  Y    <- 4 + 1.5 * Trt + 0.8 * X1 + rnorm(n)
+
+  dat <- data.frame(Y = Y, tau = rep(0, n), Trt = Trt, X1 = X1, age = age, sex = sex)
+
+  # Census: 4 cells (age x sex) with population counts
+  census <- data.frame(
+    age    = c("young", "young", "old", "old"),
+    sex    = c("M",     "F",     "M",   "F"),
+    N_pop  = c(1200,    1100,    900,   800),
+    Trt    = c(0.4,     0.4,     0.6,   0.6),  # pop treatment prevalence (not used for PATE)
+    X1     = c(0.1,    -0.1,     0.8,   0.7)
+  )
+
+  # ---- population() builder validation ----
+  bad_model <- bjlm_model() |> outcome(Y ~ X1, data = dat)
+  expect_error(
+    population(bad_model, cells = "not_a_df"),
+    "'cells' must be a data frame"
+  )
+  expect_error(
+    population(bad_model, cells = census, weight = "missing_col"),
+    "Weight column 'missing_col' not found"
+  )
+  expect_error(
+    population(bad_model, cells = census, strata = ~ age + missing_var),
+    "Strata variable"
+  )
+
+  # ---- Valid model spec with population block ----
+  spec <- bjlm_model() |>
+    propensity(Trt ~ X1, data = dat) |>
+    outcome(Y ~ X1, data = dat) |>
+    population(
+      cells   = census,
+      weight  = "N_pop",
+      strata  = ~ age + sex,
+      at      = list()
+    )
+
+  expect_false(is.null(spec$population))
+  expect_equal(nrow(spec$population$cells), 4L)
+  expect_output(print(spec), "Population Block")
+  expect_output(print(spec), "Census cells: 4")
+
+  # ---- compile() passes population through ----
+  compiled <- compile(spec)
+  expect_false(is.null(compiled$population))
+  expect_equal(nrow(compiled$population$cells), 4L)
+  expect_output(print(compiled), "Census cells:  4")
+
+  # ---- fit() passes population through ----
+  fit_res <- compiled |> fit(
+    chains  = 2L,
+    iter    = 100L,
+    warmup  = 50L,
+    seed    = 7L,
+    verbose = FALSE,
+    cores   = 1L
+  )
+  expect_false(is.null(fit_res$population))
+
+  # ---- population_predict: type = "response" ----
+  pop_resp <- population_predict(fit_res, type = "response", seed = 1L)
+  expect_s3_class(pop_resp, "data.frame")
+  expect_named(pop_resp, c("pop_mean", "pop_Q2.5", "pop_Q97.5"))
+  expect_true(pop_resp$pop_Q2.5 < pop_resp$pop_mean)
+  expect_true(pop_resp$pop_mean < pop_resp$pop_Q97.5)
+
+  # ---- population_predict: summary = FALSE returns numeric vector ----
+  pop_draws <- population_predict(fit_res, type = "response", summary = FALSE, seed = 1L)
+  expect_type(pop_draws, "double")
+  expect_length(pop_draws, nrow(posterior::as_draws_matrix(fit_res$draws)))
+
+  # ---- population_predict: type = "ate" (PATE) ----
+  # census must have Trt column (already does); population_predict sets trt_var to 1/0
+  pop_ate <- population_predict(fit_res, type = "ate", seed = 1L)
+  expect_s3_class(pop_ate, "data.frame")
+  expect_named(pop_ate, c("pop_mean", "pop_Q2.5", "pop_Q97.5"))
+
+  # ---- population_predict: at$tau trajectory (zero-bp model: no-op, but ensure no error) ----
+  # For a zero-breakpoint model, at$tau is silently ignored (tau doesn't affect predictions).
+  pop_at <- population_predict(fit_res, at = list(tau = c(0, 1, 2)), type = "response", seed = 1L)
+  # Should return a single-row data frame (zero-bp ignores tau grid)
+  expect_s3_class(pop_at, "data.frame")
+
+  # ---- population_predict: error when no population spec ----
+  bare_spec <- bjlm_model() |> outcome(Y ~ X1, data = dat)
+  bare_fit  <- compile(bare_spec) |> fit(
+    chains = 1L, iter = 40L, warmup = 20L, seed = 1L, verbose = FALSE
+  )
+  expect_error(population_predict(bare_fit), "No population specification")
+})
+
+test_that("population_predict trajectory returns one row per tau value for piecewise models", {
+  skip_if_not_installed("posterior")
+
+  set.seed(99)
+  n_subj <- 10; n_obs <- 6
+  subj <- rep(1:n_subj, each = n_obs)
+  tau  <- rep(seq(0, 5, length.out = n_obs), times = n_subj)
+  X1   <- rep(rnorm(n_subj), each = n_obs)
+  Trt  <- rep(rbinom(n_subj, 1, 0.5), each = n_obs)
+  Y    <- 3 + 0.5 * Trt + 0.4 * X1 - 0.1 * tau + rnorm(n_subj * n_obs, sd = 0.5)
+  dat  <- data.frame(subject = subj, tau = tau, Y = Y, X1 = X1, Trt = Trt)
+  dat_subj <- dat[!duplicated(dat$subject), ]
+
+  census <- data.frame(X1 = c(-0.5, 0.5), Trt = c(0, 1), N_pop = c(500, 500))
+
+  spec <- bjlm_model() |>
+    propensity(Trt ~ X1, data = dat_subj) |>
+    outcome(
+      formula = Y ~ tau,
+      b0      = ~ 1 + Trt + X1 + (1 | subject),
+      b1      = ~ 1,
+      data    = dat
+    ) |>
+    population(cells = census, weight = "N_pop", at = list(tau = c(0, 2, 4)))
+
+  compiled <- suppressWarnings(compile(spec))
+  fit_res  <- compiled |> fit(
+    chains = 1L, iter = 80L, warmup = 40L, seed = 5L, verbose = FALSE
+  )
+
+  # Trajectory: should return 3 rows (one per tau)
+  traj <- population_predict(fit_res, type = "response", seed = 2L)
+  expect_s3_class(traj, "data.frame")
+  expect_equal(nrow(traj), 3L)
+  expect_named(traj, c("tau", "pop_mean", "pop_Q2.5", "pop_Q97.5"))
+  expect_equal(traj$tau, c(0, 2, 4))
+
+  # summary = FALSE returns a matrix with 3 columns
+  traj_mat <- population_predict(fit_res, type = "response", summary = FALSE, seed = 2L)
+  expect_true(is.matrix(traj_mat))
+  expect_equal(ncol(traj_mat), 3L)
+  expect_equal(colnames(traj_mat), c("tau=0", "tau=2", "tau=4"))
+})
