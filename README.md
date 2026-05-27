@@ -158,14 +158,14 @@ graph TD
         OD --> OF
     end
 
-    PD -->|"Align by subject ID: id"| OD:::align
-    PD -.->|"Expand subject-level: Trt, sev, age_z, male"| OD:::align
+    PD -->|"Align by subject ID: id"| OD
+    PD -.->|"Expand subject-level: Trt, sev, age_z, male"| OD
     SC["Shared variables: sev<br/>Independent Block-Scoping"]:::collision
     PF -.-> SC
     OF -.-> SC
 ```
 
-The green subgraph is the propensity block; blue is the outcome block. The orange arrow shows how subject-level covariates are expanded to observation-level. The red node flags shared covariates that appear in both models — these are scoped independently under the Bayesian Cut.
+Both subgraphs sit inside a yellow background. Nodes in the propensity block (left) are green; nodes in the outcome block (right) are blue. A solid arrow labelled with the subject ID variable links the two blocks; a dashed arrow lists the covariates that are expanded from subject-level to observation-level. The red node at the bottom flags covariates shared between the two model formulas — these are scoped independently under the Bayesian Cut.
 
 ## Vignettes
 
