@@ -416,32 +416,164 @@ plot_predictions <- function(fit, type = c("population", "subject", "both"), sub
   p
 }
 
-#' Plot time-varying latent Gaussian Process (GP) deviations
+#' Plot posterior predictive trajectories for latent Gaussian Processes
+#'
+#' For each GP in the model, reconstructs posterior predictive curves from the
+#' sampled hyperparameters (`alpha`, `rho`, `sigma_x`) using the squared
+#' exponential kernel conditioning formula. Raw covariate observations are
+#' overlaid as points, and treatment times are marked with a dashed vertical
+#' line when available.
 #'
 #' @param fit A `bjlm_fit` object.
-#' @param subjects Optional vector of subject IDs to plot.
-#' @param n_subjects Number of random subjects to select if `subjects` is NULL.
+#' @param subjects Optional character/factor vector of subject IDs to plot.
+#'   If `NULL`, `n_subjects` are chosen at random.
+#' @param n_subjects Number of subjects to plot when `subjects` is `NULL`.
+#' @param n_draws Number of posterior draws to use for the credible band.
 #' @param ... Unused.
 #'
-#' @return A `ggplot` object.
+#' @return A `ggplot` object (single GP) or a named list of `ggplot` objects
+#'   (multiple GPs).
 #' @export
-plot_gp <- function(fit, subjects = NULL, n_subjects = 5, ...) {
+plot_gp <- function(fit, subjects = NULL, n_subjects = 5, n_draws = 200, ...) {
   if (!requireNamespace("ggplot2", quietly = TRUE)) {
     stop("Package 'ggplot2' is required for plotting GP curves.")
   }
-  
-  # Look for parameters starting with gp_ in the posterior draws
-  col_names <- colnames(posterior::as_draws_matrix(fit$draws))
-  gp_cols <- grep("^gp_", col_names, value = TRUE)
-  
-  if (length(gp_cols) == 0) {
-    warning("No latent Gaussian Process draws found in this fitted model. ",
-         "The GP sampler is currently a work-in-progress. Returning skeleton plot.", call. = FALSE)
+  if (is.null(fit$model) || length(fit$model$latent_gps) == 0) {
+    stop("No latent Gaussian Processes found in this fitted model.")
   }
-  
-  # Skeleton implementation
-  ggplot2::ggplot() + 
-    ggplot2::labs(title = "Latent Gaussian Process Curves")
+
+  draws_mat <- posterior::as_draws_matrix(fit$draws)
+
+  .se_k <- function(t1, t2, alpha, rho) {
+    alpha^2 * exp(-0.5 * outer(t1, t2, function(a, b) (a - b)^2) / rho^2)
+  }
+
+  gp_plots <- lapply(fit$model$latent_gps, function(gp) {
+    gp_name   <- gp$name
+    alpha_col <- paste0(gp_name, "_alpha")
+    rho_col   <- paste0(gp_name, "_rho")
+    sigx_col  <- paste0(gp_name, "_sigma_x")
+
+    if (!all(c(alpha_col, rho_col, sigx_col) %in% colnames(draws_mat))) {
+      warning(sprintf("Hyperparameter draws not found for GP '%s'.", gp_name), call. = FALSE)
+      return(NULL)
+    }
+
+    alpha_draws <- as.numeric(draws_mat[, alpha_col])
+    rho_draws   <- as.numeric(draws_mat[, rho_col])
+    sigx_draws  <- as.numeric(draws_mat[, sigx_col])
+
+    n_total  <- length(alpha_draws)
+    draw_idx <- if (n_total > n_draws) sample.int(n_total, n_draws) else seq_len(n_total)
+
+    gp_data  <- gp$data
+    subj_var <- gp$subject
+    time_var <- gp$time_var
+    obs_var  <- gp$obs_var
+
+    all_subjs  <- unique(as.character(gp_data[[subj_var]]))
+    plot_subjs <- if (is.null(subjects)) {
+      if (length(all_subjs) > n_subjects) sample(all_subjs, n_subjects) else all_subjs
+    } else {
+      as.character(subjects)
+    }
+
+    t_range <- range(gp_data[[time_var]])
+    t_grid  <- seq(t_range[1], t_range[2], length.out = 100)
+
+    curve_df <- do.call(rbind, lapply(plot_subjs, function(subj) {
+      mask  <- as.character(gp_data[[subj_var]]) == subj
+      t_obs <- gp_data[[time_var]][mask]
+      y_obs <- gp_data[[obs_var]][mask]
+      n_obs <- length(t_obs)
+      if (n_obs == 0L) return(NULL)
+
+      curves <- matrix(NA_real_, nrow = length(draw_idx), ncol = length(t_grid))
+      for (d in seq_along(draw_idx)) {
+        ii <- draw_idx[d]
+        K_oo    <- .se_k(t_obs, t_obs, alpha_draws[ii], rho_draws[ii]) +
+                   diag(sigx_draws[ii]^2, n_obs)
+        K_go    <- .se_k(t_grid, t_obs, alpha_draws[ii], rho_draws[ii])
+        K_inv_y <- tryCatch(solve(K_oo, y_obs), error = function(e) NULL)
+        if (!is.null(K_inv_y)) curves[d, ] <- as.numeric(K_go %*% K_inv_y)
+      }
+
+      data.frame(
+        subject = subj,
+        t       = t_grid,
+        med     = apply(curves, 2, stats::median, na.rm = TRUE),
+        lo      = apply(curves, 2, stats::quantile, 0.025, na.rm = TRUE),
+        hi      = apply(curves, 2, stats::quantile, 0.975, na.rm = TRUE)
+      )
+    }))
+
+    obs_df         <- gp_data[as.character(gp_data[[subj_var]]) %in% plot_subjs, , drop = FALSE]
+    obs_df$subject <- as.character(obs_df[[subj_var]])
+
+    # Treatment times (optional)
+    trt_df     <- NULL
+    prop_data  <- fit$model$propensity$data
+    trt_t_var  <- gp$time_trt_var
+    if (!is.null(prop_data) && !is.null(trt_t_var) &&
+        trt_t_var %in% names(prop_data) && subj_var %in% names(prop_data)) {
+      trt_sub <- prop_data[as.character(prop_data[[subj_var]]) %in% plot_subjs, , drop = FALSE]
+      if (nrow(trt_sub) > 0L) {
+        trt_df <- data.frame(
+          subject = as.character(trt_sub[[subj_var]]),
+          t_trt   = trt_sub[[trt_t_var]]
+        )
+      }
+    }
+
+    subtitle <- sprintf(
+      "Posterior predictive mean ± 95%% CI from %d draws%s",
+      length(draw_idx),
+      if (!is.null(trt_df)) " | dashed = treatment time" else ""
+    )
+
+    p <- ggplot2::ggplot() +
+      ggplot2::geom_ribbon(
+        data = curve_df,
+        ggplot2::aes(x = t, ymin = lo, ymax = hi, group = subject),
+        fill = "#2b8cbe", alpha = 0.2
+      ) +
+      ggplot2::geom_line(
+        data = curve_df,
+        ggplot2::aes(x = t, y = med, group = subject),
+        colour = "#2b8cbe", linewidth = 0.9
+      ) +
+      ggplot2::geom_point(
+        data = obs_df,
+        ggplot2::aes(x = .data[[time_var]], y = .data[[obs_var]]),
+        colour = "grey30", size = 1.8, alpha = 0.8
+      )
+
+    if (!is.null(trt_df)) {
+      p <- p + ggplot2::geom_vline(
+        data = trt_df,
+        ggplot2::aes(xintercept = t_trt),
+        linetype = "dashed", colour = "#e06c00", linewidth = 0.6, alpha = 0.8
+      )
+    }
+
+    p +
+      ggplot2::facet_wrap(~ subject, labeller = ggplot2::label_both) +
+      ggplot2::labs(
+        title    = sprintf("Posterior GP Trajectories: %s", gp_name),
+        subtitle = subtitle,
+        x        = time_var,
+        y        = gp_name
+      ) +
+      ggplot2::theme_minimal() +
+      ggplot2::theme(
+        plot.title    = ggplot2::element_text(face = "bold", size = 13, colour = "#2c3e50"),
+        plot.subtitle = ggplot2::element_text(size = 10, colour = "grey40"),
+        strip.text    = ggplot2::element_text(face = "bold")
+      )
+  })
+
+  names(gp_plots) <- vapply(fit$model$latent_gps, `[[`, character(1), "name")
+  if (length(gp_plots) == 1L) gp_plots[[1L]] else gp_plots
 }
 
 #' Plot propensity score diagnostics and weight balance
