@@ -1,0 +1,360 @@
+---
+title: "Breakpoint Selection with Spike-and-Slab Priors"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Breakpoint Selection with Spike-and-Slab Priors}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse  = TRUE,
+  comment   = "#>",
+  eval      = FALSE,
+  fig.width = 7,
+  fig.height = 4.5
+)
+```
+
+## Motivation
+
+Piecewise regression models invite a natural question: *which coefficients in the
+change-point component are actually non-zero?*  In a confounded longitudinal
+study we might ask not only "does this treatment change the trajectory?" but
+also "which baseline characteristics modify the magnitude of that change?"
+Including irrelevant modifiers dilutes the precision of everything else;
+excluding real ones biases the causal estimate.
+
+`bjlm` resolves this with a **spike-and-slab prior** (Kuo & Mallick 1998) on
+the $b_1$ and $\delta_k$ coefficients.  A binary indicator $\gamma_j \in
+\{0, 1\}$ gates each coefficient:
+
+$$
+\beta_j \mid \gamma_j = \begin{cases}
+  0 & \gamma_j = 0 \text{ (spike)}\\
+  \mathcal{N}(0,\, \sigma_\text{slab}^2) & \gamma_j = 1 \text{ (slab)}
+\end{cases}
+$$
+
+The posterior mean of $\gamma_j$ across all MCMC draws is the **Posterior
+Inclusion Probability** (PIP): values near 1 indicate strong evidence for
+inclusion, near 0 for exclusion, near 0.5 for genuine uncertainty.
+
+Crucially, the gamma samplers operate *within* the IPW-weighted outcome
+block, so variable selection is performed conditional on the propensity-score
+model.  The Bayesian Cut is preserved — the spike-and-slab step never feeds
+back into propensity estimation.
+
+The Rust implementation (`SpikeSlabConfig`, `sample_pi`, `sample_gamma`,
+`run_chain_ss`) and the `smoothbp_spike_slab` / `smoothbp_pip` R classes are
+adapted from the **smoothbp** package (Bindoff 2025).
+
+---
+
+## Scenario: rehabilitation after hip fracture
+
+Sixty patients are followed for 12 months after hip fracture repair.
+Functional mobility (outcome $Y$, higher = better) is assessed at irregular
+intervals.  A structured physiotherapy programme (treatment `Trt`) is offered
+but uptake is confounded by pre-operative baseline severity (`sev`): frailer
+patients are less likely to receive treatment.
+
+We expect recovery to follow a smooth change-point shape — rapid early gains
+then plateau — with the change occurring around month 6.  The research
+question is: **which covariates genuinely modify the slope change at the
+change-point?**
+
+We build the `delta` formula with four candidate modifiers: `Trt` (treatment),
+`age_z` (standardised age), `male` (sex), and `sev` (baseline severity).  The
+**true** model has non-zero effects for `Trt` and `sev`; `age_z` and `male`
+are null.
+
+```{r simulate}
+library(bjlm)
+library(ggplot2)
+
+set.seed(2025)
+
+n_subj <- 60
+n_obs  <- 6  # observations per subject (irregular timing)
+
+# Subject-level characteristics
+subj <- data.frame(
+  id    = factor(1:n_subj),
+  sev   = rnorm(n_subj),            # pre-operative severity (confounder)
+  age_z = rnorm(n_subj),            # standardised age (null modifier)
+  male  = rbinom(n_subj, 1, 0.45)   # sex (null modifier)
+)
+
+# Treatment assignment: confounded by severity
+subj$pi_trt <- plogis(-0.4 + 1.2 * subj$sev)
+subj$Trt    <- rbinom(n_subj, 1, subj$pi_trt)
+
+# True outcome parameters
+true_b0     <-  20     # baseline intercept
+true_b0_trt <-   2     # treatment shift in level
+true_b0_sev <-  -3     # severity depresses baseline
+true_b1     <-   3.0   # initial slope (improvement per month)
+true_omega  <-   6     # change-point location
+true_rho    <-   1.2   # transition sharpness
+true_delta_int <- -2.5 # slope change at omega (all subjects)
+true_delta_trt <-  2.0 # treatment modifies the slope change   *** real ***
+true_delta_sev <- -1.0 # severity modifies slope change        *** real ***
+# true_delta_age  = 0  # age has NO effect on slope change
+# true_delta_male = 0  # sex has NO effect on slope change
+true_sigma_u <- 2.5    # subject random-effect SD
+true_sigma   <- 1.2    # residual SD
+
+# Generate longitudinal observations
+dat <- do.call(rbind, lapply(1:n_subj, function(i) {
+  tau <- sort(runif(n_obs, 0.5, 12))
+  u_i <- rnorm(1, 0, true_sigma_u)
+  d   <- tau - true_omega
+  s   <- plogis(d * true_rho)
+  mu  <- true_b0 + u_i +
+         true_b0_trt * subj$Trt[i] +
+         true_b0_sev * subj$sev[i] +
+         true_b1 * d +
+         (true_delta_int +
+          true_delta_trt * subj$Trt[i] +
+          true_delta_sev * subj$sev[i]) * d * s
+  Y <- rnorm(n_obs, mu, true_sigma)
+  data.frame(
+    id    = subj$id[i],
+    tau   = tau,
+    Y     = Y,
+    Trt   = subj$Trt[i],
+    sev   = subj$sev[i],
+    age_z = subj$age_z[i],
+    male  = subj$male[i]
+  )
+}))
+
+head(dat)
+```
+
+```{r plot-data}
+ggplot(dat, aes(tau, Y, group = id, colour = factor(Trt))) +
+  geom_line(alpha = 0.4, linewidth = 0.4) +
+  geom_point(size = 0.8, alpha = 0.6) +
+  scale_colour_manual(values = c("#E69F00", "#56B4E9"),
+                      labels = c("Control", "Treated")) +
+  labs(x = "Months post-surgery", y = "Functional mobility score",
+       colour = "Treatment", title = "Individual recovery trajectories") +
+  theme_minimal()
+```
+
+The treated trajectories (blue) show a stronger and more sustained plateau
+after the change-point — consistent with the true `delta_Trt > 0`.
+
+---
+
+## Fitting the standard model (no variable selection)
+
+Before introducing spike-and-slab, we fit the full model with all four
+candidate modifiers.  This is the reference against which we compare
+posteriors.
+
+```{r fit-standard}
+compiled_model <- bjlm_model() |>
+  propensity(Trt ~ sev, data = dat) |>
+  outcome(
+    Y ~ tau,
+    b0     = ~ 1 + Trt + sev + (1 | id),
+    b1     = ~ 1,
+    deltas = list(~ 1 + Trt + sev + age_z + male),
+    omega  = list(~ 1),
+    rho    = list(~ 1),
+    data   = dat
+  ) |>
+  compile()
+
+fit_full <- fit(compiled_model, chains = 4, iter = 2000)
+```
+
+```{r summary-standard}
+summary(fit_full)
+```
+
+The full-model posteriors for `delta1_age_z` and `delta1_male` should be
+centred near zero with wide credible intervals — evidence for their
+irrelevance, but not a firm decision.
+
+---
+
+## Fitting the spike-and-slab model
+
+Passing `spike = prior_spike_slab(...)` to `fit()` adds the
+Kuo-Mallick gamma sampler to the outcome block.  The slab prior is a
+$\mathcal{N}(0, 2)$ by default; here we also ask the model to learn the
+global inclusion probability $\pi$ from the data.
+
+```{r fit-ss}
+fit_ss <- fit(
+  compiled_model,
+  chains = 4,
+  iter   = 2000,
+  spike  = prior_spike_slab(
+    pi       = 0.5,       # initial inclusion probability
+    slab     = prior_normal(0, 2),
+    learn_pi = TRUE,      # place Beta(1,1) hyperprior on pi
+    a = 1, b = 1
+  )
+)
+```
+
+The gamma indicators ($\gamma_j \in \{0,1\}$) for each eligible coefficient
+are stored alongside the standard outcome parameters.  Coefficient draws that
+belong to iterations where $\gamma_j = 0$ contribute zero to the predicted
+mean, so the sampler automatically down-weights irrelevant paths.
+
+---
+
+## Posterior Inclusion Probabilities
+
+```{r pip}
+p <- pip(fit_ss)
+p
+```
+
+```{r plot-pip}
+plot(p) +
+  labs(title = "Posterior Inclusion Probabilities",
+       subtitle = "Grey dashed line = 0.5 decision threshold")
+```
+
+The PIP table and plot show:
+
+| Parameter | Expected | Interpretation |
+|-----------|----------|----------------|
+| `b1_(Intercept)` | high | There is an initial slope |
+| `delta1_(Intercept)` | high | The change-point affects all subjects |
+| `delta1_Trt` | high | Treatment genuinely modifies the slope change |
+| `delta1_sev` | high | Severity genuinely modifies the slope change |
+| `delta1_age_z` | low | No evidence that age modifies the change-point |
+| `delta1_male` | low | No evidence that sex modifies the change-point |
+
+A PIP > 0.5 is typically taken as evidence for inclusion; values > 0.75 or
+< 0.25 represent reasonably strong evidence in either direction.  The 95 %
+credible intervals on each PIP (derived from a Beta posterior) are shown as
+horizontal error bars.
+
+---
+
+## Comparing posteriors: full model vs. spike-and-slab
+
+The spike-and-slab model does not simply drop variables — it marginalises
+over their inclusion, which regularises the posteriors for the retained
+coefficients.
+
+```{r compare-posteriors}
+library(posterior)
+library(bayesplot)
+
+# Extract draws for the real change-point modifier
+draws_full <- subset_draws(fit_full$draws,  variable = "delta1_Trt")
+draws_ss   <- subset_draws(fit_ss$draws,    variable = "delta1_Trt")
+
+# Overlay posteriors
+df_compare <- rbind(
+  data.frame(model = "Full model", delta_Trt = as.numeric(draws_full)),
+  data.frame(model = "Spike-and-slab", delta_Trt = as.numeric(draws_ss))
+)
+
+ggplot(df_compare, aes(delta_Trt, colour = model, fill = model)) +
+  geom_density(alpha = 0.25, linewidth = 0.8) +
+  geom_vline(xintercept = true_delta_trt, linetype = "dashed") +
+  annotate("text", x = true_delta_trt + 0.1, y = 0, label = "truth",
+           hjust = 0, vjust = -0.5, size = 3) +
+  labs(x = expression(delta["1,Trt"]),
+       y = "Density",
+       title = "Posterior for treatment slope-change modifier",
+       colour = NULL, fill = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+Because `delta1_age_z` and `delta1_male` are regularised toward zero, the
+spike-and-slab posterior for `delta1_Trt` is typically narrower than the
+full-model posterior — the model no longer has to share uncertainty with
+irrelevant modifiers.
+
+---
+
+## Causal effects under spike-and-slab
+
+The `fitted()` and `causal_effect()` post-processing functions work
+unchanged on a spike-and-slab fit.  The gamma indicators are marginalised
+out in the prediction step: draws from zero-gated iterations contribute zero
+slope-change, so the causal-effect posterior naturally incorporates
+model-selection uncertainty.
+
+```{r causal-effect}
+# G-computation ATE averaged over the posterior
+fitted(fit_ss, type = "ate")
+
+# Doubly robust AIPW ATE
+fitted(fit_ss, type = "aipw_ate")
+```
+
+---
+
+## Sensitivity: fixed vs. learned pi
+
+When `learn_pi = FALSE` (the default), $\pi$ is fixed at the value passed
+to `prior_spike_slab()`.  When `learn_pi = TRUE`, $\pi$ receives a
+`Beta(a, b)` hyperprior and is updated each iteration.  Comparing PIPs under
+both settings is a useful sensitivity check:
+
+```{r sensitivity-pi}
+fit_fixed_pi <- fit(
+  compiled_model,
+  chains = 4, iter = 2000,
+  spike  = prior_spike_slab(pi = 0.5, learn_pi = FALSE)
+)
+
+fit_learn_pi <- fit(
+  compiled_model,
+  chains = 4, iter = 2000,
+  spike  = prior_spike_slab(pi = 0.5, learn_pi = TRUE, a = 1, b = 1)
+)
+
+pip_fixed <- pip(fit_fixed_pi)
+pip_learn <- pip(fit_learn_pi)
+
+pip_fixed$pi_setting <- "Fixed (pi = 0.5)"
+pip_learn$pi_setting <- "Learned (Beta(1,1))"
+
+pip_all <- rbind(pip_fixed, pip_learn)
+
+ggplot(pip_all, aes(pip, reorder(parameter, pip),
+                    colour = pi_setting, shape = pi_setting)) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", alpha = 0.4) +
+  geom_point(size = 3, position = ggplot2::position_dodge(width = 0.4)) +
+  scale_x_continuous(limits = c(0, 1)) +
+  labs(x = "PIP", y = NULL, colour = NULL, shape = NULL,
+       title = "PIP sensitivity to pi hyperprior") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+Robust conclusions — large PIPs near 1 or small PIPs near 0 — are stable
+across choices of $\pi$.  PIPs near 0.5 in both settings indicate genuine
+uncertainty that additional data would be needed to resolve.
+
+---
+
+## Summary
+
+| Step | Code |
+|------|------|
+| Declare spike prior | `prior_spike_slab(pi = 0.5, learn_pi = TRUE)` |
+| Fit with selection | `fit(compiled_model, spike = prior_spike_slab(...))` |
+| Extract PIPs | `pip(fit_ss)` |
+| Visualise PIPs | `plot(pip(fit_ss))` |
+| Causal effects | `fitted(fit_ss, type = "aipw_ate")` |
+
+The spike-and-slab path in `bjlm` adds one argument to `fit()` and one
+post-processing call.  The sampler, the propensity model, the Bayesian Cut,
+and all causal-effect estimators are otherwise unchanged.
