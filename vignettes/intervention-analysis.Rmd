@@ -23,10 +23,10 @@ In many research settings, we are not interested in *estimating* where a change 
 2. **Intervention Studies**: Testing for an effect after a specific event (e.g., a medical intervention or marketing campaign).
 3. **Stepped-Wedge Trials**: Testing for effects across multiple clusters that receive an intervention at different, pre-determined time points.
 
-`smoothbp` provides the `fixed()` helper to handle these cases efficiently within the spike-and-slab framework.
+`bjlm` provides the `fixed()` helper to handle these cases efficiently within the spike-and-slab framework.
 
 ```{r libs, message=FALSE, warning=FALSE}
-library(smoothbp)
+library(bjlm)
 library(ggplot2)
 library(dplyr)
 ```

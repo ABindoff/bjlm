@@ -1,8 +1,8 @@
 ---
-title: "Validating smoothbp against brms and mcp"
+title: "Validating bjlm against brms and mcp"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Validating smoothbp against brms and mcp}
+  %\VignetteIndexEntry{Validating bjlm against brms and mcp}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
@@ -19,16 +19,17 @@ knitr::opts_chunk$set(
 
 ## Why this vignette exists
 
-`smoothbp` is a bespoke Metropolis-within-Gibbs sampler for Bayesian
-hierarchical piecewise regression with **multiple** logistic-smoothed
-change-points. The recovery tests are a self-consistency check — simulator
-and likelihood share the same code path. To trust the package one also
-wants to see that it agrees with an independent implementation. `brms`
-(via Stan) is the natural reference for fitting the same generative model
-via NUTS on a custom non-linear formula. `mcp` (via JAGS) is the closest
-specialist competitor and provides a complementary perspective: it fits
-**hard** (sharp) change-points rather than the logistic-smoothed
-transition that `smoothbp` uses.
+`bjlm` provides `smoothbp()`, a bespoke Metropolis-within-Gibbs sampler
+for Bayesian hierarchical piecewise regression with **multiple**
+logistic-smoothed change-points. The recovery tests are a
+self-consistency check — simulator and likelihood share the same code
+path. To trust the package one also wants to see that it agrees with an
+independent implementation. `brms` (via Stan) is the natural reference
+for fitting the same generative model via NUTS on a custom non-linear
+formula. `mcp` (via JAGS) is the closest specialist competitor and
+provides a complementary perspective: it fits **hard** (sharp)
+change-points rather than the logistic-smoothed transition that
+`smoothbp()` uses.
 
 Four scenarios are compared below:
 
@@ -52,7 +53,7 @@ the prior mean (which is what smoothbp does internally). Both fixes
 applied below.
 
 ```{r setup, message = FALSE, warning = FALSE}
-library(smoothbp)
+library(bjlm)
 library(posterior)
 library(ggplot2)
 library(dplyr)
@@ -181,10 +182,10 @@ brms_names <- c(
 
 posterior::summarise_draws(
   posterior::as_draws_df(fit_brms), rhat, ess_bulk
-) %>%
-  dplyr::filter(variable %in% brms_names) %>%
+) |>
+  dplyr::filter(variable %in% brms_names) |>
   dplyr::transmute(parameter = sbp_names[match(variable, brms_names)],
-                   rhat, ess_bulk) %>%
+                   rhat, ess_bulk) |>
   knitr::kable(digits = 3,
                caption = "brms convergence on population-level parameters.")
 ```
@@ -203,31 +204,31 @@ colnames(brms_draws) <- sbp_names
 
 draws_long <- dplyr::bind_rows(
   tidyr::pivot_longer(sbp_draws,  cols = dplyr::everything(),
-                      names_to = "parameter", values_to = "value") %>%
+                      names_to = "parameter", values_to = "value") |>
     dplyr::mutate(package = "smoothbp"),
   tidyr::pivot_longer(brms_draws, cols = dplyr::everything(),
-                      names_to = "parameter", values_to = "value") %>%
+                      names_to = "parameter", values_to = "value") |>
     dplyr::mutate(package = "brms")
 )
 
-draws_long %>%
-  dplyr::group_by(parameter, package) %>%
+draws_long |>
+  dplyr::group_by(parameter, package) |>
   dplyr::summarise(
     mean = mean(value),
     sd   = sd(value),
     q025 = quantile(value, 0.025),
     q975 = quantile(value, 0.975),
     .groups = "drop"
-  ) %>%
+  ) |>
   tidyr::pivot_wider(
     names_from  = package,
     values_from = c(mean, sd, q025, q975),
     names_glue  = "{package}_{.value}"
-  ) %>%
+  ) |>
   dplyr::mutate(
     delta_mean_pct = 100 * abs(smoothbp_mean - brms_mean) /
                        (abs(brms_mean) + 1e-8)
-  ) %>%
+  ) |>
   knitr::kable(digits = 3,
                caption = "Posterior summaries for both packages.")
 ```
@@ -255,19 +256,19 @@ ggplot(draws_long, aes(x = value, fill = package, colour = package)) +
 ## Effective sample size per second
 
 ```{r ess, eval = have_brms}
-ess_sbp  <- posterior::summarise_draws(fit_sbp$draws, ess_bulk) %>%
-  dplyr::filter(variable %in% sbp_names) %>%
+ess_sbp  <- posterior::summarise_draws(fit_sbp$draws, ess_bulk) |>
+  dplyr::filter(variable %in% sbp_names) |>
   dplyr::transmute(parameter = variable,
                    smoothbp_ess_per_sec = ess_bulk / time_sbp)
 
 ess_brms <- posterior::summarise_draws(
   posterior::as_draws_df(fit_brms), ess_bulk
-) %>%
-  dplyr::filter(variable %in% brms_names) %>%
-  dplyr::mutate(parameter = sbp_names[match(variable, brms_names)]) %>%
+) |>
+  dplyr::filter(variable %in% brms_names) |>
+  dplyr::mutate(parameter = sbp_names[match(variable, brms_names)]) |>
   dplyr::transmute(parameter, brms_ess_per_sec = ess_bulk / time_brms)
 
-dplyr::full_join(ess_sbp, ess_brms, by = "parameter") %>%
+dplyr::full_join(ess_sbp, ess_brms, by = "parameter") |>
   knitr::kable(digits = 1,
                caption = "Bulk ESS / second by package and parameter.")
 ```
@@ -418,31 +419,31 @@ colnames(brms_draws_cov) <- sbp_names_cov
 
 draws_long_cov <- dplyr::bind_rows(
   tidyr::pivot_longer(sbp_draws_cov, cols = dplyr::everything(),
-                      names_to = "parameter", values_to = "value") %>%
+                      names_to = "parameter", values_to = "value") |>
     dplyr::mutate(package = "smoothbp"),
   tidyr::pivot_longer(brms_draws_cov, cols = dplyr::everything(),
-                      names_to = "parameter", values_to = "value") %>%
+                      names_to = "parameter", values_to = "value") |>
     dplyr::mutate(package = "brms")
 )
 
-draws_long_cov %>%
-  dplyr::group_by(parameter, package) %>%
+draws_long_cov |>
+  dplyr::group_by(parameter, package) |>
   dplyr::summarise(
     mean = mean(value),
     sd   = sd(value),
     q025 = quantile(value, 0.025),
     q975 = quantile(value, 0.975),
     .groups = "drop"
-  ) %>%
+  ) |>
   tidyr::pivot_wider(
     names_from  = package,
     values_from = c(mean, sd, q025, q975),
     names_glue  = "{package}_{.value}"
-  ) %>%
+  ) |>
   dplyr::mutate(
     delta_mean_pct = 100 * abs(smoothbp_mean - brms_mean) /
                        (abs(brms_mean) + 1e-8)
-  ) %>%
+  ) |>
   knitr::kable(digits = 3,
                caption = "Posterior summaries: omega ~ 1 + treatment.")
 ```
@@ -480,19 +481,19 @@ ggplot(draws_long_cov, aes(x = value, fill = package, colour = package)) +
 ## Effective sample size per second (covariate model)
 
 ```{r ess-cov, eval = have_brms}
-ess_sbp_cov  <- posterior::summarise_draws(fit_sbp_cov$draws, ess_bulk) %>%
-  dplyr::filter(variable %in% sbp_names_cov) %>%
+ess_sbp_cov  <- posterior::summarise_draws(fit_sbp_cov$draws, ess_bulk) |>
+  dplyr::filter(variable %in% sbp_names_cov) |>
   dplyr::transmute(parameter = variable,
                    smoothbp_ess_per_sec = ess_bulk / time_sbp_cov)
 
 ess_brms_cov <- posterior::summarise_draws(
   posterior::as_draws_df(fit_brms_cov), ess_bulk
-) %>%
-  dplyr::filter(variable %in% brms_names_cov) %>%
-  dplyr::mutate(parameter = sbp_names_cov[match(variable, brms_names_cov)]) %>%
+) |>
+  dplyr::filter(variable %in% brms_names_cov) |>
+  dplyr::mutate(parameter = sbp_names_cov[match(variable, brms_names_cov)]) |>
   dplyr::transmute(parameter, brms_ess_per_sec = ess_bulk / time_brms_cov)
 
-dplyr::full_join(ess_sbp_cov, ess_brms_cov, by = "parameter") %>%
+dplyr::full_join(ess_sbp_cov, ess_brms_cov, by = "parameter") |>
   knitr::kable(digits = 1,
                caption = "Bulk ESS / second by package and parameter (covariate model).")
 ```

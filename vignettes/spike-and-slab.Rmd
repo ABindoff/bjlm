@@ -39,7 +39,7 @@ means the data are consistent with no structural break there.
 ### Simulate data with one true breakpoint
 
 ```{r sim-one-bp}
-library(smoothbp)
+library(bjlm)
 library(posterior)
 library(ggplot2)
 library(dplyr)
@@ -127,7 +127,7 @@ simultaneously. We can overlay the posterior mean trajectory and its
 # Get posterior predictions (mean and intervals)
 pred <- fitted(fit_ss)
 
-plot_df <- dat %>%
+plot_df <- dat |>
   mutate(
     mu_true = mu,  # 'mu' is from the simulation step
     mu_fit  = pred$fitted_mean,

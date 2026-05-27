@@ -1,8 +1,8 @@
 ---
-title: "Advanced Modeling with smoothbp"
+title: "Advanced Modeling with bjlm"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Advanced Modeling with smoothbp}
+  %\VignetteIndexEntry{Advanced Modeling with bjlm}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
@@ -17,10 +17,10 @@ knitr::opts_chunk$set(
 )
 ```
 
-While `smoothbp` is efficient for standard piecewise regression, its real power lies in its ability to handle structural changes that are themselves functions of other variables. This vignette demonstrates "edge cases" where `smoothbp` offers flexibility that is difficult to achieve with other packages.
+While `bjlm` is efficient for standard piecewise regression, its real power lies in its ability to handle structural changes that are themselves functions of other variables. This vignette demonstrates "edge cases" where `bjlm` offers flexibility that is difficult to achieve with other packages.
 
 ```{r libs, message=FALSE, warning=FALSE}
-library(smoothbp)
+library(bjlm)
 library(ggplot2)
 library(dplyr)
 library(posterior)
@@ -166,7 +166,7 @@ month_labels <- c("Oct22","Nov","Dec","Jan23","Feb","Mar","Apr","May",
 ggplot(dat_market, aes(x = month, y = price, color = ticker)) +
   geom_point(alpha = 0.5) +
   geom_ribbon(aes(ymin = lo, ymax = hi, fill = ticker), alpha = 0.1, color = NA) +
-  geom_line(aes(y = y_fit), size = 1) +
+  geom_line(aes(y = y_fit), linewidth = 1) +
   geom_point(
     data = omega_plot, aes(x = mean, y = y_val),
     color = "red", shape = 4, size = 4, stroke = 1.5, inherit.aes = FALSE
@@ -209,15 +209,15 @@ p4_msft_aapl <- mean(om_msft[, 4] < om_aapl[, 4])
 p_cross <- mean(om_nvda[, 2] < om_aapl[, 1])
 
 cat("--- Event 1: Early Pivot (BP 1) ---\n")
-message(sprintf("Prob NVDA led MSFT: %.2f", p1_nvda_msft))
-message(sprintf("Prob NVDA led AAPL: %.2f", p1_nvda_aapl))
+cat(sprintf("Prob NVDA led MSFT: %.2f\n", p1_nvda_msft))
+cat(sprintf("Prob NVDA led AAPL: %.2f\n", p1_nvda_aapl))
 
 cat("\n--- Event 2: Autumn Shift (BP 4) ---\n")
-message(sprintf("Prob NVDA led MSFT: %.2f", p4_nvda_msft))
-message(sprintf("Prob MSFT led AAPL: %.2f", p4_msft_aapl))
+cat(sprintf("Prob NVDA led MSFT: %.2f\n", p4_nvda_msft))
+cat(sprintf("Prob MSFT led AAPL: %.2f\n", p4_msft_aapl))
 
 cat("\n--- Cross-Event Dynamics ---\n")
-message(sprintf("Prob NVDA AI Surge (BP 2) led AAPL Recovery (BP 1): %.2f", p_cross))
+cat(sprintf("Prob NVDA AI Surge (BP 2) led AAPL Recovery (BP 1): %.2f\n", p_cross))
 ```
 
 ## 2. Hierarchical Discovery (Simulated Market Trend)
