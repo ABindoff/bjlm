@@ -833,6 +833,7 @@ view_flowchart <- function(x, ...) {
     shared_cols <- x$shared_cols
     prop_fml <- x$model$propensity$formula
     out_fml <- x$model$outcome$formula
+    latent_gps <- x$model$latent_gps
   } else if (inherits(x, "bjlm_fit")) {
     n_obs <- x$n
     n_sub <- x$n_subjects
@@ -841,14 +842,16 @@ view_flowchart <- function(x, ...) {
     shared_cols <- x$shared_cols
     prop_fml <- x$propensity_formula
     out_fml <- x$outcome_formula
+    latent_gps <- x$model$latent_gps
   } else {
     stop("Must be a bjlm_compiled_model or bjlm_fit object.")
   }
+  if (is.null(latent_gps)) latent_gps <- list()
 
   flowchart <- "graph TD\n"
   flowchart <- paste0(flowchart, "    classDef prop fill:#e8f5e9,stroke:#2e7d32,stroke-width:1px;\n")
   flowchart <- paste0(flowchart, "    classDef out fill:#e3f2fd,stroke:#1565c0,stroke-width:1px;\n")
-  flowchart <- paste0(flowchart, "    classDef align fill:#fff3e0,stroke:#ef6c00,stroke-width:2px;\n")
+  flowchart <- paste0(flowchart, "    classDef gp fill:#f3e5f5,stroke:#7b1fa2,stroke-width:1px;\n")
   flowchart <- paste0(flowchart, "    classDef collision fill:#ffebee,stroke:#c62828,stroke-width:1px;\n\n")
 
   flowchart <- paste0(flowchart, "    subgraph \"Propensity Block (Subject-level)\"\n")
@@ -862,6 +865,24 @@ view_flowchart <- function(x, ...) {
   flowchart <- paste0(flowchart, "        OF[\"Formula: ", deparse(out_fml), "\"]:::out\n")
   flowchart <- paste0(flowchart, "        OD --> OF\n")
   flowchart <- paste0(flowchart, "    end\n\n")
+
+  # Latent GP blocks
+  for (i in seq_along(latent_gps)) {
+    gp <- latent_gps[[i]]
+    gp_id   <- paste0("GP", i)
+    gp_d_id <- paste0("GP", i, "D")
+    n_gp_obs <- nrow(gp$data)
+    kernel_label <- toupper(gp$kernel %||% "SE")
+    flowchart <- paste0(flowchart, "    subgraph \"Latent GP: ", gp$name, "\"\n")
+    flowchart <- paste0(flowchart, "        ", gp_d_id, "[\"", gp$obs_var, " data<br/>",
+                        n_gp_obs, " observations\"]:::gp\n")
+    flowchart <- paste0(flowchart, "        ", gp_id, "[\"", gp$name,
+                        " ~ GP(", kernel_label, " kernel)\"]:::gp\n")
+    flowchart <- paste0(flowchart, "        ", gp_d_id, " --> ", gp_id, "\n")
+    flowchart <- paste0(flowchart, "    end\n\n")
+    flowchart <- paste0(flowchart, "    ", gp_id, " -->|\"Query at ", gp$time_trt_var, "\"| PF\n")
+    flowchart <- paste0(flowchart, "    ", gp_id, " -->|\"Query at ", gp$time_out_var, "\"| OF\n\n")
+  }
 
   if (!is.null(subject_var)) {
     flowchart <- paste0(flowchart, "    %% Alignment & Merging\n")
