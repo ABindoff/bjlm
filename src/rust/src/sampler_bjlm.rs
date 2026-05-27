@@ -4,10 +4,10 @@ use rand::SeedableRng;
 use rand::Rng;
 use rand_distr::{Normal, Gamma, Distribution};
 
-use crate::model::{ModelData, Priors, State, log_truncated_normal_prior, sigmoid};
+use crate::model::{ModelData, Priors, State, SpikeSlabConfig, log_truncated_normal_prior, sigmoid};
 use crate::propensity::{PropensityState, PropensityPriors, PropensityData, sample_propensity};
 use crate::weights::{WeightType, compute_weights, expand_weights_to_obs};
-use crate::sampler::init_state;
+use crate::sampler::{init_state, sample_pi};
 
 // ---------------------------------------------------------------------------
 // Dual-averaging step-size adapter for Metropolis-Hastings
@@ -2017,6 +2017,237 @@ pub fn run_chain_bjlm(
             for (col, &val) in ll.iter().enumerate() {
                 log_lik[(row, col)] = val;
             }
+        }
+    }
+
+    let n_div = adapt_om.iter().map(|h| h.n_divergent).sum::<usize>()
+        + adapt_rho.iter().map(|h| h.n_divergent).sum::<usize>();
+    (draws, log_lik, n_div)
+}
+
+// ---------------------------------------------------------------------------
+// Weighted spike-and-slab gamma sampler (bjlm version)
+// Like sample_gamma from sampler.rs but uses IPW-weighted residuals
+// ---------------------------------------------------------------------------
+
+fn sample_gamma_weighted(
+    data: &ModelData,
+    ss: &SpikeSlabConfig,
+    state: &mut State,
+    weights: &[f64],
+    rng: &mut StdRng,
+) {
+    let mu_full = state.means_full(data);
+    let sigma2 = state.sigma * state.sigma;
+    let pi = state.pi;
+
+    let mut update_gamma_w = |mu_without: &DVector<f64>, x_col: &DVector<f64>, beta: f64, g: &mut bool| {
+        let mu1 = mu_without + x_col * beta;
+        let r0 = &data.y - mu_without;
+        let r1 = &data.y - &mu1;
+        let wssr0: f64 = r0.iter().zip(weights.iter()).map(|(r, w)| w * r * r).sum();
+        let wssr1: f64 = r1.iter().zip(weights.iter()).map(|(r, w)| w * r * r).sum();
+        let log_p1 = -0.5 * wssr1 / sigma2 + pi.ln();
+        let log_p0 = -0.5 * wssr0 / sigma2 + (1.0 - pi).ln();
+        let max_lp = f64::max(log_p1, log_p0);
+        let p1 = (log_p1 - max_lp).exp();
+        let p0 = (log_p0 - max_lp).exp();
+        *g = rng.gen_bool((p1 / (p1 + p0)).clamp(f64::EPSILON, 1.0 - f64::EPSILON));
+    };
+
+    let mut current_mu = mu_full;
+
+    for j in 0..state.gamma_b1.len() {
+        if j >= ss.b1_spike_mask.len() || !ss.b1_spike_mask[j] { continue; }
+
+        let x_col = &data.x_b1.column(j);
+        let mut x_eff = x_col.clone_owned();
+        if data.n_breakpoints > 0 {
+            let om1 = state.omega_vec(0, &data.x_om[0]);
+            for i in 0..data.n { x_eff[i] *= data.tau[i] - om1[i]; }
+        } else {
+            for i in 0..data.n { x_eff[i] *= data.tau[i]; }
+        }
+
+        let beta_j = state.beta_b1[j];
+        if state.gamma_b1[j] {
+            let mu_without = &current_mu - &x_eff * beta_j;
+            update_gamma_w(&mu_without, &x_eff, beta_j, &mut state.gamma_b1[j]);
+            if !state.gamma_b1[j] { current_mu = mu_without; }
+        } else {
+            update_gamma_w(&current_mu, &x_eff, beta_j, &mut state.gamma_b1[j]);
+            if state.gamma_b1[j] { current_mu = &current_mu + &x_eff * beta_j; }
+        }
+    }
+
+    for k in 0..data.n_breakpoints {
+        if k >= ss.delta_spike_mask.len() { continue; }
+        let om = state.omega_vec(k, &data.x_om[k]);
+        let rho = state.rho_vec(k, &data.x_rho[k]);
+        for j in 0..state.gamma_deltas[k].len() {
+            if j >= ss.delta_spike_mask[k].len() || !ss.delta_spike_mask[k][j] { continue; }
+
+            let x_col = &data.x_deltas[k].column(j);
+            let mut x_eff = x_col.clone_owned();
+            for i in 0..data.n {
+                let di = data.tau[i] - om[i];
+                let si = sigmoid(di * rho[i]);
+                x_eff[i] *= di * si;
+            }
+
+            let beta_kj = state.beta_deltas[k][j];
+            if state.gamma_deltas[k][j] {
+                let mu_without = &current_mu - &x_eff * beta_kj;
+                update_gamma_w(&mu_without, &x_eff, beta_kj, &mut state.gamma_deltas[k][j]);
+                if !state.gamma_deltas[k][j] { current_mu = mu_without; }
+            } else {
+                update_gamma_w(&current_mu, &x_eff, beta_kj, &mut state.gamma_deltas[k][j]);
+                if state.gamma_deltas[k][j] { current_mu = &current_mu + &x_eff * beta_kj; }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BJLM chain runner with spike-and-slab for breakpoint selection
+// ---------------------------------------------------------------------------
+
+pub fn run_chain_bjlm_ss(
+    outcome_data: &ModelData,
+    outcome_priors: &Priors,
+    prop_data: &PropensityData,
+    prop_priors: &PropensityPriors,
+    config: &BjlmConfig,
+    ss: &SpikeSlabConfig,
+    n_iter: usize,
+    n_warmup: usize,
+    step_om_init: f64,
+    step_rho_init: f64,
+    target_accept: f64,
+    seed: u64,
+    verbose: bool,
+    chain_id: usize,
+    n_chains: usize,
+    progress_fn: &dyn Fn(usize, usize, usize, usize, bool),
+) -> (DMatrix<f64>, DMatrix<f64>, usize) {
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    let mut outcome_state = init_state(outcome_data, outcome_priors, &mut rng);
+    outcome_state.pi = ss.pi_init;
+
+    let mut prop_state = PropensityState::new(prop_data.p_prop, prop_data.n_subjects, &mut rng);
+
+    let mut gp_hyper_adapts: Vec<GpHyperAdapt> = outcome_data.latent_gps.iter()
+        .map(|_| GpHyperAdapt::new(0.1))
+        .collect();
+
+    let learn_pi = ss.beta_a > 0.0;
+    let n_post = n_iter - n_warmup;
+    let n_outcome_params = outcome_state.n_params(true, learn_pi, false, outcome_data.outcome_family.clone());
+    let n_prop_params = prop_data.p_prop;
+    let n_total_params = n_outcome_params + n_prop_params + 1;
+    let mut draws = DMatrix::<f64>::zeros(n_post, n_total_params);
+    let n_obs = outcome_data.n;
+    let mut log_lik = DMatrix::<f64>::zeros(n_post, n_obs);
+
+    let mut adapt_om: Vec<HmcAdapt> = (0..outcome_data.n_breakpoints)
+        .map(|k| HmcAdapt::new(outcome_data.x_om[k].ncols(), step_om_init, target_accept, 5, 15))
+        .collect();
+    let mut adapt_rho: Vec<HmcAdapt> = (0..outcome_data.n_breakpoints)
+        .map(|k| HmcAdapt::new(outcome_data.x_rho[k].ncols(), step_rho_init, target_accept, 5, 15))
+        .collect();
+
+    let report_every = (n_iter / 10).max(1);
+
+    for iter in 0..n_iter {
+        if verbose && iter % report_every == 0 {
+            progress_fn(chain_id, n_chains, iter, n_iter, iter < n_warmup);
+        }
+
+        // === PROPENSITY BLOCK (cut-feedback) ===
+        sample_propensity(prop_data, prop_priors, &mut prop_state, outcome_data, &outcome_state, &mut rng);
+
+        // === COMPUTE WEIGHTS ===
+        let weights_subj = compute_weights(
+            &prop_data.treatment, &prop_state.pi,
+            config.weight_type, config.max_weight,
+        );
+
+        let weights_obs = if outcome_data.group_prop.is_empty() || outcome_data.group_prop[0] == usize::MAX {
+            weights_subj.clone()
+        } else {
+            let group_prop_i32: Vec<i32> = outcome_data.group_prop.iter().map(|&x| x as i32).collect();
+            expand_weights_to_obs(&weights_subj, &group_prop_i32, outcome_data.n)
+        };
+
+        // === GP BLOCK ===
+        sample_gp_state(outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng);
+        sample_gp_hyperparameters(outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng, &mut gp_hyper_adapts, iter < n_warmup);
+
+        // === OUTCOME BLOCK (weighted) ===
+        sample_linear_coefs_weighted(outcome_data, outcome_priors, &mut outcome_state, &weights_obs, &mut rng);
+
+        if outcome_data.n_groups_b0 > 0 {
+            sample_random_effects_weighted(outcome_data, outcome_priors, &mut outcome_state, &weights_obs, &mut rng);
+        }
+
+        let cache = LinearCache::build(&outcome_state, outcome_data);
+        for k in 0..outcome_data.n_breakpoints {
+            hmc_step_om_weighted(outcome_data, outcome_priors, &mut outcome_state, k, &cache, &weights_obs, &mut adapt_om[k], &mut rng);
+            hmc_step_rho_weighted(outcome_data, outcome_priors, &mut outcome_state, k, &cache, &weights_obs, &mut adapt_rho[k], &mut rng);
+        }
+
+        // === SPIKE-AND-SLAB BLOCK ===
+        sample_gamma_weighted(outcome_data, ss, &mut outcome_state, &weights_obs, &mut rng);
+
+        // Second pass of linear coefs after gamma update
+        sample_linear_coefs_weighted(outcome_data, outcome_priors, &mut outcome_state, &weights_obs, &mut rng);
+
+        if learn_pi { sample_pi(ss, &mut outcome_state, &mut rng); }
+
+        if matches!(outcome_data.outcome_family, crate::model::OutcomeFamily::Gaussian) {
+            sample_sigma_weighted(outcome_data, outcome_priors, &mut outcome_state, &weights_obs, &mut rng);
+        }
+        if outcome_data.n_groups_b0 > 0 {
+            sample_sigma_u_weighted(outcome_priors, &mut outcome_state, &mut rng);
+        }
+        if matches!(outcome_data.outcome_family, crate::model::OutcomeFamily::NegativeBinomial) {
+            sample_r_weighted(outcome_data, outcome_priors, &mut outcome_state, &weights_obs, iter < n_warmup, &mut rng);
+        }
+
+        // === HMC adaptation ===
+        if iter < n_warmup {
+            for k in 0..outcome_data.n_breakpoints {
+                adapt_om[k].observe(&outcome_state.beta_om[k]);
+                adapt_rho[k].observe(&outcome_state.beta_rho[k]);
+                if (iter + 1) % 500 == 0 {
+                    adapt_om[k].refresh_mass_matrix();
+                    adapt_rho[k].refresh_mass_matrix();
+                }
+            }
+            if (iter + 1) % 500 == 0 {
+                for gp_adapt in gp_hyper_adapts.iter_mut() { gp_adapt.refresh_mass_matrix(); }
+            }
+        } else if iter == n_warmup {
+            for k in 0..outcome_data.n_breakpoints {
+                adapt_om[k].freeze();
+                adapt_rho[k].freeze();
+            }
+            for gp_adapt in gp_hyper_adapts.iter_mut() { gp_adapt.freeze(); }
+        }
+
+        // === Store draws ===
+        if iter >= n_warmup {
+            let row = iter - n_warmup;
+            let outcome_draw = outcome_state.to_vec(true, learn_pi, false, outcome_data.outcome_family.clone());
+            for (col, &val) in outcome_draw.iter().enumerate() { draws[(row, col)] = val; }
+            let offset = n_outcome_params;
+            for j in 0..n_prop_params { draws[(row, offset + j)] = prop_state.alpha[j]; }
+            let mean_w: f64 = weights_subj.iter().sum::<f64>() / weights_subj.len() as f64;
+            draws[(row, offset + n_prop_params)] = mean_w;
+
+            let ll = compute_pointwise_log_lik(outcome_data, &outcome_state);
+            for (col, &val) in ll.iter().enumerate() { log_lik[(row, col)] = val; }
         }
     }
 

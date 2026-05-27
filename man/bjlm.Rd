@@ -21,6 +21,7 @@ bjlm(
   outcome_family = "gaussian",
   propensity_family = "binomial",
   propensity_prior_sd = 2.5,
+  spike = NULL,
   chains = 4L,
   iter = 5000L,
   warmup = NULL,

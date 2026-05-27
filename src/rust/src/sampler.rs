@@ -197,7 +197,7 @@ fn sample_sigma_u(priors: &Priors, state: &mut State, rng: &mut StdRng) {
     state.sigma_u = 1.0 / gamma_dist.sample(rng).sqrt();
 }
 
-fn sample_pi(ss: &SpikeSlabConfig, state: &mut State, rng: &mut StdRng) {
+pub fn sample_pi(ss: &SpikeSlabConfig, state: &mut State, rng: &mut StdRng) {
     let mut n1 = 0.0;
     let mut n0 = 0.0;
     for &g in &state.gamma_b1 { if g { n1 += 1.0; } else { n0 += 1.0; } }

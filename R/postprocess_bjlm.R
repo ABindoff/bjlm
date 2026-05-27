@@ -381,5 +381,52 @@ weight_diagnostics <- function(fit) {
   ))
 }
 
+#' Extract Posterior Inclusion Probabilities from a spike-and-slab bjlm fit
+#'
+#' @param x A `bjlm_fit` object fitted with `spike = prior_spike_slab(...)`.
+#' @param ... Unused.
+#'
+#' @return A data frame of class `smoothbp_pip` with columns `parameter`,
+#'   `pip`, `lower`, and `upper` (95\% credible interval on the inclusion
+#'   probability, derived from a Beta posterior).
+#' @export
+pip <- function(x, ...) UseMethod("pip")
 
+#' @export
+pip.bjlm_fit <- function(x, ...) {
+  if (is.null(x$spike)) {
+    stop("`pip()` requires a model fitted with `spike = prior_spike_slab(...)`. ",
+         "This fit has no spike-and-slab prior.")
+  }
+
+  gamma_cols <- grep("^gamma_", x$outcome_names, value = TRUE)
+  if (length(gamma_cols) == 0L) {
+    stop("No gamma columns found in draws. ",
+         "Ensure the model was fitted with `spike = prior_spike_slab(...)`.")
+  }
+
+  draws_mat <- as.matrix(posterior::subset_draws(x$draws, variable = gamma_cols))
+
+  pip_vals <- colMeans(draws_mat)
+  n_draws  <- nrow(draws_mat)
+
+  # Beta posterior CI: Beta(1 + n1, 1 + n0)
+  n1 <- round(pip_vals * n_draws)
+  n0 <- n_draws - n1
+  lower <- qbeta(0.025, n1 + 1, n0 + 1)
+  upper <- qbeta(0.975, n1 + 1, n0 + 1)
+
+  # Strip "gamma_" prefix for display
+  param_names <- sub("^gamma_", "", gamma_cols)
+
+  result <- data.frame(
+    parameter = param_names,
+    pip       = pip_vals,
+    lower     = lower,
+    upper     = upper,
+    stringsAsFactors = FALSE
+  )
+  rownames(result) <- NULL
+  structure(result, class = c("smoothbp_pip", "data.frame"))
+}
 

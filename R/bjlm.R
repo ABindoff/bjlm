@@ -78,6 +78,7 @@ bjlm <- function(
     outcome_family = "gaussian",
     propensity_family = "binomial",
     propensity_prior_sd = 2.5,
+    spike = NULL,
     chains = 4L,
     iter = 5000L,
     warmup = NULL,
@@ -222,6 +223,38 @@ bjlm <- function(
   }
   outcome_names <- c(outcome_names, gp_hyper_names)
 
+  # ---- Spike-and-slab masks and names ----
+  use_spike <- !is.null(spike) && inherits(spike, "smoothbp_spike_slab")
+  if (use_spike) {
+    # Build masks: 1 = eligible for spike-and-slab, 0 = always included
+    # GP columns should NOT be in the spike mask (they are modelled separately)
+    gp_b1_cols <- if (length(latent_gps) > 0) {
+      vapply(latent_gps, function(g) g$name, character(1))
+    } else character(0)
+    b1_spike_mask <- as.integer(!colnames(x_b1) %in% gp_b1_cols)
+    delta_spike_mask <- lapply(x_deltas_list, function(dm) rep(1L, ncol(dm)))
+
+    # Override slab prior sd for spike-eligible b1 and delta parameters
+    slab_sd <- spike$slab$sd
+    for (j in seq_len(p_b1)) {
+      if (b1_spike_mask[j] == 1L) pv$b1$sd[j] <- slab_sd
+    }
+    for (k in seq_len(n_bp)) {
+      for (j in seq_len(ncol(x_deltas_list[[k]]))) {
+        if (delta_spike_mask[[k]][j] == 1L) pv$deltas[[k]]$sd[j] <- slab_sd
+      }
+    }
+
+    # Gamma parameter names appended after standard outcome names
+    gamma_b1_names <- if (p_b1 > 0) paste0("gamma_b1_", colnames(x_b1)) else character(0)
+    gamma_delta_names <- if (n_bp > 0) {
+      unlist(lapply(seq_len(n_bp), function(k)
+        paste0("gamma_delta", k, "_", colnames(x_deltas_list[[k]]))))
+    } else character(0)
+    pi_name <- if (spike$learn_pi) "pi_ss" else character(0)
+    outcome_names <- c(outcome_names, gamma_b1_names, gamma_delta_names, pi_name)
+  }
+
   # ---- Process Latent GPs ----
   gp_list <- list()
   if (length(latent_gps) > 0) {
@@ -270,6 +303,71 @@ bjlm <- function(
   }
 
   # ---- Call Rust sampler ----
+  if (use_spike) {
+    raw <- run_bjlm_ss(
+      y = y,
+      tau = tau,
+      x_b0 = as.double(x_b0), p_b0 = as.integer(p_b0),
+      x_b1 = as.double(x_b1), p_b1 = as.integer(p_b1),
+      x_deltas = if (n_bp > 0) lapply(x_deltas_list, as.double) else list(-1),
+      p_deltas = as.integer(p_deltas),
+      x_om = if (n_bp > 0) lapply(x_om_list, as.double) else list(-1),
+      p_om = as.integer(p_om),
+      x_rho = if (n_bp > 0) lapply(x_rho_list, as.double) else list(-1),
+      p_rho = as.integer(p_rho),
+      group_b0 = if (!is.null(re_info$re_group) && n_groups > 0) group_indices else -1L,
+      n_groups_b0 = if (!is.null(re_info$re_group)) as.integer(n_groups) else 0L,
+      group_prop = if (n_groups > 0) group_indices else -1L,
+      prior_mean_b0 = pv$b0$mean,
+      prior_sd_b0 = pv$b0$sd,
+      prior_lb_b0 = pv$b0$lb,
+      prior_ub_b0 = pv$b0$ub,
+      prior_mean_b1 = pv$b1$mean,
+      prior_sd_b1 = pv$b1$sd,
+      prior_lb_b1 = pv$b1$lb,
+      prior_ub_b1 = pv$b1$ub,
+      prior_mean_deltas = if (n_bp > 0) lapply(pv$deltas, `[[`, "mean") else list(-1),
+      prior_sd_deltas = if (n_bp > 0) lapply(pv$deltas, `[[`, "sd") else list(-1),
+      prior_lb_deltas = if (n_bp > 0) lapply(pv$deltas, `[[`, "lb") else list(-1),
+      prior_ub_deltas = if (n_bp > 0) lapply(pv$deltas, `[[`, "ub") else list(-1),
+      prior_mean_om = if (n_bp > 0) lapply(pv$om, `[[`, "mean") else list(-1),
+      prior_sd_om = if (n_bp > 0) lapply(pv$om, `[[`, "sd") else list(-1),
+      prior_lb_om = if (n_bp > 0) lapply(pv$om, `[[`, "lb") else list(-1),
+      prior_ub_om = if (n_bp > 0) lapply(pv$om, `[[`, "ub") else list(-1),
+      prior_mean_rho = if (n_bp > 0) lapply(pv$rho, `[[`, "mean") else list(-1),
+      prior_sd_rho = if (n_bp > 0) lapply(pv$rho, `[[`, "sd") else list(-1),
+      prior_lb_rho = if (n_bp > 0) lapply(pv$rho, `[[`, "lb") else list(-1),
+      prior_ub_rho = if (n_bp > 0) lapply(pv$rho, `[[`, "ub") else list(-1),
+      sigma_shape = outcome_priors$sigma$shape,
+      sigma_scale = outcome_priors$sigma$scale,
+      sigma_u_shape = outcome_priors$sigma_u$shape,
+      sigma_u_scale = outcome_priors$sigma_u$scale,
+      prior_r_shape = outcome_priors$r$shape,
+      prior_r_rate = 1.0 / outcome_priors$r$scale,
+      x_prop = as.double(x_prop), p_prop = as.integer(p_prop),
+      latent_gps = gp_list,
+      treatment = as.double(treatment),
+      n_subjects = as.integer(n_subjects),
+      prop_prior_sd = propensity_prior_sd,
+      weight_type = as.integer(weight_type_int),
+      max_weight = max_weight,
+      b1_spike_mask = as.integer(b1_spike_mask),
+      delta_spike_mask = if (n_bp > 0) lapply(delta_spike_mask, as.integer) else list(-1L),
+      pi_init = spike$pi,
+      pi_beta_a = if (spike$learn_pi) spike$a else 0,
+      pi_beta_b = if (spike$learn_pi) spike$b else 0,
+      step_om = step_om,
+      step_rho = step_rho,
+      target_accept = target_accept,
+      chains = as.integer(chains),
+      iter = as.integer(iter),
+      warmup = as.integer(warmup),
+      seed = as.integer(seed),
+      verbose = verbose,
+      n_cores = as.integer(cores),
+      outcome_family = outcome_family
+    )
+  } else {
   raw <- run_bjlm(
     y = y,
     tau = tau,
@@ -328,6 +426,7 @@ bjlm <- function(
     n_cores = as.integer(cores),
     outcome_family = outcome_family
   )
+  } # end else (non-spike path)
 
   # ---- Post-process draws ----
   n_outcome <- length(outcome_names)
@@ -396,7 +495,8 @@ bjlm <- function(
       b1_formula = b1,
       deltas = deltas,
       omega = omega,
-      rho = rho
+      rho = rho,
+      spike = spike
     ),
     class = "bjlm_fit"
   )
