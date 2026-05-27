@@ -793,6 +793,36 @@ print.bjlm_flowchart <- function(x, ...) {
   invisible(x)
 }
 
+#' Render a flowchart in the RStudio Viewer pane
+#'
+#' Passes the Mermaid diagram produced by [flowchart()] to the RStudio Viewer.
+#' Uses `DiagrammeR` if available, otherwise falls back to `htmltools`.
+#'
+#' @param x A `bjlm_compiled_model`, `bjlm_fit`, or `bjlm_flowchart` object.
+#' @param ... Unused.
+#'
+#' @return `x`, invisibly.
+#' @export
+view_flowchart <- function(x, ...) {
+  fc <- if (inherits(x, "bjlm_flowchart")) x else flowchart(x)
+  mermaid_src <- as.character(fc)
+
+  if (requireNamespace("DiagrammeR", quietly = TRUE)) {
+    print(DiagrammeR::mermaid(mermaid_src))
+  } else if (requireNamespace("htmltools", quietly = TRUE)) {
+    html <- htmltools::browsable(htmltools::HTML(paste0(
+      '<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>',
+      '<div class="mermaid">', mermaid_src, '</div>',
+      '<script>mermaid.initialize({startOnLoad:true})</script>'
+    )))
+    print(html)
+  } else {
+    stop("Install 'DiagrammeR' or 'htmltools' to view flowcharts in the Viewer pane.")
+  }
+
+  invisible(x)
+}
+
 .build_flowchart <- function(x) {
   # Standardise attributes based on object class
   if (inherits(x, "bjlm_compiled_model")) {
