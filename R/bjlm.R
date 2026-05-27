@@ -123,7 +123,7 @@ bjlm <- function(
   }
   
   if (!is.null(group_var)) {
-    group_factor <- as.factor(data[[group_var]])
+    group_factor <- droplevels(as.factor(data[[group_var]]))
     group_indices <- as.integer(group_factor) - 1L
     n_groups <- nlevels(group_factor)
 
