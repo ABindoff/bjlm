@@ -1002,24 +1002,61 @@ fn sample_sigma_u_weighted(priors: &Priors, state: &mut State, rng: &mut StdRng)
 // a_u), then rebuild u = sigma_u * eta. Interweaving this ancillary update with
 // the centred draws (u | sigma_u, then sigma_u | u) flattens the (u, sigma_u)
 // funnel neck: the centred sweep mixes well when the data are informative, the
-// ancillary sweep when sigma_u is near zero. Gaussian family only for now
-// (Binomial/NB would use the PG pseudo-residual, matching sample_random_effects).
+// ancillary sweep when sigma_u is near zero. All families: Gaussian directly,
+// Binomial/NB via the Polya-Gamma pseudo-residual (matching sample_random_effects).
 fn sample_re_ancillary_weighted(
     data: &ModelData, state: &mut State, weights: &[f64], adapting: bool, rng: &mut StdRng,
 ) {
-    if !matches!(data.outcome_family, crate::model::OutcomeFamily::Gaussian) { return; }
     let sigma_u = state.sigma_u;
     if !(sigma_u > 0.0) { return; }
     let n_groups = state.u_b0.len();
-
     let eta: Vec<f64> = (0..n_groups).map(|j| state.u_b0[j] / sigma_u).collect();
 
-    // mu_fixed = fitted mean with the random effects removed.
+    // mu_fixed = fitted mean with the random effects removed. For Gaussian this is
+    // the response mean; for Binomial/NB it is the link-scale linear predictor.
     let mut st0 = state.clone();
     st0.u_b0.fill(0.0);
     let mu_fixed = st0.means_full(data);
-    let sigma2 = state.sigma * state.sigma;
     let a_u = state.a_u;
+
+    // Reduce every family to a weighted-Gaussian pseudo-model for the random
+    // effects: presid_i = pseudo_response_i - mu_fixed_i ~ N(u_{g(i)}, 1/pweight_i).
+    //   Gaussian     : presid = y - mu,                      pweight = w/sigma^2
+    //   Binomial (PG): presid = kappa/omega - mu,            pweight = w*omega
+    //   NegBin  (PG) : presid = kappa/omega + ln r - mu,     pweight = w*omega
+    // with a fresh Polya-Gamma omega drawn at the current link value.
+    use crate::model::OutcomeFamily;
+    let mut presid = vec![0.0_f64; data.n];
+    let mut pweight = vec![0.0_f64; data.n];
+    match data.outcome_family {
+        OutcomeFamily::Gaussian => {
+            let inv_s2 = 1.0 / (state.sigma * state.sigma);
+            for i in 0..data.n {
+                presid[i] = data.y[i] - mu_fixed[i];
+                pweight[i] = weights[i] * inv_s2;
+            }
+        }
+        OutcomeFamily::Binomial => {
+            for i in 0..data.n {
+                let g = if data.group_b0.is_empty() { -1 } else { data.group_b0[i] };
+                let eta_i = mu_fixed[i] + if g >= 0 { state.u_b0[g as usize] } else { 0.0 };
+                let omega = crate::polya_gamma::sample_pg(1.0, eta_i, rng);
+                presid[i] = (data.y[i] - 0.5) / omega - mu_fixed[i];
+                pweight[i] = weights[i] * omega;
+            }
+        }
+        OutcomeFamily::NegativeBinomial => {
+            let r = state.r;
+            let log_r = r.ln();
+            for i in 0..data.n {
+                let g = if data.group_b0.is_empty() { -1 } else { data.group_b0[i] };
+                let psi_i = mu_fixed[i] + if g >= 0 { state.u_b0[g as usize] } else { 0.0 };
+                let omega = crate::polya_gamma::sample_pg(data.y[i] + r, psi_i - log_r, rng);
+                presid[i] = (data.y[i] - r) / (2.0 * omega) + log_r - mu_fixed[i];
+                pweight[i] = weights[i] * omega;
+            }
+        }
+    }
 
     let logdens = |su: f64| -> f64 {
         if !(su > 0.0) { return f64::NEG_INFINITY; }
@@ -1027,8 +1064,8 @@ fn sample_re_ancillary_weighted(
         for i in 0..data.n {
             let g = if data.group_b0.is_empty() { -1 } else { data.group_b0[i] };
             if g >= 0 {
-                let d = (data.y[i] - mu_fixed[i]) - su * eta[g as usize];
-                ll += -0.5 * weights[i] * d * d / sigma2;
+                let d = presid[i] - su * eta[g as usize];
+                ll += -0.5 * pweight[i] * d * d;
             }
         }
         // half-Cauchy(0,A) via aux: log p(sigma_u | a_u) = -2 ln(su) - 1/(a_u su^2)
