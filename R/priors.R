@@ -124,7 +124,7 @@ print.smoothbp_prior <- function(x, ...) {
 #' @param sigma   `prior_invgamma()` for residual SD.
 #' @param sigma_u `prior_halfcauchy()` for the random-effect SD. Half-Cauchy
 #'   avoids the spurious near-zero floor an inverse-gamma variance prior imposes.
-#' @param sigma_re_om `prior_invgamma()` for random-effect SD on omega.
+#' @param sigma_re_om `prior_halfcauchy()` for the random change-point SD on omega.
 #' @param r `prior_gamma()` for Negative Binomial overdispersion parameter.
 #'
 #' @return A `smoothbp_priors` list.
@@ -137,13 +137,13 @@ smoothbp_priors <- function(
     rho     = prior_normal(3, 2, lb = 0),
     sigma   = prior_invgamma(1, 1),
     sigma_u = prior_halfcauchy(1),
-    sigma_re_om = prior_invgamma(1, 1),  # TODO: half-Cauchy + ASIS, matching sigma_u
+    sigma_re_om = prior_halfcauchy(1),
     r       = prior_gamma(1, 1)
 ) {
   stopifnot(
     inherits(sigma, "smoothbp_prior") && sigma$family == "invgamma",
     inherits(sigma_u, "smoothbp_prior") && sigma_u$family == "halfcauchy",
-    inherits(sigma_re_om, "smoothbp_prior") && sigma_re_om$family == "invgamma",
+    inherits(sigma_re_om, "smoothbp_prior") && sigma_re_om$family == "halfcauchy",
     inherits(r, "smoothbp_prior") && r$family == "gamma"
   )
   structure(
@@ -323,7 +323,7 @@ bjlm_outcome_priors <- function(
     rho     = prior_normal(3, 2, lb = 0),
     sigma   = prior_invgamma(1, 1),
     sigma_u = prior_halfcauchy(1),
-    sigma_re_om = prior_invgamma(1, 1),  # TODO: half-Cauchy + ASIS, matching sigma_u
+    sigma_re_om = prior_halfcauchy(1),
     r       = prior_gamma(1, 1)
 ) {
   smoothbp_priors(

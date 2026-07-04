@@ -163,7 +163,15 @@ bjlm <- function(
 
   n_bp <- length(deltas)
   x_deltas_list <- lapply(deltas, function(f) model.matrix(f, data = data))
-  x_om_list <- lapply(omega, function(f) model.matrix(f, data = data))
+  # .build_mm parses (1 | group) into an intercept + one dummy per group level,
+  # tagging the RE columns via a `re_mask` attribute. This is what turns
+  # `omega = ~ 1 + (1 | subject)` into random change-points (HR).
+  x_om_list <- lapply(omega, function(f) .build_mm(f, data))
+  re_mask_om_list <- lapply(x_om_list, function(X) {
+    m <- attr(X, "re_mask")
+    if (is.null(m) || length(m) != ncol(X)) m <- rep(0L, ncol(X))
+    as.integer(m)
+  })
   x_rho_list <- lapply(rho, function(f) model.matrix(f, data = data))
 
   p_b0 <- ncol(x_b0)
@@ -313,6 +321,7 @@ bjlm <- function(
       p_deltas = as.integer(p_deltas),
       x_om = if (n_bp > 0) lapply(x_om_list, as.double) else list(-1),
       p_om = as.integer(p_om),
+      re_mask_om = if (n_bp > 0) re_mask_om_list else list(-1L),
       x_rho = if (n_bp > 0) lapply(x_rho_list, as.double) else list(-1),
       p_rho = as.integer(p_rho),
       group_b0 = if (!is.null(re_info$re_group) && n_groups > 0) group_indices else -1L,
@@ -377,6 +386,7 @@ bjlm <- function(
     p_deltas = as.integer(p_deltas),
     x_om = if (n_bp > 0) lapply(x_om_list, as.double) else list(-1),
     p_om = as.integer(p_om),
+    re_mask_om = if (n_bp > 0) re_mask_om_list else list(-1L),
     x_rho = if (n_bp > 0) lapply(x_rho_list, as.double) else list(-1),
     p_rho = as.integer(p_rho),
     group_b0 = if (!is.null(re_info$re_group) && n_groups > 0) group_indices else -1L,

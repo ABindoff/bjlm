@@ -589,6 +589,7 @@ fn run_bjlm(
     x_b1: &[f64], p_b1: i32,
     x_deltas: List, p_deltas: &[i32],
     x_om: List, p_om: &[i32],
+    re_mask_om: List,
     x_rho: List, p_rho: &[i32],
     group_b0: &[i32],
     n_groups_b0: i32,
@@ -701,7 +702,7 @@ fn run_bjlm(
         group_prop: group_prop.iter().map(|&x| x as usize).collect(),
         n_breakpoints: n_bp,
         n,
-        re_mask_om: Vec::new(),
+        re_mask_om: re_mask_om.iter().map(|r| r.1.as_integer_vector().unwrap().iter().map(|&v| v != 0).collect()).collect(),
         latent_gps: gps,
     };
 
@@ -822,6 +823,7 @@ fn run_bjlm_ss(
     x_b1: &[f64], p_b1: i32,
     x_deltas: List, p_deltas: &[i32],
     x_om: List, p_om: &[i32],
+    re_mask_om: List,
     x_rho: List, p_rho: &[i32],
     group_b0: &[i32],
     n_groups_b0: i32,
@@ -938,7 +940,7 @@ fn run_bjlm_ss(
         group_prop: group_prop.iter().map(|&x| x as usize).collect(),
         n_breakpoints: n_bp,
         n,
-        re_mask_om: Vec::new(),
+        re_mask_om: re_mask_om.iter().map(|r| r.1.as_integer_vector().unwrap().iter().map(|&v| v != 0).collect()).collect(),
         latent_gps: gps,
     };
 

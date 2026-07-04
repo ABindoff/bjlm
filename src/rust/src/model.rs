@@ -218,6 +218,9 @@ pub struct State {
     pub pi: f64,
     /// Learned standard deviation for omega random effects at each breakpoint
     pub sigma_re_om: Vec<f64>,
+    /// Auxiliary scales for the half-Cauchy prior on each sigma_re_om (Wand 2011),
+    /// one per breakpoint. Parallels a_u.
+    pub a_re_om: Vec<f64>,
     /// Negative binomial overdispersion parameter
     pub r: f64,
     pub step_r: f64,

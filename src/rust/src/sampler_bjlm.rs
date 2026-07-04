@@ -995,6 +995,29 @@ fn sample_sigma_u_weighted(priors: &Priors, state: &mut State, rng: &mut StdRng)
     state.a_u = 1.0 / inv_a;
 }
 
+// Half-Cauchy(0, A) prior on each sigma_re_om (change-point random-effect SD) via
+// the inverse-gamma auxiliary (Wand 2011), mirroring sample_sigma_u_weighted. The
+// omega random effects are the re_mask_om columns of beta_om.
+fn sample_sigma_re_om_weighted(data: &ModelData, priors: &Priors, state: &mut State, rng: &mut StdRng) {
+    let a_scale = priors.sigma_re_om_scale; // half-Cauchy scale A
+    for k in 0..data.n_breakpoints {
+        let mut ss = 0.0;
+        let mut count = 0.0;
+        for j in 0..state.beta_om[k].len() {
+            if data.re_mask_om[k][j] { let v = state.beta_om[k][j]; ss += v * v; count += 1.0; }
+        }
+        if count > 0.0 {
+            let shape = 0.5 + count * 0.5;
+            let scale = 1.0 / state.a_re_om[k] + 0.5 * ss;
+            let prec = Gamma::new(shape, 1.0 / scale).unwrap().sample(rng); // 1/sigma_re_om^2
+            state.sigma_re_om[k] = 1.0 / prec.sqrt();
+            let scale_a = 1.0 / (a_scale * a_scale) + prec;
+            let inv_a = Gamma::new(1.0, 1.0 / scale_a).unwrap().sample(rng);
+            state.a_re_om[k] = 1.0 / inv_a;
+        }
+    }
+}
+
 // Ancillary (non-centred) sigma_u update for the ASIS interweave (Yu-Meng 2011).
 // Given eta = u/sigma_u (held fixed), sigma_u enters the outcome likelihood
 // linearly: resid_i = sigma_u * eta_{g(i)} + error. We take one Metropolis step
@@ -1702,10 +1725,18 @@ fn hmc_step_om_weighted(
     cache: &LinearCache, weights: &[f64], adapt: &mut HmcAdapt, rng: &mut StdRng,
 ) {
     let p = adapt.p;
-    let mut all_fixed = true;
-    for j in 0..p {
-        if priors.om_sd[k][j] > 0.0 { all_fixed = false; break; }
-    }
+    // Random-effect columns (re_mask_om) take the learned sigma_re_om[k] as their
+    // prior SD (per-group change-point deviations); fixed columns keep om_sd.
+    // Held constant over the trajectory (evaluated at the current sigma_re_om).
+    let om_sd_eff: Vec<f64> = (0..p)
+        .map(|j| if data.re_mask_om[k][j] { state.sigma_re_om[k] } else { priors.om_sd[k][j] })
+        .collect();
+    // RE deviation columns are centred at 0 (the grand mean is carried by the
+    // fixed intercept column); fixed columns keep their prior mean.
+    let om_mean_eff: Vec<f64> = (0..p)
+        .map(|j| if data.re_mask_om[k][j] { 0.0 } else { priors.om_mean[k][j] })
+        .collect();
+    let all_fixed = (0..p).all(|j| !data.re_mask_om[k][j] && priors.om_sd[k][j] <= 0.0);
     if all_fixed { return; }
 
     let sigma = state.sigma;
@@ -1759,7 +1790,7 @@ fn hmc_step_om_weighted(
         }
 
         let lp = log_truncated_normal_prior(
-            q.as_slice(), &priors.om_mean[k], &priors.om_sd[k],
+            q.as_slice(), &om_mean_eff, &om_sd_eff,
             &priors.om_lb[k], &priors.om_ub[k],
         );
 
@@ -1777,7 +1808,7 @@ fn hmc_step_om_weighted(
             }
         }
         for j in 0..p {
-            grad[j] += (q[j] - priors.om_mean[k][j]) / (priors.om_sd[k][j] * priors.om_sd[k][j]);
+            grad[j] += (q[j] - om_mean_eff[j]) / (om_sd_eff[j] * om_sd_eff[j]);
         }
         (-ll - lp, grad)
     };
@@ -2051,6 +2082,10 @@ pub fn run_chain_bjlm(
                 outcome_data, outcome_priors, &mut outcome_state, k,
                 &cache, &weights_obs, &mut adapt_rho[k], &mut rng,
             );
+        }
+        // Half-Cauchy sigma_re_om for random change-points (no-op if no omega REs).
+        if outcome_data.n_breakpoints > 0 {
+            sample_sigma_re_om_weighted(outcome_data, outcome_priors, &mut outcome_state, &mut rng);
         }
 
         // Second pass of linear coefs (as in smoothbp)
@@ -2330,6 +2365,9 @@ pub fn run_chain_bjlm_ss(
         for k in 0..outcome_data.n_breakpoints {
             hmc_step_om_weighted(outcome_data, outcome_priors, &mut outcome_state, k, &cache, &weights_obs, &mut adapt_om[k], &mut rng);
             hmc_step_rho_weighted(outcome_data, outcome_priors, &mut outcome_state, k, &cache, &weights_obs, &mut adapt_rho[k], &mut rng);
+        }
+        if outcome_data.n_breakpoints > 0 {
+            sample_sigma_re_om_weighted(outcome_data, outcome_priors, &mut outcome_state, &mut rng);
         }
 
         // === SPIKE-AND-SLAB BLOCK ===
