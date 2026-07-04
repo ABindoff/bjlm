@@ -50,6 +50,28 @@ prior_invgamma <- function(shape = 1, scale = 1) {
   )
 }
 
+#' Specify a half-Cauchy prior for a scale (standard-deviation) parameter
+#'
+#' Weakly-informative prior for a hierarchical standard deviation (Gelman 2006).
+#' Unlike an inverse-gamma prior on the variance, it places mass arbitrarily close
+#' to zero, so it does not impose a spurious floor on the estimated SD. Sampled via
+#' the inverse-gamma parameter-expansion (Wand 2011), so the Gibbs updates stay
+#' conjugate.
+#'
+#' @param scale Half-Cauchy scale `A` (> 0); larger is more diffuse.
+#'
+#' @return A `smoothbp_prior` object.
+#' @export
+prior_halfcauchy <- function(scale = 1) {
+  stopifnot(scale > 0)
+  structure(
+    # `shape` is an unused placeholder for the C interface; the half-Cauchy is
+    # fully determined by `scale` (which the Rust sampler reads as A).
+    list(family = "halfcauchy", shape = 0, scale = scale),
+    class = "smoothbp_prior"
+  )
+}
+
 #' Specify a gamma prior for a parameter
 #'
 #' @param shape Shape parameter (> 0).
@@ -77,6 +99,8 @@ print.smoothbp_prior <- function(x, ...) {
     cat(sprintf("InvGamma(shape=%g, scale=%g)\n", x$shape, x$scale))
   } else if (x$family == "gamma") {
     cat(sprintf("Gamma(shape=%g, scale=%g)\n", x$shape, x$scale))
+  } else if (x$family == "halfcauchy") {
+    cat(sprintf("HalfCauchy(scale=%g)\n", x$scale))
   }
   invisible(x)
 }
@@ -98,7 +122,8 @@ print.smoothbp_prior <- function(x, ...) {
 #' @param omega   Prior(s) for `omega` coefficients (one list per segment).
 #' @param rho     Prior(s) for `rho` coefficients (one list per segment).
 #' @param sigma   `prior_invgamma()` for residual SD.
-#' @param sigma_u `prior_invgamma()` for random-effect SD.
+#' @param sigma_u `prior_halfcauchy()` for the random-effect SD. Half-Cauchy
+#'   avoids the spurious near-zero floor an inverse-gamma variance prior imposes.
 #' @param sigma_re_om `prior_invgamma()` for random-effect SD on omega.
 #' @param r `prior_gamma()` for Negative Binomial overdispersion parameter.
 #'
@@ -111,13 +136,13 @@ smoothbp_priors <- function(
     omega   = prior_normal(3, 2, lb = 0),
     rho     = prior_normal(3, 2, lb = 0),
     sigma   = prior_invgamma(1, 1),
-    sigma_u = prior_invgamma(1, 1),
-    sigma_re_om = prior_invgamma(1, 1),
+    sigma_u = prior_halfcauchy(1),
+    sigma_re_om = prior_invgamma(1, 1),  # TODO: half-Cauchy + ASIS, matching sigma_u
     r       = prior_gamma(1, 1)
 ) {
   stopifnot(
     inherits(sigma, "smoothbp_prior") && sigma$family == "invgamma",
-    inherits(sigma_u, "smoothbp_prior") && sigma_u$family == "invgamma",
+    inherits(sigma_u, "smoothbp_prior") && sigma_u$family == "halfcauchy",
     inherits(sigma_re_om, "smoothbp_prior") && sigma_re_om$family == "invgamma",
     inherits(r, "smoothbp_prior") && r$family == "gamma"
   )
@@ -297,8 +322,8 @@ bjlm_outcome_priors <- function(
     omega   = prior_normal(3, 2, lb = 0),
     rho     = prior_normal(3, 2, lb = 0),
     sigma   = prior_invgamma(1, 1),
-    sigma_u = prior_invgamma(1, 1),
-    sigma_re_om = prior_invgamma(1, 1),
+    sigma_u = prior_halfcauchy(1),
+    sigma_re_om = prior_invgamma(1, 1),  # TODO: half-Cauchy + ASIS, matching sigma_u
     r       = prior_gamma(1, 1)
 ) {
   smoothbp_priors(

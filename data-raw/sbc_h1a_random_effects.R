@@ -22,7 +22,7 @@ A_HC    <- 1.0          # half-Cauchy(0, A) scale for sigma_u (== prior scale)
 pri <- bjlm_priors(outcome = smoothbp_priors(
   b0      = prior_normal(0, 3),
   sigma   = prior_invgamma(3, 2),      # sigma^2 ~ IG(3,2): well-identified residual SD
-  sigma_u = prior_invgamma(1, A_HC)    # scale = A -> half-Cauchy(0, A) under new code
+  sigma_u = prior_halfcauchy(A_HC)     # half-Cauchy(0, A) on the random-effect SD
 ))
 
 par_names <- c("b0_(Intercept)", "sigma", "sigma_u")

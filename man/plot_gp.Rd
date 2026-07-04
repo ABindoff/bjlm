@@ -2,22 +2,30 @@
 % Please edit documentation in R/plot_methods.R
 \name{plot_gp}
 \alias{plot_gp}
-\title{Plot time-varying latent Gaussian Process (GP) deviations}
+\title{Plot posterior predictive trajectories for latent Gaussian Processes}
 \usage{
-plot_gp(fit, subjects = NULL, n_subjects = 5, ...)
+plot_gp(fit, subjects = NULL, n_subjects = 5, n_draws = 200, ...)
 }
 \arguments{
 \item{fit}{A \code{bjlm_fit} object.}
 
-\item{subjects}{Optional vector of subject IDs to plot.}
+\item{subjects}{Optional character/factor vector of subject IDs to plot.
+If \code{NULL}, \code{n_subjects} are chosen at random.}
 
-\item{n_subjects}{Number of random subjects to select if \code{subjects} is NULL.}
+\item{n_subjects}{Number of subjects to plot when \code{subjects} is \code{NULL}.}
+
+\item{n_draws}{Number of posterior draws to use for the credible band.}
 
 \item{...}{Unused.}
 }
 \value{
-A \code{ggplot} object.
+A \code{ggplot} object (single GP) or a named list of \code{ggplot} objects
+(multiple GPs).
 }
 \description{
-Plot time-varying latent Gaussian Process (GP) deviations
+For each GP in the model, reconstructs posterior predictive curves from the
+sampled hyperparameters (\code{alpha}, \code{rho}, \code{sigma_x}) using the squared
+exponential kernel conditioning formula. Raw covariate observations are
+overlaid as points, and treatment times are marked with a dashed vertical
+line when available.
 }
