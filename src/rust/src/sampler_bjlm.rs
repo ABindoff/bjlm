@@ -542,10 +542,15 @@ fn compute_ll_noncentered(
         }
     }
     
-    ll -= 0.5 * a.ln().powi(2) + a.ln();
-    ll -= 0.5 * r.ln().powi(2) + r.ln();
-    ll -= 0.5 * (s.ln() + 1.0).powi(2) + s.ln();
-    
+    // Log-normal hyperpriors, written as the log-density in log-space so a symmetric
+    // log-scale RW proposal targets them correctly WITHOUT a separate Jacobian term
+    // (the -ln(theta) that a density-in-theta form would carry is exactly the proposal
+    // Jacobian, so it is omitted here rather than added back in each accept step):
+    //   ln(alpha), ln(rho) ~ N(0, 1);  ln(sigma_x) ~ N(-1, 1).
+    ll -= 0.5 * a.ln().powi(2);
+    ll -= 0.5 * r.ln().powi(2);
+    ll -= 0.5 * (s.ln() + 1.0).powi(2);
+
     (ll, x_list)
 }
 
@@ -683,11 +688,11 @@ fn sample_gp_hyper_collapsed(
             }
             ll
         };
-        // Match the existing hyperprior convention (lognormal on alpha/rho, shifted on sigma_x).
+        // Hyperpriors as log-space log-densities (ln alpha, ln rho ~ N(0,1);
+        // ln sigma_x ~ N(-1,1)); the symmetric log-scale RW below needs no extra
+        // Jacobian, matching compute_ll_noncentered.
         let log_prior = |a: f64, r: f64, sx: f64| -> f64 {
-            -(0.5 * a.ln().powi(2) + a.ln())
-            - (0.5 * r.ln().powi(2) + r.ln())
-            - (0.5 * (sx.ln() + 1.0).powi(2) + sx.ln())
+            -0.5 * a.ln().powi(2) - 0.5 * r.ln().powi(2) - 0.5 * (sx.ln() + 1.0).powi(2)
         };
 
         let a0 = outcome_state.gp_states[gp_idx].alpha;
