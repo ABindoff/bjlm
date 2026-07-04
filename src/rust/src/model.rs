@@ -221,6 +221,9 @@ pub struct State {
     /// Auxiliary scales for the half-Cauchy prior on each sigma_re_om (Wand 2011),
     /// one per breakpoint. Parallels a_u.
     pub a_re_om: Vec<f64>,
+    /// MH step for the ancillary (non-centred) sigma_re_om update (ASIS on the
+    /// random change-point funnel), one per breakpoint.
+    pub step_sigma_re_om: Vec<f64>,
     /// Negative binomial overdispersion parameter
     pub r: f64,
     pub step_r: f64,

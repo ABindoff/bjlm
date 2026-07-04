@@ -1018,6 +1018,87 @@ fn sample_sigma_re_om_weighted(data: &ModelData, priors: &Priors, state: &mut St
     }
 }
 
+// Ancillary (non-centred) sigma_re_om update: the ASIS interweave on the random
+// change-point funnel (HR step 2 -- the fibr non-centring applied to a NONLINEAR,
+// non-conjugate fibre, which PG cannot linearise). Given eta_j = beta_om_re_j /
+// sigma_re_om (held fixed), the change-point locations move with the scale as
+// omega = fixed + sigma_re_om * eta, so the change-point likelihood is evaluated
+// at the proposed scale. One Metropolis step on log sigma_re_om per breakpoint
+// under the half-Cauchy prior, interwoven with the centred omega HMC + CP update.
+fn sample_re_om_ancillary_weighted(
+    data: &ModelData, state: &mut State, cache: &LinearCache,
+    weights: &[f64], adapting: bool, rng: &mut StdRng,
+) {
+    use crate::model::OutcomeFamily;
+    for k in 0..data.n_breakpoints {
+        let sre = state.sigma_re_om[k];
+        if !(sre > 0.0) { continue; }
+        let p = state.beta_om[k].len();
+        if !(0..p).any(|j| data.re_mask_om[k][j]) { continue; }
+
+        let eta: Vec<f64> = (0..p)
+            .map(|j| if data.re_mask_om[k][j] { state.beta_om[k][j] / sre } else { 0.0 })
+            .collect();
+        let fixed_part: Vec<f64> = (0..p)
+            .map(|j| if data.re_mask_om[k][j] { 0.0 } else { state.beta_om[k][j] })
+            .collect();
+
+        let is_om1 = k == 0 && data.n_breakpoints > 0;
+        let mu_base = cache.mu_without_segment(data, state, k);
+        let rho_k = state.rho_vec(k, &data.x_rho[k]);
+        let a_re = state.a_re_om[k];
+        let sigma2 = state.sigma * state.sigma;
+        let r_param = state.r;
+        let delta_k = &cache.delta_vals[k];
+        let b1_vals = &cache.b1_vals;
+
+        // Weighted change-point log-likelihood at sigma_re_om = s (eta held fixed).
+        let loglik = |s: f64| -> f64 {
+            let beta = DVector::from_iterator(p, (0..p).map(|j| fixed_part[j] + s * eta[j]));
+            let om_k = &data.x_om[k] * &beta;
+            let mut ll = 0.0;
+            for i in 0..data.n {
+                let mut mu_i = mu_base[i];
+                if is_om1 { mu_i += b1_vals[i] * (data.tau[i] - om_k[i]); }
+                let di = data.tau[i] - om_k[i];
+                let si = sigmoid(di * rho_k[i]);
+                mu_i += delta_k[i] * di * si;
+                match data.outcome_family {
+                    OutcomeFamily::Gaussian => {
+                        let e = data.y[i] - mu_i; ll += -0.5 * weights[i] * e * e / sigma2;
+                    }
+                    OutcomeFamily::Binomial => {
+                        ll += weights[i] * (data.y[i] * mu_i - softplus(mu_i));
+                    }
+                    OutcomeFamily::NegativeBinomial => {
+                        ll += weights[i] * (data.y[i] * mu_i - (data.y[i] + r_param) * softplus(mu_i));
+                    }
+                }
+            }
+            ll
+        };
+        // half-Cauchy(0,A) via aux: log p(sigma_re_om | a) = -2 ln s - 1/(a s^2)
+        let logpost = |s: f64| loglik(s) - 2.0 * s.ln() - 1.0 / (a_re * s * s);
+
+        let normal = Normal::new(0.0, state.step_sigma_re_om[k]).unwrap();
+        let log_s = sre.ln();
+        let prop_log = log_s + normal.sample(rng);
+        let prop_s = prop_log.exp();
+        let log_accept = logpost(prop_s) - logpost(sre) + (prop_log - log_s);
+        let ap = if log_accept.is_nan() { 0.0 } else { log_accept.exp().min(1.0) };
+        if rng.gen::<f64>() < ap {
+            state.sigma_re_om[k] = prop_s;
+            for j in 0..p {
+                if data.re_mask_om[k][j] { state.beta_om[k][j] = prop_s * eta[j]; }
+            }
+        }
+        if adapting {
+            state.step_sigma_re_om[k] =
+                (state.step_sigma_re_om[k] * (1.0 + 0.1 * (ap - 0.44))).clamp(0.005, 5.0);
+        }
+    }
+}
+
 // Ancillary (non-centred) sigma_u update for the ASIS interweave (Yu-Meng 2011).
 // Given eta = u/sigma_u (held fixed), sigma_u enters the outcome likelihood
 // linearly: resid_i = sigma_u * eta_{g(i)} + error. We take one Metropolis step
@@ -2086,6 +2167,16 @@ pub fn run_chain_bjlm(
         // Half-Cauchy sigma_re_om for random change-points (no-op if no omega REs).
         if outcome_data.n_breakpoints > 0 {
             sample_sigma_re_om_weighted(outcome_data, outcome_priors, &mut outcome_state, &mut rng);
+            // ASIS ancillary on (omega, sigma_re_om): OPT-IN only. A/B testing (HR
+            // step 2) showed the non-centred rescaling HURTS when change-points are
+            // well identified (the data pin each omega_j, so a joint rescale is a bad
+            // proposal) and does not rescue the weak-data regime either. The centred
+            // sampler is the efficient default; enable BJLM_OM_ASIS=1 to reproduce.
+            if std::env::var("BJLM_OM_ASIS").is_ok() {
+                sample_re_om_ancillary_weighted(
+                    outcome_data, &mut outcome_state, &cache, &weights_obs, iter < n_warmup, &mut rng,
+                );
+            }
         }
 
         // Second pass of linear coefs (as in smoothbp)
@@ -2368,6 +2459,16 @@ pub fn run_chain_bjlm_ss(
         }
         if outcome_data.n_breakpoints > 0 {
             sample_sigma_re_om_weighted(outcome_data, outcome_priors, &mut outcome_state, &mut rng);
+            // ASIS ancillary on (omega, sigma_re_om): OPT-IN only. A/B testing (HR
+            // step 2) showed the non-centred rescaling HURTS when change-points are
+            // well identified (the data pin each omega_j, so a joint rescale is a bad
+            // proposal) and does not rescue the weak-data regime either. The centred
+            // sampler is the efficient default; enable BJLM_OM_ASIS=1 to reproduce.
+            if std::env::var("BJLM_OM_ASIS").is_ok() {
+                sample_re_om_ancillary_weighted(
+                    outcome_data, &mut outcome_state, &cache, &weights_obs, iter < n_warmup, &mut rng,
+                );
+            }
         }
 
         // === SPIKE-AND-SLAB BLOCK ===

@@ -881,6 +881,7 @@ pub fn init_state(data: &ModelData, priors: &Priors, rng: &mut StdRng) -> State 
         gamma_deltas, pi: 0.5,
         sigma_re_om: vec![1.0; data.n_breakpoints],
         a_re_om: vec![1.0; data.n_breakpoints],
+        step_sigma_re_om: vec![0.1; data.n_breakpoints],
         gp_states,
         r: 1.0,
         step_r: 0.1,
