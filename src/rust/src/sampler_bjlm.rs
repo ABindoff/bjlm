@@ -1936,7 +1936,7 @@ struct LinearCache {
 
 impl LinearCache {
     fn build(state: &State, data: &ModelData) -> Self {
-        let b0_fixed = &data.x_b0 * &state.beta_b0;
+        let mut b0_fixed = &data.x_b0 * &state.beta_b0;
         let mut re_contrib = DVector::<f64>::zeros(data.n);
         if data.n_groups_b0 > 0 {
             for i in 0..data.n {
@@ -1948,7 +1948,36 @@ impl LinearCache {
         for j in 0..b1_eff.len() {
             if !state.gamma_b1[j] { b1_eff[j] = 0.0; }
         }
-        let b1_vals = &data.x_b1 * &b1_eff;
+        let mut b1_vals = &data.x_b1 * &b1_eff;
+
+        // Fold in the latent-GP contributions so the change-point (omega/rho) HMC
+        // sees the SAME conditional mean as means_full: the GP enters b0 (additive)
+        // and, if active, b1 (time-interacted, matching b1_vals*(tau-om1) below).
+        // Without this the change-point samplers fit a GP-contaminated residual and
+        // omega drifts to a boundary chasing the GP wiggle.
+        for (gp_idx, gp) in data.latent_gps.iter().enumerate() {
+            if gp.p_b0_idx >= 0 {
+                let beta = state.beta_b0[gp.p_b0_idx as usize];
+                for s in 0..gp.subjects.len() {
+                    let subj = &gp.subjects[s];
+                    let gp_x = &state.gp_states[gp_idx].x[s];
+                    for i in 0..subj.out_indices.len() {
+                        b0_fixed[subj.out_global[i]] += beta * gp_x[subj.out_indices[i]];
+                    }
+                }
+            }
+            if gp.p_b1_idx >= 0 && state.gamma_b1[gp.p_b1_idx as usize] {
+                let beta = state.beta_b1[gp.p_b1_idx as usize];
+                for s in 0..gp.subjects.len() {
+                    let subj = &gp.subjects[s];
+                    let gp_x = &state.gp_states[gp_idx].x[s];
+                    for i in 0..subj.out_indices.len() {
+                        b1_vals[subj.out_global[i]] += beta * gp_x[subj.out_indices[i]];
+                    }
+                }
+            }
+        }
+
         let mut delta_vals = Vec::with_capacity(data.n_breakpoints);
         for k in 0..data.n_breakpoints {
             let mut bd_eff = state.beta_deltas[k].clone();
