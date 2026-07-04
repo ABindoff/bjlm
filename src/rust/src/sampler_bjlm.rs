@@ -1901,6 +1901,136 @@ fn hmc_step_om_weighted(
     adapt.update_epsilon(accept);
 }
 
+// Door-1 (fibr) exact conditional-score map for the NONLINEAR change-point
+// location, realised as a per-coordinate Laplace independence-MH. For each column
+// c of beta_om[k] we Newton-solve the 1-D conditional log-posterior of that
+// coefficient to its mode m with curvature s (the Laplace approximation of the
+// exact conditional score), propose from N(m, s^2), and accept against the TRUE
+// nonlinear conditional. RE-deviation columns take sd = sigma_re_om[k]; fixed
+// columns keep their prior. This replaces the 20-dim nonlinear omega HMC with cheap
+// per-subject Newton solves -- the door-1 test is ESS and wall-clock vs that HMC,
+// NOT funnel-rescue (HR step 2 showed there is no funnel to rescue).
+//
+// HR step 3 result (A/B, opt-in BJLM_OM_LAPLACE=1): this is EXACT (omega-RE
+// posterior means correlate 0.99 with the HMC) and ~28% cheaper per iteration
+// (49s vs 68s), but mixes ~10x worse in ESS/s. The coordinate-wise sweep crawls
+// along the omega grand-mean / RE-deviation aliasing ridge (only omega_j = intercept
+// + dev_j is identified) that the joint HMC traverses natively; a mean-shift Gibbs
+// block to move that ridge destabilised the chain. Conclusion: the joint HMC is the
+// right sampler for this nonlinear fibre; a proper door-1 win would need the JOINT
+// Laplace-whitened HMC (IFT gradient), which must beat an already-strong baseline.
+fn sample_om_laplace_weighted(
+    data: &ModelData, priors: &Priors, state: &mut State, k: usize,
+    cache: &LinearCache, weights: &[f64], rng: &mut StdRng,
+) {
+    use crate::model::OutcomeFamily;
+    let p = state.beta_om[k].len();
+    let om_sd_eff: Vec<f64> = (0..p)
+        .map(|j| if data.re_mask_om[k][j] { state.sigma_re_om[k] } else { priors.om_sd[k][j] })
+        .collect();
+    let om_mean_eff: Vec<f64> = (0..p)
+        .map(|j| if data.re_mask_om[k][j] { 0.0 } else { priors.om_mean[k][j] })
+        .collect();
+
+    let sigma2 = state.sigma * state.sigma;
+    let r_param = state.r;
+    let is_om1 = k == 0 && data.n_breakpoints > 0;
+    let mu_base = cache.mu_without_segment(data, state, k);
+    let rho_k = state.rho_vec(k, &data.x_rho[k]);
+    let delta_k = &cache.delta_vals[k];
+    let mut omega_cur = state.omega_vec(k, &data.x_om[k]);
+
+    for c in 0..p {
+        let sd_c = om_sd_eff[c];
+        if !(sd_c > 0.0) { continue; }
+        let mean_c = om_mean_eff[c];
+        let inv_prior = 1.0 / (sd_c * sd_c);
+        let x0 = state.beta_om[k][c];
+        let lb = priors.om_lb[k][c];
+        let ub = priors.om_ub[k][c];
+
+        // 1-D conditional (log value, gradient, curvature) at coefficient x, given
+        // the current omega vector. Only rows with nonzero design entry contribute.
+        let eval = |x: f64, omega: &[f64]| -> (f64, f64, f64) {
+            let mut lval = 0.0; let mut lp = 0.0; let mut lpp = 0.0;
+            for i in 0..data.n {
+                let wic = data.x_om[k][(i, c)];
+                if wic == 0.0 { continue; }
+                let om_i = omega[i] + wic * (x - x0);
+                let di = data.tau[i] - om_i;
+                let s = sigmoid(di * rho_k[i]);
+                let a = if is_om1 { cache.b1_vals[i] } else { 0.0 };
+                let mu_i = mu_base[i] + a * di + delta_k[i] * di * s;
+                let s1 = s * (1.0 - s);
+                let dmu_dom = -(a + delta_k[i] * (s + di * rho_k[i] * s1));
+                let d2mu_dom2 =
+                    delta_k[i] * rho_k[i] * s1 * (2.0 + di * rho_k[i] * (1.0 - 2.0 * s));
+                let (ll_i, g_i, h_i) = match data.outcome_family {
+                    OutcomeFamily::Gaussian => {
+                        let ri = data.y[i] - mu_i;
+                        (-0.5 * weights[i] * ri * ri / sigma2,
+                         weights[i] * ri / sigma2,
+                         -weights[i] / sigma2)
+                    }
+                    OutcomeFamily::Binomial => {
+                        let ex = sigmoid(mu_i);
+                        (weights[i] * (data.y[i] * mu_i - softplus(mu_i)),
+                         weights[i] * (data.y[i] - ex),
+                         -weights[i] * ex * (1.0 - ex))
+                    }
+                    OutcomeFamily::NegativeBinomial => {
+                        let ex = sigmoid(mu_i);
+                        (weights[i] * (data.y[i] * mu_i - (data.y[i] + r_param) * softplus(mu_i)),
+                         weights[i] * (data.y[i] - (data.y[i] + r_param) * ex),
+                         -weights[i] * (data.y[i] + r_param) * ex * (1.0 - ex))
+                    }
+                };
+                lval += ll_i;
+                lp += g_i * dmu_dom * wic;
+                lpp += (h_i * dmu_dom * dmu_dom + g_i * d2mu_dom2) * wic * wic;
+            }
+            lval += -0.5 * (x - mean_c) * (x - mean_c) * inv_prior;
+            lp += -(x - mean_c) * inv_prior;
+            lpp += -inv_prior;
+            (lval, lp, lpp)
+        };
+
+        // Newton to the conditional mode.
+        let mut m = x0;
+        for _ in 0..8 {
+            let (_, lp, lpp) = eval(m, omega_cur.as_slice());
+            if !(lpp < -1e-12) { break; }
+            let mut step = -lp / lpp;
+            let cap = 6.0 * sd_c;
+            if step > cap { step = cap; } else if step < -cap { step = -cap; }
+            m += step;
+            if m < lb { m = lb; } else if m > ub { m = ub; }
+            if step.abs() < 1e-9 { break; }
+        }
+        let (_, _, lpp_m) = eval(m, omega_cur.as_slice());
+        let prec = if lpp_m < -1e-10 { -lpp_m } else { inv_prior };
+        let s_c = (1.0 / prec).sqrt();
+        if !s_c.is_finite() || s_c <= 0.0 { continue; }
+
+        // Laplace independence-MH: propose N(m, s_c^2), accept vs the true conditional.
+        let z: f64 = Normal::new(0.0, 1.0).unwrap().sample(rng);
+        let xstar = m + s_c * z;
+        if xstar < lb || xstar > ub { continue; }
+        let (l0, _, _) = eval(x0, omega_cur.as_slice());
+        let (l1, _, _) = eval(xstar, omega_cur.as_slice());
+        let lq0 = -0.5 * ((x0 - m) / s_c).powi(2);
+        let lq1 = -0.5 * ((xstar - m) / s_c).powi(2);
+        let log_alpha = (l1 - l0) + (lq0 - lq1);
+        if log_alpha.is_finite() && rng.gen::<f64>().ln() < log_alpha {
+            for i in 0..data.n {
+                let wic = data.x_om[k][(i, c)];
+                if wic != 0.0 { omega_cur[i] += wic * (xstar - x0); }
+            }
+            state.beta_om[k][c] = xstar;
+        }
+    }
+}
+
 fn hmc_step_rho_weighted(
     data: &ModelData, priors: &Priors, state: &mut State, k: usize,
     cache: &LinearCache, weights: &[f64], adapt: &mut HmcAdapt, rng: &mut StdRng,
@@ -2155,10 +2285,17 @@ pub fn run_chain_bjlm(
 
         let cache = LinearCache::build(&outcome_state, outcome_data);
         for k in 0..outcome_data.n_breakpoints {
-            hmc_step_om_weighted(
-                outcome_data, outcome_priors, &mut outcome_state, k,
-                &cache, &weights_obs, &mut adapt_om[k], &mut rng,
-            );
+            if std::env::var("BJLM_OM_LAPLACE").is_ok() {
+                sample_om_laplace_weighted(
+                    outcome_data, outcome_priors, &mut outcome_state, k,
+                    &cache, &weights_obs, &mut rng,
+                );
+            } else {
+                hmc_step_om_weighted(
+                    outcome_data, outcome_priors, &mut outcome_state, k,
+                    &cache, &weights_obs, &mut adapt_om[k], &mut rng,
+                );
+            }
             hmc_step_rho_weighted(
                 outcome_data, outcome_priors, &mut outcome_state, k,
                 &cache, &weights_obs, &mut adapt_rho[k], &mut rng,
@@ -2454,7 +2591,11 @@ pub fn run_chain_bjlm_ss(
 
         let cache = LinearCache::build(&outcome_state, outcome_data);
         for k in 0..outcome_data.n_breakpoints {
-            hmc_step_om_weighted(outcome_data, outcome_priors, &mut outcome_state, k, &cache, &weights_obs, &mut adapt_om[k], &mut rng);
+            if std::env::var("BJLM_OM_LAPLACE").is_ok() {
+                sample_om_laplace_weighted(outcome_data, outcome_priors, &mut outcome_state, k, &cache, &weights_obs, &mut rng);
+            } else {
+                hmc_step_om_weighted(outcome_data, outcome_priors, &mut outcome_state, k, &cache, &weights_obs, &mut adapt_om[k], &mut rng);
+            }
             hmc_step_rho_weighted(outcome_data, outcome_priors, &mut outcome_state, k, &cache, &weights_obs, &mut adapt_rho[k], &mut rng);
         }
         if outcome_data.n_breakpoints > 0 {
