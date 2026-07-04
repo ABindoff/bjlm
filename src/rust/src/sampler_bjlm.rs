@@ -2102,34 +2102,62 @@ pub fn run_chain_bjlm(
 
 fn sample_gamma_weighted(
     data: &ModelData,
+    priors: &Priors,
     ss: &SpikeSlabConfig,
     state: &mut State,
     weights: &[f64],
     rng: &mut StdRng,
 ) {
+    // Rao-Blackwellised (collapsed) spike-and-slab. For each selectable
+    // coefficient we integrate the coefficient out under its N(mu, tau^2) slab
+    // and draw gamma from the MARGINAL Bayes factor, then redraw the coefficient
+    // conditional on gamma. This decouples gamma mixing from the coefficient's
+    // current value, curing the sticky-indicator pathology of Kuo-Mallick (which
+    // is worse here because the delta design (tau-omega)*sigmoid(rho(tau-omega))
+    // moves every iteration). Gaussian family, IPW-weighted. means() masks
+    // gamma==0 coefficients, so the coefficient value when off is an inert
+    // nuisance; the collapsed update sets it to 0.
     let mu_full = state.means_full(data);
     let sigma2 = state.sigma * state.sigma;
-    let pi = state.pi;
+    let pi = state.pi.clamp(1e-12, 1.0 - 1e-12);
+    let logit_pi = (pi / (1.0 - pi)).ln();
+    let znorm = Normal::new(0.0, 1.0).unwrap();
 
-    let mut update_gamma_w = |mu_without: &DVector<f64>, x_col: &DVector<f64>, beta: f64, g: &mut bool| {
-        let mu1 = mu_without + x_col * beta;
-        let r0 = &data.y - mu_without;
-        let r1 = &data.y - &mu1;
-        let wssr0: f64 = r0.iter().zip(weights.iter()).map(|(r, w)| w * r * r).sum();
-        let wssr1: f64 = r1.iter().zip(weights.iter()).map(|(r, w)| w * r * r).sum();
-        let log_p1 = -0.5 * wssr1 / sigma2 + pi.ln();
-        let log_p0 = -0.5 * wssr0 / sigma2 + (1.0 - pi).ln();
-        let max_lp = f64::max(log_p1, log_p0);
-        let p1 = (log_p1 - max_lp).exp();
-        let p0 = (log_p0 - max_lp).exp();
-        *g = rng.gen_bool((p1 / (p1 + p0)).clamp(f64::EPSILON, 1.0 - f64::EPSILON));
+    // Collapsed (gamma, beta) draw for one coefficient. Marginal likelihood ratio
+    // for including design column x_eff against residual r = y - mu_without,
+    // with slab N(mu_prior, tau^2):
+    //   V = x'Wx/sigma^2 + 1/tau^2,  m = (x'W(r - x*mu_prior)/sigma^2)/V
+    //   log BF = -0.5*ln(tau^2 * V) + 0.5*m^2*V
+    let collapsed = |mu_without: &DVector<f64>, x_eff: &DVector<f64>,
+                     tau: f64, mu_prior: f64, rng: &mut StdRng| -> (bool, f64) {
+        let tau2 = tau * tau;
+        let mut xtx = 0.0_f64;
+        let mut xtr = 0.0_f64;
+        for i in 0..data.n {
+            let w = weights[i];
+            let x = x_eff[i];
+            let r = data.y[i] - mu_without[i] - x * mu_prior;
+            xtx += w * x * x;
+            xtr += w * x * r;
+        }
+        let v = xtx / sigma2 + 1.0 / tau2;
+        let m = (xtr / sigma2) / v;
+        let log_bf = -0.5 * (tau2 * v).ln() + 0.5 * m * m * v;
+        let p1 = 1.0 / (1.0 + (-(log_bf + logit_pi)).exp());
+        if rng.gen::<f64>() < p1 {
+            (true, mu_prior + m + znorm.sample(rng) / v.sqrt())
+        } else {
+            (false, 0.0)
+        }
     };
 
     let mut current_mu = mu_full;
 
+    // b1 indicators
     for j in 0..state.gamma_b1.len() {
         if j >= ss.b1_spike_mask.len() || !ss.b1_spike_mask[j] { continue; }
-
+        let tau = priors.b1_sd[j];
+        if !(tau > 0.0) { continue; }                       // fixed coefficient
         let x_col = &data.x_b1.column(j);
         let mut x_eff = x_col.clone_owned();
         if data.n_breakpoints > 0 {
@@ -2138,25 +2166,26 @@ fn sample_gamma_weighted(
         } else {
             for i in 0..data.n { x_eff[i] *= data.tau[i]; }
         }
-
-        let beta_j = state.beta_b1[j];
-        if state.gamma_b1[j] {
-            let mu_without = &current_mu - &x_eff * beta_j;
-            update_gamma_w(&mu_without, &x_eff, beta_j, &mut state.gamma_b1[j]);
-            if !state.gamma_b1[j] { current_mu = mu_without; }
+        let mu_without = if state.gamma_b1[j] {
+            &current_mu - &x_eff * state.beta_b1[j]
         } else {
-            update_gamma_w(&current_mu, &x_eff, beta_j, &mut state.gamma_b1[j]);
-            if state.gamma_b1[j] { current_mu = &current_mu + &x_eff * beta_j; }
-        }
+            current_mu.clone()
+        };
+        let (g, beta) = collapsed(&mu_without, &x_eff, tau, priors.b1_mean[j], rng);
+        state.gamma_b1[j] = g;
+        state.beta_b1[j] = beta;
+        current_mu = if g { &mu_without + &x_eff * beta } else { mu_without };
     }
 
+    // delta indicators
     for k in 0..data.n_breakpoints {
         if k >= ss.delta_spike_mask.len() { continue; }
         let om = state.omega_vec(k, &data.x_om[k]);
         let rho = state.rho_vec(k, &data.x_rho[k]);
         for j in 0..state.gamma_deltas[k].len() {
             if j >= ss.delta_spike_mask[k].len() || !ss.delta_spike_mask[k][j] { continue; }
-
+            let tau = priors.delta_sd[k][j];
+            if !(tau > 0.0) { continue; }
             let x_col = &data.x_deltas[k].column(j);
             let mut x_eff = x_col.clone_owned();
             for i in 0..data.n {
@@ -2164,16 +2193,15 @@ fn sample_gamma_weighted(
                 let si = sigmoid(di * rho[i]);
                 x_eff[i] *= di * si;
             }
-
-            let beta_kj = state.beta_deltas[k][j];
-            if state.gamma_deltas[k][j] {
-                let mu_without = &current_mu - &x_eff * beta_kj;
-                update_gamma_w(&mu_without, &x_eff, beta_kj, &mut state.gamma_deltas[k][j]);
-                if !state.gamma_deltas[k][j] { current_mu = mu_without; }
+            let mu_without = if state.gamma_deltas[k][j] {
+                &current_mu - &x_eff * state.beta_deltas[k][j]
             } else {
-                update_gamma_w(&current_mu, &x_eff, beta_kj, &mut state.gamma_deltas[k][j]);
-                if state.gamma_deltas[k][j] { current_mu = &current_mu + &x_eff * beta_kj; }
-            }
+                current_mu.clone()
+            };
+            let (g, beta) = collapsed(&mu_without, &x_eff, tau, priors.delta_mean[k][j], rng);
+            state.gamma_deltas[k][j] = g;
+            state.beta_deltas[k][j] = beta;
+            current_mu = if g { &mu_without + &x_eff * beta } else { mu_without };
         }
     }
 }
@@ -2268,7 +2296,7 @@ pub fn run_chain_bjlm_ss(
         }
 
         // === SPIKE-AND-SLAB BLOCK ===
-        sample_gamma_weighted(outcome_data, ss, &mut outcome_state, &weights_obs, &mut rng);
+        sample_gamma_weighted(outcome_data, outcome_priors, ss, &mut outcome_state, &weights_obs, &mut rng);
 
         // Second pass of linear coefs after gamma update
         sample_linear_coefs_weighted(outcome_data, outcome_priors, &mut outcome_state, &weights_obs, &mut rng);
