@@ -189,12 +189,20 @@ fn sample_sigma(data: &ModelData, priors: &Priors, state: &mut State, rng: &mut 
 }
 
 fn sample_sigma_u(priors: &Priors, state: &mut State, rng: &mut StdRng) {
+    // Half-Cauchy(0, A) prior on sigma_u via the inverse-gamma auxiliary
+    // representation (Wand 2011). A = priors.sigma_u_scale (sigma_u_shape unused).
+    //   sigma_u^2 | u, a ~ IG(1/2 + J/2, 1/a + ss/2)
+    //   a         | sigma_u^2 ~ IG(1, 1/A^2 + 1/sigma_u^2)
     let ss = state.u_b0.dot(&state.u_b0);
     let n = state.u_b0.len() as f64;
-    let shape = priors.sigma_u_shape + n * 0.5;
-    let scale = priors.sigma_u_scale + ss * 0.5;
-    let gamma_dist = Gamma::new(shape, 1.0 / scale).unwrap();
-    state.sigma_u = 1.0 / gamma_dist.sample(rng).sqrt();
+    let a_scale = priors.sigma_u_scale;
+    let shape = 0.5 + n * 0.5;
+    let scale = 1.0 / state.a_u + 0.5 * ss;
+    let prec = Gamma::new(shape, 1.0 / scale).unwrap().sample(rng); // 1/sigma_u^2
+    state.sigma_u = 1.0 / prec.sqrt();
+    let scale_a = 1.0 / (a_scale * a_scale) + prec;
+    let inv_a = Gamma::new(1.0, 1.0 / scale_a).unwrap().sample(rng); // 1/a
+    state.a_u = 1.0 / inv_a;
 }
 
 // ---------------------------------------------------------------------------
@@ -868,7 +876,7 @@ pub fn init_state(data: &ModelData, priors: &Priors, rng: &mut StdRng) -> State 
 
     State {
         beta_b0, u_b0, beta_b1, beta_deltas, beta_om, beta_rho,
-        sigma: 1.0, sigma_u: 1.0,
+        sigma: 1.0, sigma_u: 1.0, a_u: 1.0, step_sigma_u: 0.1,
         gamma_b1: vec![true; data.x_b1.ncols()],
         gamma_deltas, pi: 0.5,
         sigma_re_om: vec![1.0; data.n_breakpoints],

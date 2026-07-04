@@ -203,6 +203,13 @@ pub struct State {
     pub beta_rho: Vec<DVector<f64>>,
     pub sigma: f64,
     pub sigma_u: f64,
+    /// Auxiliary scale for the half-Cauchy(0, A) prior on sigma_u via the
+    /// inverse-gamma parameter-expansion (Wand 2011). Kept in State because its
+    /// full conditional is sampled jointly with sigma_u.
+    pub a_u: f64,
+    /// Metropolis step size for the ancillary (non-centred) sigma_u update in the
+    /// ASIS interweave. Adapted during warmup.
+    pub step_sigma_u: f64,
     /// Inclusion indicators for b1
     pub gamma_b1: Vec<bool>,
     /// Inclusion indicators for each breakpoint's deltas

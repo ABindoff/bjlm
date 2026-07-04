@@ -978,13 +978,78 @@ fn sample_sigma_weighted(
 }
 
 fn sample_sigma_u_weighted(priors: &Priors, state: &mut State, rng: &mut StdRng) {
-    // sigma_u doesn't depend on observation weights (it's a group-level prior)
+    // sigma_u doesn't depend on observation weights (it's a group-level prior).
+    // Half-Cauchy(0, A) prior via the inverse-gamma auxiliary representation
+    // (Wand 2011). A = priors.sigma_u_scale (sigma_u_shape unused).
+    //   sigma_u^2 | u, a ~ IG(1/2 + J/2, 1/a + ss/2)
+    //   a         | sigma_u^2 ~ IG(1, 1/A^2 + 1/sigma_u^2)
     let ss = state.u_b0.dot(&state.u_b0);
     let n = state.u_b0.len() as f64;
-    let shape = priors.sigma_u_shape + n * 0.5;
-    let scale = priors.sigma_u_scale + ss * 0.5;
-    let gamma_dist = Gamma::new(shape, 1.0 / scale).unwrap();
-    state.sigma_u = 1.0 / gamma_dist.sample(rng).sqrt();
+    let a_scale = priors.sigma_u_scale;
+    let shape = 0.5 + n * 0.5;
+    let scale = 1.0 / state.a_u + 0.5 * ss;
+    let prec = Gamma::new(shape, 1.0 / scale).unwrap().sample(rng); // 1/sigma_u^2
+    state.sigma_u = 1.0 / prec.sqrt();
+    let scale_a = 1.0 / (a_scale * a_scale) + prec;
+    let inv_a = Gamma::new(1.0, 1.0 / scale_a).unwrap().sample(rng); // 1/a
+    state.a_u = 1.0 / inv_a;
+}
+
+// Ancillary (non-centred) sigma_u update for the ASIS interweave (Yu-Meng 2011).
+// Given eta = u/sigma_u (held fixed), sigma_u enters the outcome likelihood
+// linearly: resid_i = sigma_u * eta_{g(i)} + error. We take one Metropolis step
+// on log sigma_u under the half-Cauchy(0,A) prior (conditioning on the auxiliary
+// a_u), then rebuild u = sigma_u * eta. Interweaving this ancillary update with
+// the centred draws (u | sigma_u, then sigma_u | u) flattens the (u, sigma_u)
+// funnel neck: the centred sweep mixes well when the data are informative, the
+// ancillary sweep when sigma_u is near zero. Gaussian family only for now
+// (Binomial/NB would use the PG pseudo-residual, matching sample_random_effects).
+fn sample_re_ancillary_weighted(
+    data: &ModelData, state: &mut State, weights: &[f64], adapting: bool, rng: &mut StdRng,
+) {
+    if !matches!(data.outcome_family, crate::model::OutcomeFamily::Gaussian) { return; }
+    let sigma_u = state.sigma_u;
+    if !(sigma_u > 0.0) { return; }
+    let n_groups = state.u_b0.len();
+
+    let eta: Vec<f64> = (0..n_groups).map(|j| state.u_b0[j] / sigma_u).collect();
+
+    // mu_fixed = fitted mean with the random effects removed.
+    let mut st0 = state.clone();
+    st0.u_b0.fill(0.0);
+    let mu_fixed = st0.means_full(data);
+    let sigma2 = state.sigma * state.sigma;
+    let a_u = state.a_u;
+
+    let logdens = |su: f64| -> f64 {
+        if !(su > 0.0) { return f64::NEG_INFINITY; }
+        let mut ll = 0.0;
+        for i in 0..data.n {
+            let g = if data.group_b0.is_empty() { -1 } else { data.group_b0[i] };
+            if g >= 0 {
+                let d = (data.y[i] - mu_fixed[i]) - su * eta[g as usize];
+                ll += -0.5 * weights[i] * d * d / sigma2;
+            }
+        }
+        // half-Cauchy(0,A) via aux: log p(sigma_u | a_u) = -2 ln(su) - 1/(a_u su^2)
+        ll + (-2.0 * su.ln() - 1.0 / (a_u * su * su))
+    };
+
+    let normal = Normal::new(0.0, state.step_sigma_u).unwrap();
+    let log_su = sigma_u.ln();
+    let prop_log = log_su + normal.sample(rng);
+    let prop_su = prop_log.exp();
+    // Symmetric proposal on log sigma_u; +(prop_log - log_su) is the log Jacobian.
+    let log_accept = logdens(prop_su) - logdens(sigma_u) + (prop_log - log_su);
+    let accept_prob = if log_accept.is_nan() { 0.0 } else { log_accept.exp().min(1.0) };
+    if rng.gen::<f64>() < accept_prob {
+        state.sigma_u = prop_su;
+        for j in 0..n_groups { state.u_b0[j] = prop_su * eta[j]; }
+    }
+    if adapting {
+        state.step_sigma_u =
+            (state.step_sigma_u * (1.0 + 0.1 * (accept_prob - 0.44))).clamp(0.005, 5.0);
+    }
 }
 
 fn ln_gamma(mut z: f64) -> f64 {
@@ -1962,6 +2027,10 @@ pub fn run_chain_bjlm(
         }
         if outcome_data.n_groups_b0 > 0 {
             sample_sigma_u_weighted(outcome_priors, &mut outcome_state, &mut rng);
+            // Ancillary half of the ASIS interweave for the (u, sigma_u) funnel.
+            sample_re_ancillary_weighted(
+                outcome_data, &mut outcome_state, &weights_obs, iter < n_warmup, &mut rng,
+            );
         }
         if matches!(outcome_data.outcome_family, crate::model::OutcomeFamily::NegativeBinomial) {
             sample_r_weighted(
@@ -2211,6 +2280,10 @@ pub fn run_chain_bjlm_ss(
         }
         if outcome_data.n_groups_b0 > 0 {
             sample_sigma_u_weighted(outcome_priors, &mut outcome_state, &mut rng);
+            // Ancillary half of the ASIS interweave for the (u, sigma_u) funnel.
+            sample_re_ancillary_weighted(
+                outcome_data, &mut outcome_state, &weights_obs, iter < n_warmup, &mut rng,
+            );
         }
         if matches!(outcome_data.outcome_family, crate::model::OutcomeFamily::NegativeBinomial) {
             sample_r_weighted(outcome_data, outcome_priors, &mut outcome_state, &weights_obs, iter < n_warmup, &mut rng);

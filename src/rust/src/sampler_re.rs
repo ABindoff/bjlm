@@ -907,7 +907,7 @@ pub fn init_state_re(data: &ModelData, priors: &Priors, rng: &mut StdRng) -> Sta
 
     State {
         beta_b0, u_b0, beta_b1, beta_deltas, beta_om, beta_rho,
-        sigma: 1.0, sigma_u: 1.0,
+        sigma: 1.0, sigma_u: 1.0, a_u: 1.0, step_sigma_u: 0.1,
         gamma_b1: vec![true; data.x_b1.ncols()],
         gamma_deltas, pi: 0.5,
         sigma_re_om: vec![1.0; data.n_breakpoints],
