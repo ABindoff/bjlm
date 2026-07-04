@@ -125,7 +125,7 @@ my_priors <- bjlm_priors(
     omega = list(prior_normal(5.0, 1e-6)),
     rho = list(prior_normal(2.0, 1e-6)),
     r = prior_gamma(1, 1),
-    sigma_u = prior_invgamma(1, 1)
+    sigma_u = prior_halfcauchy(1)
   )
 )
 

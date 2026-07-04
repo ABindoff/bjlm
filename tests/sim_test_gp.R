@@ -80,7 +80,7 @@ fit <- bjlm_model() |>
         omega = prior_normal(5, 3, lb = 0, ub = 10),
         rho = prior_normal(3, 3, lb = 0.1, ub = 20),
         sigma = prior_invgamma(1, 1),
-        sigma_u = prior_invgamma(1, 1)
+        sigma_u = prior_halfcauchy(1)
       ),
       propensity = prior_normal(0, 2.5)
     ),

@@ -140,12 +140,24 @@ smoothbp_priors <- function(
     sigma_re_om = prior_halfcauchy(1),
     r       = prior_gamma(1, 1)
 ) {
-  stopifnot(
-    inherits(sigma, "smoothbp_prior") && sigma$family == "invgamma",
-    inherits(sigma_u, "smoothbp_prior") && sigma_u$family == "halfcauchy",
-    inherits(sigma_re_om, "smoothbp_prior") && sigma_re_om$family == "halfcauchy",
-    inherits(r, "smoothbp_prior") && r$family == "gamma"
-  )
+  if (!inherits(sigma, "smoothbp_prior") || sigma$family != "invgamma")
+    stop("`sigma` (residual SD) must be prior_invgamma().")
+  if (!inherits(r, "smoothbp_prior") || r$family != "gamma")
+    stop("`r` (NB overdispersion) must be prior_gamma().")
+  # Random-effect SDs use a half-Cauchy(0, scale) prior via the inverse-gamma
+  # auxiliary sampler (Wand 2011); the sampler does not read an inverse-gamma
+  # here, so we reject it rather than silently ignore it. Half-Cauchy also avoids
+  # the spurious near-zero floor an IG variance prior imposes on a hierarchical SD.
+  for (nm in c("sigma_u", "sigma_re_om")) {
+    p <- get(nm)
+    if (!inherits(p, "smoothbp_prior") || p$family != "halfcauchy")
+      stop(sprintf(
+        "`%s` must be prior_halfcauchy(scale=): random-effect SDs use a half-Cauchy prior. %s",
+        nm,
+        if (inherits(p, "smoothbp_prior") && p$family == "invgamma")
+          "Inverse-gamma is no longer supported for RE SDs (it imposes a near-zero variance floor)."
+        else ""))
+  }
   structure(
     list(b0 = b0, b1 = b1, deltas = deltas, omega = omega, rho = rho,
          sigma = sigma, sigma_u = sigma_u, sigma_re_om = sigma_re_om, r = r),
