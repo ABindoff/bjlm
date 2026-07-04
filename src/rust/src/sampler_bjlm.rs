@@ -549,6 +549,198 @@ fn compute_ll_noncentered(
     (ll, x_list)
 }
 
+// Collapsed (Rao-Blackwellised) GP hyperparameter update -- the fibr treatment for
+// the latent-GP hyperparameter funnel. The latent field f is a GAUSSIAN fibre
+// (f ~ N(0, K(alpha,rho))) observed only through Gaussian likelihoods here:
+// X_obs = f + N(0, sigma_x^2) at every time, and the Gaussian outcome
+// y = mu_noGP + eff_beta*f + N(0, sigma_y^2/w). Plain whitening (f = L z, z fixed)
+// still mixes badly because these likelihoods pin f, so moving (alpha,rho) drags
+// f = L z against them (Murray-Adams informative-likelihood regime). The exact fix
+// is to MARGINALISE f (door-1 map taken to marginalisation): the hyperparameters see
+// the clean f-integrated marginal N(v; 0, A K A^T + P^{-1}) with NO funnel, then f is
+// redrawn from its exact Gaussian conditional f | theta, data. Eligible only when the
+// outcome is Gaussian and the GP does not enter the (logistic) propensity.
+// The collapsed GP hyperparameter update is exact (and a large mixing win) when the
+// latent field's whole likelihood is Gaussian: Gaussian outcome AND no GP feeds the
+// (logistic) propensity. Used by default in that case; BJLM_GP_NO_COLLAPSE=1 forces
+// the whitened-conditional path (for reproducibility / A-B comparison).
+fn gp_collapsible(outcome_data: &ModelData) -> bool {
+    std::env::var("BJLM_GP_NO_COLLAPSE").is_err()
+        && outcome_data.outcome_family == crate::model::OutcomeFamily::Gaussian
+        && !outcome_data.latent_gps.is_empty()
+        && outcome_data.latent_gps.iter().all(|gp| gp.p_prop_idx < 0)
+}
+
+fn sample_gp_hyper_collapsed(
+    outcome_data: &ModelData,
+    _prop_data: &PropensityData,
+    outcome_state: &mut State,
+    _prop_state: &PropensityState,
+    weights_obs: &[f64],
+    adapts: &mut [GpHyperAdapt],
+    adapting: bool,
+    rng: &mut StdRng,
+) {
+    use crate::model::OutcomeFamily;
+    if outcome_data.outcome_family != OutcomeFamily::Gaussian { return; }
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    let n = outcome_data.n;
+    let inv_sig2_y = 1.0 / (outcome_state.sigma * outcome_state.sigma);
+    let ln_2pi = (2.0 * std::f64::consts::PI).ln();
+
+    // mu_full = outcome mean including ALL GP contributions.
+    let mu_base = outcome_state.means(outcome_data);
+    let mut mu_full = mu_base.clone();
+    for (g_idx, gp) in outcome_data.latent_gps.iter().enumerate() {
+        if gp.p_b0_idx >= 0 {
+            let beta = outcome_state.beta_b0[gp.p_b0_idx as usize];
+            for s in 0..gp.subjects.len() {
+                let subj = &gp.subjects[s];
+                let gp_x = &outcome_state.gp_states[g_idx].x[s];
+                for i in 0..subj.out_indices.len() {
+                    mu_full[subj.out_global[i]] += beta * gp_x[subj.out_indices[i]];
+                }
+            }
+        }
+        if gp.p_b1_idx >= 0 && outcome_state.gamma_b1[gp.p_b1_idx as usize] {
+            let beta = outcome_state.beta_b1[gp.p_b1_idx as usize];
+            let center = if outcome_data.n_breakpoints > 0 {
+                outcome_state.omega_vec(0, &outcome_data.x_om[0])
+            } else { DVector::zeros(n) };
+            for s in 0..gp.subjects.len() {
+                let subj = &gp.subjects[s];
+                let gp_x = &outcome_state.gp_states[g_idx].x[s];
+                for i in 0..subj.out_indices.len() {
+                    let gidx = subj.out_global[i];
+                    let t_val = if outcome_data.n_breakpoints > 0 { outcome_data.tau[gidx] - center[gidx] } else { outcome_data.tau[gidx] };
+                    mu_full[gidx] += beta * t_val * gp_x[subj.out_indices[i]];
+                }
+            }
+        }
+    }
+
+    // Gaussian pseudo-observation of f: value v, coefficient c (f enters as c*f[tidx]),
+    // precision p (fixed part, or -1.0 to mark an X_obs row whose precision is 1/sigma_x^2).
+    struct PObs { tidx: usize, c: f64, v: f64, p_fixed: f64, is_xobs: bool }
+
+    for (gp_idx, gp) in outcome_data.latent_gps.iter().enumerate() {
+        if gp.p_prop_idx >= 0 { continue; } // GP feeds logistic propensity -> not collapsible here
+
+        let beta_b0 = if gp.p_b0_idx >= 0 { outcome_state.beta_b0[gp.p_b0_idx as usize] } else { 0.0 };
+        let beta_b1 = if gp.p_b1_idx >= 0 && outcome_state.gamma_b1[gp.p_b1_idx as usize] {
+            outcome_state.beta_b1[gp.p_b1_idx as usize]
+        } else { 0.0 };
+        let center = if outcome_data.n_breakpoints > 0 {
+            Some(outcome_state.omega_vec(0, &outcome_data.x_om[0]))
+        } else { None };
+
+        // Assemble per-subject pseudo-observations (independent of theta).
+        let mut subj_obs: Vec<Vec<PObs>> = Vec::with_capacity(gp.subjects.len());
+        for s in 0..gp.subjects.len() {
+            let subj = &gp.subjects[s];
+            let cur_x = &outcome_state.gp_states[gp_idx].x[s];
+            let mut obs = Vec::new();
+            for i in 0..subj.obs_indices.len() {
+                obs.push(PObs { tidx: subj.obs_indices[i], c: 1.0, v: gp.obs_val[subj.obs_global[i]], p_fixed: 0.0, is_xobs: true });
+            }
+            for i in 0..subj.out_indices.len() {
+                let tidx = subj.out_indices[i];
+                let gidx = subj.out_global[i];
+                let t_val = if let Some(c) = &center { outcome_data.tau[gidx] - c[gidx] } else { outcome_data.tau[gidx] };
+                let eff_beta = beta_b0 + beta_b1 * t_val;
+                let mu_no = mu_full[gidx] - eff_beta * cur_x[tidx];
+                obs.push(PObs { tidx, c: eff_beta, v: outcome_data.y[gidx] - mu_no, p_fixed: weights_obs[gidx] * inv_sig2_y, is_xobs: false });
+            }
+            subj_obs.push(obs);
+        }
+
+        // Marginal log-likelihood of the pseudo-data with f integrated out:
+        //   v ~ N(0, A K A^T + P^{-1}),  summed over subjects.
+        let marg_ll = |a: f64, r: f64, sx: f64| -> f64 {
+            let inv_sx2 = 1.0 / (sx * sx);
+            let mut ll = 0.0;
+            for s in 0..gp.subjects.len() {
+                let subj = &gp.subjects[s];
+                let nt = subj.times.len();
+                let obs = &subj_obs[s];
+                let m = obs.len();
+                if nt == 0 || m == 0 { continue; }
+                let k = crate::gp::compute_cov_matrix(&subj.times, a, r, 1e-6);
+                let mut sigma = DMatrix::<f64>::zeros(m, m);
+                let mut vv = DVector::<f64>::zeros(m);
+                for j in 0..m {
+                    vv[j] = obs[j].v;
+                    for l in 0..m {
+                        sigma[(j, l)] = obs[j].c * obs[l].c * k[(obs[j].tidx, obs[l].tidx)];
+                    }
+                    let pj = if obs[j].is_xobs { inv_sx2 } else { obs[j].p_fixed };
+                    sigma[(j, j)] += 1.0 / pj;
+                }
+                let chol = match sigma.cholesky() { Some(c) => c, None => return f64::NEG_INFINITY };
+                let logdet = 2.0 * chol.l().diagonal().iter().map(|d| d.ln()).sum::<f64>();
+                let quad = vv.dot(&chol.solve(&vv));
+                ll += -0.5 * (quad + logdet + (m as f64) * ln_2pi);
+            }
+            ll
+        };
+        // Match the existing hyperprior convention (lognormal on alpha/rho, shifted on sigma_x).
+        let log_prior = |a: f64, r: f64, sx: f64| -> f64 {
+            -(0.5 * a.ln().powi(2) + a.ln())
+            - (0.5 * r.ln().powi(2) + r.ln())
+            - (0.5 * (sx.ln() + 1.0).powi(2) + sx.ln())
+        };
+
+        let a0 = outcome_state.gp_states[gp_idx].alpha;
+        let r0 = outcome_state.gp_states[gp_idx].rho;
+        let s0 = outcome_state.gp_states[gp_idx].sigma_x;
+        let cur_target = marg_ll(a0, r0, s0) + log_prior(a0, r0, s0);
+
+        let adapt = &mut adapts[gp_idx];
+        let eps = adapt.joint_da.epsilon;
+        let ap = (a0.ln() + eps * adapt.inv_mass[0].sqrt() * normal.sample(rng)).exp();
+        let rp = (r0.ln() + eps * adapt.inv_mass[1].sqrt() * normal.sample(rng)).exp();
+        let sp = (s0.ln() + eps * adapt.inv_mass[2].sqrt() * normal.sample(rng)).exp();
+        let (mut alpha, mut rho, mut sx) = (a0, r0, s0);
+        let mut accept_prob = 0.0;
+        if ap.is_finite() && rp.is_finite() && sp.is_finite() && ap > 0.0 && rp > 0.0 && sp > 0.0 {
+            let new_target = marg_ll(ap, rp, sp) + log_prior(ap, rp, sp);
+            let lr = new_target - cur_target;
+            accept_prob = if lr.is_nan() { 0.0 } else { lr.exp().min(1.0) };
+            if rng.gen::<f64>() < accept_prob { alpha = ap; rho = rp; sx = sp; }
+        }
+        if adapting { adapt.joint_da.update(accept_prob); }
+
+        outcome_state.gp_states[gp_idx].alpha = alpha;
+        outcome_state.gp_states[gp_idx].rho = rho;
+        outcome_state.gp_states[gp_idx].sigma_x = sx;
+
+        // Exact f | theta, data redraw (Gaussian conditional): precision Lambda = K^{-1} + A^T P A.
+        let inv_sx2 = 1.0 / (sx * sx);
+        for s in 0..gp.subjects.len() {
+            let subj = &gp.subjects[s];
+            let nt = subj.times.len();
+            if nt == 0 { continue; }
+            let obs = &subj_obs[s];
+            let k = crate::gp::compute_cov_matrix(&subj.times, alpha, rho, 1e-6);
+            let kinv = match k.try_inverse() { Some(ki) => ki, None => continue };
+            let mut lambda = kinv;
+            let mut h = DVector::<f64>::zeros(nt);
+            for o in obs {
+                let pj = if o.is_xobs { inv_sx2 } else { o.p_fixed };
+                lambda[(o.tidx, o.tidx)] += pj * o.c * o.c;
+                h[o.tidx] += pj * o.c * o.v;
+            }
+            let lchol = match lambda.cholesky() { Some(c) => c, None => continue };
+            let mean = lchol.solve(&h);
+            let mut xi = DVector::<f64>::zeros(nt);
+            for t in 0..nt { xi[t] = normal.sample(rng); }
+            let draw = lchol.l().transpose().solve_upper_triangular(&xi).unwrap_or_else(|| DVector::zeros(nt));
+            let f_new = &mean + draw;
+            outcome_state.gp_states[gp_idx].x[s] = f_new.iter().cloned().collect();
+        }
+    }
+}
+
 fn sample_gp_hyperparameters(
     outcome_data: &ModelData,
     prop_data: &PropensityData,
@@ -2268,9 +2460,16 @@ pub fn run_chain_bjlm(
         sample_gp_state(
             outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng,
         );
-        sample_gp_hyperparameters(
-            outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng, &mut gp_hyper_adapts, iter < n_warmup,
-        );
+        if gp_collapsible(outcome_data) {
+            // fibr collapsed hyperparameter update (marginalise the Gaussian GP fibre).
+            sample_gp_hyper_collapsed(
+                outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut gp_hyper_adapts, iter < n_warmup, &mut rng,
+            );
+        } else {
+            sample_gp_hyperparameters(
+                outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng, &mut gp_hyper_adapts, iter < n_warmup,
+            );
+        }
 
         // === OUTCOME BLOCK (weighted) ===
         sample_linear_coefs_weighted(
@@ -2580,7 +2779,11 @@ pub fn run_chain_bjlm_ss(
 
         // === GP BLOCK ===
         sample_gp_state(outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng);
-        sample_gp_hyperparameters(outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng, &mut gp_hyper_adapts, iter < n_warmup);
+        if gp_collapsible(outcome_data) {
+            sample_gp_hyper_collapsed(outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut gp_hyper_adapts, iter < n_warmup, &mut rng);
+        } else {
+            sample_gp_hyperparameters(outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng, &mut gp_hyper_adapts, iter < n_warmup);
+        }
 
         // === OUTCOME BLOCK (weighted) ===
         sample_linear_coefs_weighted(outcome_data, outcome_priors, &mut outcome_state, &weights_obs, &mut rng);
