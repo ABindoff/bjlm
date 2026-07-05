@@ -2,6 +2,16 @@
 # f = mu_f(theta; X_obs) + L_f(theta) z ; update (theta, b0, b0_gp, z).
 # Validates: recovery + stability in the HIGH-COUNT regime, and that the X_obs
 # sub-marginal is required (Fable's critical point).
+#
+# NB PARAMETERIZATION WARNING (cost of ignoring: alpha -> 1e4 runaway). This
+# prototype uses the NB-logit convention: eta = ln(mean/r), mean = r*exp(eta),
+# ll = y*eta - (y+r)*log1pexp(eta). bjlm's Rust sampler uses psi = ln(mean)
+# EVERYWHERE (coef PG updates shift by ln r; sample_r_weighted; pointwise lik).
+# When porting, the field log-likelihood must be evaluated at eta = psi - ln(r).
+# The original port used psi directly; the theta/z kernels then targeted a
+# DIFFERENT joint than the coef/r kernels, the composition had no stationary
+# law, and the chain ratcheted up the (alpha, sigma_x) ridge. See
+# data-raw/HANDOFF_nb_gp_transport.md postmortem.
 set.seed(11)
 log1pexp <- function(x) ifelse(x > 30, x, log1p(exp(x)))
 

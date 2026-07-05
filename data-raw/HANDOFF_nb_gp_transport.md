@@ -1,5 +1,12 @@
 # Hand-off: debug the Rust conditional-transport for NB + latent GP
 
+## STATUS: RESOLVED (2026-07-05) — see POSTMORTEM at the bottom
+
+Root cause was an NB parameterization mismatch, not adaptation or the transport
+design. Transport is now the NB+GP default (`BJLM_GP_NO_TRANSPORT=1` = whitened
+escape hatch); A/B agreement with whitened |z| <= 0.09 on all params with 3-9x
+GP-hyper ESS; SBC in the high-count regime via data-raw/sbc_nb_gp_transport.R.
+
 ## The one job
 Make `sample_gp_transport` in `src/rust/src/sampler_bjlm.rs` match the validated R
 prototype so NB + latent-GP mixes without runaway, then SBC-certify and ungate.
@@ -62,3 +69,69 @@ theta-MH target per subject = sub_marginal(X_obs) + NB_ll(f) + log_prior; z by E
   Out-File adds a BOM — use the Write tool for the message file).
 - Reference docs: `data-raw/DESIGN_nb_gp_collapse.md` (full diagnosis + Fable critique),
   memory `project_bjlm.md`.
+
+## POSTMORTEM (2026-07-05)
+
+**Root cause: NB parameterization mismatch between kernels.** bjlm's NB convention
+is `psi = ln(mean)` everywhere (the coef PG-Gibbs augments at `psi - ln r` and shifts
+back; `sample_r_weighted`, `compute_pointwise_log_lik`, and the whitened
+`compute_ll_noncentered` all agree). The transport port copied the R prototype's
+convention, `eta = ln(mean/r)` (mean = `r*exp(eta)`), so its theta-MH and z-ESS
+targeted a DIFFERENT joint than the coef/r kernels. A composition of kernels with no
+common invariant law has no stationary distribution: the chain ratcheted up the
+`(alpha, sigma_x) -> c*(alpha, sigma_x)` ridge (~2.5 nats/sweep of computed-target
+loss funded by z re-fits), reaching alpha ~ 1e4-1e5 on the prototype's own DGP. The
+symptom chain: `r` dragged to ~3.2 (truth 10), `b0_gp` collapsed toward 0 (suppressing
+the mis-calibrated field term), theta wandering the scale ridge. Fix: evaluate the NB
+field log-likelihood at `eta = psi - ln(r)` (one line, `field_ll` in
+`sample_gp_transport`); the collapse's NB PG row got the matching `ln r` shift for
+coherence (it is dormant: `gp_collapsible` excludes NB).
+
+**How it was found** (the suspect list was wrong, instructively so):
+1. Suspect 2 (silent penalty drop on Cholesky failure) was REAL but secondary: a
+   proposal whose `transport_pieces` all failed was accepted at acc=1.000 (target =
+   prior only beats any honest target), then trapped the chain (alpha 47-153, the
+   originally reported symptom). Fixed: a numerically failed subject with data now
+   returns -inf for the whole theta (a failure VETOES the move); `Sigma_f` jitter now
+   scales with alpha^2 (the subtraction cancels alpha^2-sized terms, so an absolute
+   1e-9 goes indefinite at large alpha) with a x100 retry ladder.
+2. Suspect 1 (adaptation) was a red herring: fixed prototype steps (0.08/0.10/0.08,
+   `BJLM_GP_FIXED_STEP=1`, kept as a debug switch) still diverged.
+3. Component-level tracing (`BJLM_GP_DEBUG=1`: prior/sub-marginal/field-ll split,
+   re-whitening round-trip check) showed the sub-marginal EXACTLY matched the R
+   formulas and the state was consistent, while the chain sat 3700+ nats below its
+   own start -- impossible for target-preserving kernels, hence a no-common-target
+   bug. The 30k-iteration R prototype run (stable, even with sampled r) exonerated
+   the transport design and pinned the port.
+
+**Also added: centered theta interweave (ASIS-style).** After the z-ESS, a second
+theta-MH holds f FIXED against `p(theta) N(f; 0, K) N(X_obs; f, sx^2 I)` (outcome
+terms cancel). Cheap, exactly invariant, and it seals the inflation ridge mechanically
+(with f fixed there is no z re-fit to hide behind), on top of contributing to the
+final ESS win.
+
+**The same bug class, pre-existing, in the CHANGE-POINT kernels (bigger deal).**
+The first SBC smoke failed hard on omega/b0/delta/r (omega ranks all 0/1: omega
+pinned to a prior boundary in EVERY NB fit, both GP paths; r rank 1.000 in 16/16).
+Cause: `hmc_step_om_weighted`, `hmc_step_rho_weighted`, `sample_om_laplace_weighted`,
+and `sample_re_om_ancillary_weighted` all evaluated the NB log-likelihood (and the
+HMC gradients) in the NB-logit convention at psi -- convention B again, predating
+the transport work. Invisible in earlier NB testing because the two conventions
+COINCIDE at r = 1 (ln r = 0) and earlier NB checks used small r / low counts; at
+r ~ 10 the omega kernel sees a model whose implied mean is 10x the data and flees
+to the boundary, and the unbent change-point structure is soaked up as fake
+overdispersion (r dragged low). All four sites now evaluate at psi - ln r (the
+shift is constant in mu, so the gradient/curvature forms are unchanged). After the
+fix, 9/10 SBC params pass on the smoke; the r flag that remained was an SBC-script
+prior mismatch (`prior_gamma(shape, SCALE)`, not rate -- documented in the script).
+
+AUDIT RULE going forward: bjlm's NB convention is psi = ln(mean), enforced at every
+likelihood/gradient site via the NB-logit `psi - ln r`. Legacy `run_chain` /
+`run_chain_re` (sampler.rs / sampler_re.rs, non-IPW entry points) still carry an
+unshifted PG site each -- audit for INTERNAL consistency before touching (fixing one
+site inside an internally-B-consistent sampler would create this same bug).
+
+**Certification:** prototype-DGP A/B (transport vs whitened): all params agree to
+2-3 decimals, GP-hyper ESS 16-27x whitened. Full model (change-point + RE + sampled
+r): |z| <= 0.09 agreement, ESS 3.4-8.9x. SBC (NB + GP + change-point, high-count
+regime, no IPW): `data-raw/sbc_nb_gp_transport.R`.

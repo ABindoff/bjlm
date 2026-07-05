@@ -607,19 +607,21 @@ fn compute_ll_noncentered(
 // path (for reproducibility / A-B comparison).
 // Gaussian and Binomial GP outcomes collapse exactly (Binomial via Polya-Gamma, and a
 // GP in the propensity likewise). NB never collapses (the marginalising collapse runs
-// away): it defaults to the whitened-conditional path (correct, slow).
+// away): it uses the conditional-transport sampler (gp_use_transport, below), with the
+// whitened-conditional path as its BJLM_GP_NO_TRANSPORT=1 escape hatch.
 fn gp_collapsible(outcome_data: &ModelData) -> bool {
     std::env::var("BJLM_GP_NO_COLLAPSE").is_err()
         && !outcome_data.latent_gps.is_empty()
         && outcome_data.outcome_family != crate::model::OutcomeFamily::NegativeBinomial
 }
 
-// Conditional-transport GP update for NB (sample_gp_transport). The approach is validated
-// in R (data-raw/prototype_transport_nb_gp.R) but the Rust port is still WIP: it can
-// diverge in the full model, so it is OPT-IN via BJLM_GP_TRANSPORT=1 while it is debugged.
-// Default NB path is the correct whitened-conditional sampler.
+// Conditional-transport GP update for NB (sample_gp_transport): the DEFAULT NB path,
+// validated in R (data-raw/prototype_transport_nb_gp.R), A/B-matched against the
+// whitened reference (3-9x GP-hyper ESS), and SBC-certified in the high-count regime
+// (data-raw/sbc_nb_gp_transport.R). BJLM_GP_NO_TRANSPORT=1 forces the whitened
+// fallback (correct but ESS ~5-40 on the GP hyperparameters).
 fn gp_use_transport(outcome_data: &ModelData) -> bool {
-    std::env::var("BJLM_GP_TRANSPORT").is_ok()
+    std::env::var("BJLM_GP_NO_TRANSPORT").is_err()
         && !outcome_data.latent_gps.is_empty()
         && outcome_data.outcome_family == crate::model::OutcomeFamily::NegativeBinomial
 }
@@ -737,9 +739,13 @@ fn sample_gp_hyper_collapsed(
                         ((outcome_data.y[gidx] - 0.5) / omega - mu_no, omega)
                     }
                     OutcomeFamily::NegativeBinomial => {
+                        // psi = ln(mean) convention: PG-augment at the NB-logit
+                        // psi - ln r and shift the pseudo-observation back by ln r,
+                        // exactly as the linear-coefficient sampler does.
                         let rp = outcome_state.r;
-                        let omega = crate::polya_gamma::sample_pg(outcome_data.y[gidx] + rp, mu_full[gidx], rng).max(1e-9);
-                        ((outcome_data.y[gidx] - rp) / 2.0 / omega - mu_no, omega)
+                        let log_r = rp.ln();
+                        let omega = crate::polya_gamma::sample_pg(outcome_data.y[gidx] + rp, mu_full[gidx] - log_r, rng).max(1e-9);
+                        ((outcome_data.y[gidx] - rp) / 2.0 / omega + log_r - mu_no, omega)
                     }
                 };
                 obs.push(PObs { tidx, c: eff_beta, v, p_fixed: p, is_xobs: false });
@@ -870,10 +876,21 @@ fn transport_pieces(times: &[f64], obs_idx: &[usize], alpha: f64, rho: f64, sigm
     let mut kao = DMatrix::<f64>::zeros(nt, no);
     for t in 0..nt { for b in 0..no { kao[(t, b)] = k[(t, obs_idx[b])]; } }
     let mu_w = &kao * &koo_inv;
-    let mut sigf = &k - &mu_w * kao.transpose();
-    for t in 0..nt { sigf[(t, t)] += 1e-9; }
-    let lf = sigf.cholesky()?.l();
-    Some(TransportPieces { mu_w, lf, koo_inv, logdet_oo })
+    let sigf = &k - &mu_w * kao.transpose();
+    // The subtraction cancels terms of size ~alpha^2, so the floating-point error in
+    // sigf scales with alpha^2 too: an absolute 1e-9 jitter goes indefinite once
+    // alpha is large and sigma_x small. Scale the jitter with alpha^2 and retry two
+    // decades before giving up (None rejects the whole theta proposal).
+    let mut jitter = 1e-9 * (alpha * alpha).max(1.0);
+    for _ in 0..3 {
+        let mut s = sigf.clone();
+        for t in 0..nt { s[(t, t)] += jitter; }
+        if let Some(c) = s.cholesky() {
+            return Some(TransportPieces { mu_w, lf: c.l(), koo_inv, logdet_oo });
+        }
+        jitter *= 100.0;
+    }
+    None
 }
 
 // Conditional-transport GP update (fibr door-1 on the CLEAN X_obs sub-likelihood; see
@@ -899,6 +916,7 @@ fn sample_gp_transport(
     let two_pi = 2.0 * std::f64::consts::PI;
     let sigma2 = outcome_state.sigma * outcome_state.sigma;
     let r_param = outcome_state.r;
+    let debug = std::env::var("BJLM_GP_DEBUG").is_ok();
     let mu_no = outcome_state.means(outcome_data); // outcome linear predictor excl. GP
 
     for (gp_idx, gp) in outcome_data.latent_gps.iter().enumerate() {
@@ -938,7 +956,17 @@ fn sample_gp_transport(
                 match outcome_data.outcome_family {
                     OutcomeFamily::Gaussian => { let e = y - eta; ll += -0.5 * w * e * e / sigma2; }
                     OutcomeFamily::Binomial => { ll += w * (y * eta - softplus(eta)); }
-                    OutcomeFamily::NegativeBinomial => { ll += w * (y * eta - (y + r_param) * softplus(eta)); }
+                    OutcomeFamily::NegativeBinomial => {
+                        // bjlm's NB convention is psi = ln(mean) (see the coef sampler's
+                        // psi - ln r PG shift and sample_r_weighted): the NB-logit is
+                        // eta - ln r, NOT eta. Using eta directly (the prototype's
+                        // mean = r*exp(eta) convention) makes this kernel target a
+                        // DIFFERENT joint than the coef/r kernels, and the composition
+                        // then has no stationary law: it ratchets up the
+                        // (alpha, sigma_x) ridge (alpha -> 1e4+ on the prototype DGP).
+                        let e = eta - r_param.ln();
+                        ll += w * (y * e - (y + r_param) * softplus(e));
+                    }
                 }
             }
             if gp.p_prop_idx >= 0 && !subj.trt_indices.is_empty() {
@@ -973,39 +1001,70 @@ fn sample_gp_transport(
         }
 
         // theta target = sum_s [ X_obs sub-marginal + field_ll(f = mu_f + L_f z) ] + logprior.
+        // Returns (total, sub-marginal sum, field_ll sum) — components for debugging.
         let (rloc, rscale) = gp_rho_log_prior_params(gp);
         let target = |a: f64, r: f64, sx: f64,
                       pieces: &[Option<TransportPieces>], zref: &[DVector<f64>],
-                      fields: &mut Vec<DVector<f64>>| -> f64 {
-            let mut t = log_scale_prior(a, &gp.alpha_prior, rloc, rscale)
+                      fields: &mut Vec<DVector<f64>>| -> (f64, f64, f64) {
+            let prior = log_scale_prior(a, &gp.alpha_prior, rloc, rscale)
                 + log_scale_prior(r, &gp.rho_prior, rloc, rscale)
                 + log_scale_prior(sx, &gp.sigma_x_prior, rloc, rscale);
+            let (mut sm_sum, mut fll_sum) = (0.0f64, 0.0f64);
             for s in 0..ns {
                 if let Some(ref p) = pieces[s] {
                     let mu_f = &p.mu_w * &sub_xobs[s];
                     let f = &mu_f + &p.lf * &zref[s];
-                    let sm = -0.5 * (sub_xobs[s].dot(&(&p.koo_inv * &sub_xobs[s])) + p.logdet_oo
+                    sm_sum += -0.5 * (sub_xobs[s].dot(&(&p.koo_inv * &sub_xobs[s])) + p.logdet_oo
                         + (sub_obs_idx[s].len() as f64) * ln_2pi);
-                    t += sm + field_ll(s, f.as_slice());
+                    fll_sum += field_ll(s, f.as_slice());
                     fields[s] = f;
+                } else if !gp.subjects[s].times.is_empty() && !sub_obs_idx[s].is_empty() {
+                    // Numerical (Cholesky) failure for a subject that HAS data: the
+                    // whole theta is invalid. Silently dropping the subject drops the
+                    // X_obs sub-marginal penalty exactly where it is needed most
+                    // (large alpha), which lets a runaway proposal look BETTER than
+                    // an honest one and then traps the chain there.
+                    fields[s] = DVector::zeros(0);
+                    return (f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
                 } else { fields[s] = DVector::zeros(0); }
             }
-            t
+            (prior + sm_sum + fll_sum, sm_sum, fll_sum)
         };
         let mut fields0: Vec<DVector<f64>> = vec![DVector::zeros(0); ns];
-        let cur = target(a0, r0, s0, &pieces0, &zs, &mut fields0);
+        let (cur, sm_cur, fll_cur) = target(a0, r0, s0, &pieces0, &zs, &mut fields0);
+        // Debug: verify the re-whitening round trip. fll from the STORED field must
+        // match fll from f = mu_f + L_f z (what the theta-MH conditions on); a gap
+        // means the theta-MH and the other samplers see different states.
+        let fll_stored: f64 = if debug {
+            (0..ns).map(|s| field_ll(s, &outcome_state.gp_states[gp_idx].x[s])).sum()
+        } else { 0.0 };
 
+        // Isolation switch (see HANDOFF_nb_gp_transport.md suspect 1): fixed log-scale
+        // RW steps matching the validated R prototype, bypassing dual-averaging.
+        let fixed_step = std::env::var("BJLM_GP_FIXED_STEP").is_ok();
         let eps = adapts[gp_idx].joint_da.epsilon;
-        let ap = (a0.ln() + eps * adapts[gp_idx].inv_mass[0].sqrt() * normal.sample(rng)).exp();
-        let rp = (r0.ln() + eps * adapts[gp_idx].inv_mass[1].sqrt() * normal.sample(rng)).exp();
-        let sp = (s0.ln() + eps * adapts[gp_idx].inv_mass[2].sqrt() * normal.sample(rng)).exp();
+        let (ea, er, es) = if fixed_step { (0.08, 0.10, 0.08) } else {
+            (eps * adapts[gp_idx].inv_mass[0].sqrt(),
+             eps * adapts[gp_idx].inv_mass[1].sqrt(),
+             eps * adapts[gp_idx].inv_mass[2].sqrt())
+        };
+        let ap = (a0.ln() + ea * normal.sample(rng)).exp();
+        let rp = (r0.ln() + er * normal.sample(rng)).exp();
+        let sp = (s0.ln() + es * normal.sample(rng)).exp();
         let mut acc = 0.0;
+        let fail_cur = (0..ns).filter(|&s| pieces0[s].is_none()
+            && !gp.subjects[s].times.is_empty() && !sub_obs_idx[s].is_empty()).count();
+        let mut fail_prop = 0usize;
+        let (mut prop_dbg, mut sm_prop, mut fll_prop) = (f64::NAN, f64::NAN, f64::NAN);
         let mut pieces_use = pieces0;
         if ap.is_finite() && rp.is_finite() && sp.is_finite() && ap > 0.0 && rp > 0.0 && sp > 0.0 {
             let pieces_p: Vec<Option<TransportPieces>> = (0..ns)
                 .map(|s| transport_pieces(&gp.subjects[s].times, &sub_obs_idx[s], ap, rp, sp)).collect();
+            fail_prop = (0..ns).filter(|&s| pieces_p[s].is_none()
+                && !gp.subjects[s].times.is_empty() && !sub_obs_idx[s].is_empty()).count();
             let mut fields_p: Vec<DVector<f64>> = vec![DVector::zeros(0); ns];
-            let prop = target(ap, rp, sp, &pieces_p, &zs, &mut fields_p);
+            let (prop, smp, fllp) = target(ap, rp, sp, &pieces_p, &zs, &mut fields_p);
+            prop_dbg = prop; sm_prop = smp; fll_prop = fllp;
             let lr = prop - cur;
             acc = if lr.is_nan() { 0.0 } else { lr.exp().min(1.0) };
             if rng.gen::<f64>() < acc {
@@ -1020,7 +1079,12 @@ fn sample_gp_transport(
                 pieces_use = pieces_p;
             }
         }
-        if adapting { adapts[gp_idx].joint_da.update(acc); }
+        if adapting && !fixed_step { adapts[gp_idx].joint_da.update(acc); }
+        if debug {
+            let st = &outcome_state.gp_states[gp_idx];
+            eprintln!("[gpt {}] a={:.4} rho={:.4} sx={:.4} p a={:.4} rho={:.4} sx={:.4} st={:.3} cur={:.2} sm={:.2} fll={:.2} flls={:.2} prop={:.2} smp={:.2} fllp={:.2} acc={:.3} cf={}/{}",
+                gp_idx, st.alpha, st.rho, st.sigma_x, ap, rp, sp, ea, cur, sm_cur, fll_cur, fll_stored, prop_dbg, sm_prop, fll_prop, acc, fail_cur, fail_prop);
+        }
 
         // z-step: elliptical slice sampling per subject (prior N(0,I) on z, likelihood
         // = the outcome/propensity at f = mu_f + L_f z). X_obs is already absorbed.
@@ -1047,6 +1111,62 @@ fn sample_gp_transport(
                 let f_new = &mu_f + &p.lf * &new_z;
                 outcome_state.gp_states[gp_idx].x[s] = f_new.iter().cloned().collect();
             }
+        }
+
+        // Centered theta-move (interweaved, ASIS-style): hold f FIXED and MH theta
+        // against p(theta) N(f; 0, K) N(X_obs; f_obs, sx^2 I); the outcome/propensity
+        // terms cancel because f does not move. This seals the transport move's escape
+        // ridge along (alpha, sigma_x) -> c*(alpha, sigma_x): at fixed z that move
+        // inflates only L_f z (whose N(z; 0, I) cost vanishes as c grows) and pays the
+        // sub-marginal only logarithmically, so the z-ESS can ratchet the chain into
+        // an arbitrarily inflated scale. With f fixed there is no re-fit to hide
+        // behind: N(f; 0, K) and the X_obs residuals pin the scale directly.
+        let a1 = outcome_state.gp_states[gp_idx].alpha;
+        let r1 = outcome_state.gp_states[gp_idx].rho;
+        let s1 = outcome_state.gp_states[gp_idx].sigma_x;
+        let centered = |a: f64, r: f64, sx: f64| -> f64 {
+            let mut t = log_scale_prior(a, &gp.alpha_prior, rloc, rscale)
+                + log_scale_prior(r, &gp.rho_prior, rloc, rscale)
+                + log_scale_prior(sx, &gp.sigma_x_prior, rloc, rscale);
+            let inv_sx2 = 1.0 / (sx * sx);
+            let ln_sx2 = (sx * sx).ln();
+            for s in 0..ns {
+                let subj = &gp.subjects[s];
+                let nt_s = subj.times.len();
+                if nt_s == 0 { continue; }
+                let f = &outcome_state.gp_states[gp_idx].x[s];
+                let k = crate::gp::compute_cov_matrix(&subj.times, a, r, 1e-6);
+                let ch = match k.cholesky() { Some(c) => c, None => return f64::NEG_INFINITY };
+                let logdet = 2.0 * ch.l().diagonal().iter().map(|d| d.ln()).sum::<f64>();
+                let fv = DVector::from_column_slice(f);
+                let quad = fv.dot(&ch.solve(&fv));
+                t += -0.5 * (quad + logdet + (nt_s as f64) * ln_2pi);
+                for i in 0..subj.obs_indices.len() {
+                    let e = gp.obs_val[subj.obs_global[i]] - f[subj.obs_indices[i]];
+                    t += -0.5 * (e * e * inv_sx2 + ln_sx2 + ln_2pi);
+                }
+            }
+            t
+        };
+        let cur_c = centered(a1, r1, s1);
+        let ac = (a1.ln() + ea * normal.sample(rng)).exp();
+        let rc = (r1.ln() + er * normal.sample(rng)).exp();
+        let sc = (s1.ln() + es * normal.sample(rng)).exp();
+        let mut acc_c = 0.0;
+        if ac.is_finite() && rc.is_finite() && sc.is_finite() && ac > 0.0 && rc > 0.0 && sc > 0.0 {
+            let prop_c = centered(ac, rc, sc);
+            let lr = prop_c - cur_c;
+            acc_c = if lr.is_nan() { 0.0 } else { lr.exp().min(1.0) };
+            if rng.gen::<f64>() < acc_c {
+                outcome_state.gp_states[gp_idx].alpha = ac;
+                outcome_state.gp_states[gp_idx].rho = rc;
+                outcome_state.gp_states[gp_idx].sigma_x = sc;
+            }
+        }
+        if debug {
+            let st = &outcome_state.gp_states[gp_idx];
+            eprintln!("[gptC {}] a={:.4} rho={:.4} sx={:.4} p a={:.4} rho={:.4} sx={:.4} acc={:.3}",
+                gp_idx, st.alpha, st.rho, st.sigma_x, ac, rc, sc, acc_c);
         }
     }
 }
@@ -1573,7 +1693,9 @@ fn sample_re_om_ancillary_weighted(
                         ll += weights[i] * (data.y[i] * mu_i - softplus(mu_i));
                     }
                     OutcomeFamily::NegativeBinomial => {
-                        ll += weights[i] * (data.y[i] * mu_i - (data.y[i] + r_param) * softplus(mu_i));
+                        // psi = ln(mean): the NB-logit is mu_i - ln r (see field_ll).
+                        let e = mu_i - r_param.ln();
+                        ll += weights[i] * (data.y[i] * e - (data.y[i] + r_param) * softplus(e));
                     }
                 }
             }
@@ -2392,11 +2514,15 @@ fn hmc_step_om_weighted(
                 }
             },
             crate::model::OutcomeFamily::NegativeBinomial => {
+                // psi = ln(mean): evaluate ll and gradient at the NB-logit psi - ln r
+                // (the shift is constant in mu, so d/dmu is unchanged in form).
                 let r_param = state.r;
+                let log_r = r_param.ln();
                 for i in 0..data.n {
-                    let expit_mu = sigmoid(mu[i]);
-                    ll += weights[i] * (data.y[i] * mu[i] - (data.y[i] + r_param) * softplus(mu[i]));
-                    grad_ll_mu[i] = weights[i] * (data.y[i] - (data.y[i] + r_param) * expit_mu);
+                    let e = mu[i] - log_r;
+                    let expit_e = sigmoid(e);
+                    ll += weights[i] * (data.y[i] * e - (data.y[i] + r_param) * softplus(e));
+                    grad_ll_mu[i] = weights[i] * (data.y[i] - (data.y[i] + r_param) * expit_e);
                 }
             }
         }
@@ -2510,8 +2636,10 @@ fn sample_om_laplace_weighted(
                          -weights[i] * ex * (1.0 - ex))
                     }
                     OutcomeFamily::NegativeBinomial => {
-                        let ex = sigmoid(mu_i);
-                        (weights[i] * (data.y[i] * mu_i - (data.y[i] + r_param) * softplus(mu_i)),
+                        // psi = ln(mean): NB-logit is mu_i - ln r (derivs shift-invariant).
+                        let e = mu_i - r_param.ln();
+                        let ex = sigmoid(e);
+                        (weights[i] * (data.y[i] * e - (data.y[i] + r_param) * softplus(e)),
                          weights[i] * (data.y[i] - (data.y[i] + r_param) * ex),
                          -weights[i] * (data.y[i] + r_param) * ex * (1.0 - ex))
                     }
@@ -2612,11 +2740,14 @@ fn hmc_step_rho_weighted(
                 }
             },
             crate::model::OutcomeFamily::NegativeBinomial => {
+                // psi = ln(mean): evaluate ll and gradient at the NB-logit psi - ln r.
                 let r_param = state.r;
+                let log_r = r_param.ln();
                 for i in 0..data.n {
-                    let expit_mu = sigmoid(mu[i]);
-                    ll += weights[i] * (data.y[i] * mu[i] - (data.y[i] + r_param) * softplus(mu[i]));
-                    grad_ll_mu[i] = weights[i] * (data.y[i] - (data.y[i] + r_param) * expit_mu);
+                    let e = mu[i] - log_r;
+                    let expit_e = sigmoid(e);
+                    ll += weights[i] * (data.y[i] * e - (data.y[i] + r_param) * softplus(e));
+                    grad_ll_mu[i] = weights[i] * (data.y[i] - (data.y[i] + r_param) * expit_e);
                 }
             }
         }
