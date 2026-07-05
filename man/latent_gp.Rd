@@ -13,7 +13,8 @@ latent_gp(
   time_trt_var,
   time_out_var,
   subject,
-  kernel = "se"
+  kernel = "se",
+  priors = gp_priors()
 )
 }
 \arguments{
@@ -34,6 +35,11 @@ latent_gp(
 \item{subject}{Name of the subject grouping variable.}
 
 \item{kernel}{Kernel function to use. Currently supports \code{"se"} (Squared Exponential).}
+
+\item{priors}{A \code{\link[=gp_priors]{gp_priors()}} bundle for the GP hyperparameters (marginal SD
+\code{alpha}, lengthscale \code{rho}, observation-noise SD \code{sigma_x}). Defaults to
+\code{gp_priors()}, i.e. lognormal(0,1) on \code{alpha}, the resolution-aware lengthscale
+prior on \code{rho}, and lognormal(-1,1) on \code{sigma_x}.}
 }
 \value{
 The modified \code{bjlm_model} object.

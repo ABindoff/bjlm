@@ -34,6 +34,19 @@ fn list_to_vec_dmatrix(list: List, nrow: usize, p_vec: &[i32]) -> Vec<DMatrix<f6
         .collect()
 }
 
+// Parse a GP hyperprior encoded from R as c(family_code, p1, p2); fall back to the
+// default if the field is absent (backward compatibility with older callers).
+fn parse_gp_prior(gp_list: &List, field: &str, default: crate::model::GpPrior) -> crate::model::GpPrior {
+    if let Ok(robj) = gp_list.dollar(field) {
+        if let Some(rv) = robj.as_real_vector() {
+            if rv.len() >= 3 {
+                return crate::model::GpPrior { family: rv[0] as u8, p1: rv[1], p2: rv[2] };
+            }
+        }
+    }
+    default
+}
+
 /// @noRd
 /// @keywords internal
 #[extendr]
@@ -670,6 +683,9 @@ fn run_bjlm(
             p_b0_idx: gp_list.dollar("p_b0_idx").unwrap().as_integer_vector().unwrap()[0],
             p_b1_idx: gp_list.dollar("p_b1_idx").unwrap().as_integer_vector().unwrap()[0],
             p_prop_idx: gp_list.dollar("p_prop_idx").unwrap().as_integer_vector().unwrap()[0],
+            alpha_prior: parse_gp_prior(&gp_list, "alpha_prior", crate::model::GpPrior::lognormal(0.0, 1.0)),
+            rho_prior: parse_gp_prior(&gp_list, "rho_prior", crate::model::GpPrior::lengthscale()),
+            sigma_x_prior: parse_gp_prior(&gp_list, "sigma_x_prior", crate::model::GpPrior::lognormal(-1.0, 1.0)),
             subjects: Vec::new(),
         };
         gp.process(n_subjects as usize);
@@ -909,6 +925,9 @@ fn run_bjlm_ss(
             p_b0_idx: gp_list.dollar("p_b0_idx").unwrap().as_integer_vector().unwrap()[0],
             p_b1_idx: gp_list.dollar("p_b1_idx").unwrap().as_integer_vector().unwrap()[0],
             p_prop_idx: gp_list.dollar("p_prop_idx").unwrap().as_integer_vector().unwrap()[0],
+            alpha_prior: parse_gp_prior(&gp_list, "alpha_prior", crate::model::GpPrior::lognormal(0.0, 1.0)),
+            rho_prior: parse_gp_prior(&gp_list, "rho_prior", crate::model::GpPrior::lengthscale()),
+            sigma_x_prior: parse_gp_prior(&gp_list, "sigma_x_prior", crate::model::GpPrior::lognormal(-1.0, 1.0)),
             subjects: Vec::new(),
         };
         gp.process(n_subjects as usize);

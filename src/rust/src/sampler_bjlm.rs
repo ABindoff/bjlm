@@ -453,6 +453,23 @@ fn gp_rho_log_prior_params(gp: &crate::model::GpData) -> (f64, f64) {
     (loc, scale)
 }
 
+// Closed-form log-space log-density of a GP hyperprior -- the term a symmetric
+// log-scale RW proposal needs (no separate Jacobian). Family codes match
+// model::GpPrior; rloc/rscale are the resolution-aware lengthscale params (family 6).
+fn log_scale_prior(x: f64, pr: &crate::model::GpPrior, rloc: f64, rscale: f64) -> f64 {
+    let lx = x.ln();
+    match pr.family {
+        0 => -0.5 * ((lx - pr.p1) / pr.p2).powi(2),   // lognormal(meanlog, sdlog)
+        1 => lx - 0.5 * x * x / (pr.p1 * pr.p1),       // half-normal(sd)
+        2 => lx - (1.0 + (x / pr.p1).powi(2)).ln(),    // half-Cauchy(scale)
+        3 => -pr.p1 * lx - pr.p2 / x,                  // inverse-gamma(shape, scale)
+        4 => pr.p1 * lx - x / pr.p2,                   // gamma(shape, scale)
+        5 => lx - 0.5 * (pr.p1 + 1.0)
+                * (1.0 + x * x / (pr.p1 * pr.p2 * pr.p2)).ln(), // half-t(df, scale)
+        _ => -0.5 * ((lx - rloc) / rscale).powi(2),    // 6: resolution-aware lengthscale
+    }
+}
+
 fn compute_ll_noncentered(
     a: f64,
     r: f64,
@@ -566,9 +583,9 @@ fn compute_ll_noncentered(
     // Jacobian, so it is omitted here rather than added back in each accept step):
     //   ln(alpha), ln(rho) ~ N(0, 1);  ln(sigma_x) ~ N(-1, 1).
     let (rloc, rscale) = gp_rho_log_prior_params(gp);
-    ll -= 0.5 * a.ln().powi(2);
-    ll -= 0.5 * ((r.ln() - rloc) / rscale).powi(2);
-    ll -= 0.5 * (s.ln() + 1.0).powi(2);
+    ll += log_scale_prior(a, &gp.alpha_prior, rloc, rscale);
+    ll += log_scale_prior(r, &gp.rho_prior, rloc, rscale);
+    ll += log_scale_prior(s, &gp.sigma_x_prior, rloc, rscale);
 
     (ll, x_list)
 }
@@ -712,8 +729,9 @@ fn sample_gp_hyper_collapsed(
         // log-scale RW below needs no extra Jacobian, matching compute_ll_noncentered.
         let (rloc, rscale) = gp_rho_log_prior_params(gp);
         let log_prior = |a: f64, r: f64, sx: f64| -> f64 {
-            -0.5 * a.ln().powi(2) - 0.5 * ((r.ln() - rloc) / rscale).powi(2)
-                - 0.5 * (sx.ln() + 1.0).powi(2)
+            log_scale_prior(a, &gp.alpha_prior, rloc, rscale)
+                + log_scale_prior(r, &gp.rho_prior, rloc, rscale)
+                + log_scale_prior(sx, &gp.sigma_x_prior, rloc, rscale)
         };
 
         let a0 = outcome_state.gp_states[gp_idx].alpha;

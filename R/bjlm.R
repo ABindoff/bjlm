@@ -305,7 +305,12 @@ bjlm <- function(
         
         p_b0_idx = as.integer(p_b0_idx),
         p_b1_idx = as.integer(p_b1_idx),
-        p_prop_idx = as.integer(p_prop_idx)
+        p_prop_idx = as.integer(p_prop_idx),
+
+        # GP hyperpriors as c(family_code, p1, p2); default bundle if none supplied.
+        alpha_prior   = .gp_prior_encode((gp$priors %||% gp_priors())$alpha),
+        rho_prior     = .gp_prior_encode((gp$priors %||% gp_priors())$rho),
+        sigma_x_prior = .gp_prior_encode((gp$priors %||% gp_priors())$sigma_x)
       )
     })
   }

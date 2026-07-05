@@ -132,13 +132,19 @@ outcome <- function(
 #' @param time_out_var The column name of the time variable in the outcome data.
 #' @param subject Name of the subject grouping variable.
 #' @param kernel Kernel function to use. Currently supports `"se"` (Squared Exponential).
+#' @param priors A [gp_priors()] bundle for the GP hyperparameters (marginal SD
+#'   `alpha`, lengthscale `rho`, observation-noise SD `sigma_x`). Defaults to
+#'   `gp_priors()`, i.e. lognormal(0,1) on `alpha`, the resolution-aware lengthscale
+#'   prior on `rho`, and lognormal(-1,1) on `sigma_x`.
 #'
 #' @return The modified `bjlm_model` object.
 #' @export
-latent_gp <- function(model, name, data, obs_var, time_var, time_trt_var, time_out_var, subject, kernel = "se") {
+latent_gp <- function(model, name, data, obs_var, time_var, time_trt_var, time_out_var, subject, kernel = "se",
+                      priors = gp_priors()) {
   if (!inherits(model, "bjlm_model")) stop("First argument must be a bjlm_model object.")
   if (missing(data) || is.null(data)) stop("Must provide 'data' argument for latent_gp (containing noisy covariate observations).")
-  
+  if (!inherits(priors, "gp_priors")) stop("`priors` must be a gp_priors() object.")
+
   gp <- list(
     name = name,
     data = data,
@@ -147,7 +153,8 @@ latent_gp <- function(model, name, data, obs_var, time_var, time_trt_var, time_o
     time_trt_var = time_trt_var,
     time_out_var = time_out_var,
     subject = subject,
-    kernel = kernel
+    kernel = kernel,
+    priors = priors
   )
   
   model$latent_gps[[length(model$latent_gps) + 1]] <- gp

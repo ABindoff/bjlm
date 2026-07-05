@@ -87,6 +87,114 @@ prior_gamma <- function(shape = 1, scale = 1) {
   )
 }
 
+#' Specify a log-normal prior for a positive parameter
+#'
+#' `ln(theta) ~ Normal(meanlog, sdlog)`. Natural weakly-informative prior for a
+#' positive scale or lengthscale; sampled exactly on the log scale.
+#'
+#' @param meanlog,sdlog Mean and SD of the underlying normal on the log scale.
+#' @return A `smoothbp_prior` object.
+#' @export
+prior_lognormal <- function(meanlog = 0, sdlog = 1) {
+  stopifnot(sdlog > 0)
+  structure(list(family = "lognormal", meanlog = meanlog, sdlog = sdlog),
+            class = "smoothbp_prior")
+}
+
+#' Specify a half-normal prior for a scale (standard-deviation) parameter
+#'
+#' @param sd Scale of the half-normal (> 0); larger is more diffuse.
+#' @return A `smoothbp_prior` object.
+#' @export
+prior_halfnormal <- function(sd = 1) {
+  stopifnot(sd > 0)
+  structure(list(family = "halfnormal", sd = sd), class = "smoothbp_prior")
+}
+
+#' Specify a half-t prior for a scale (standard-deviation) parameter
+#'
+#' Heavier-tailed weakly-informative alternative to the half-normal; `df = 1` is the
+#' half-Cauchy.
+#'
+#' @param df Degrees of freedom (> 0).
+#' @param scale Scale (> 0).
+#' @return A `smoothbp_prior` object.
+#' @export
+prior_halft <- function(df = 3, scale = 1) {
+  stopifnot(df > 0, scale > 0)
+  structure(list(family = "halft", df = df, scale = scale), class = "smoothbp_prior")
+}
+
+#' Resolution-aware GP lengthscale prior (default for `rho` in [gp_priors()])
+#'
+#' A log-normal on the GP lengthscale whose location and scale are set from the data's
+#' time grid: the band runs from the median inter-point spacing (below which the GP
+#' cannot be resolved and absorbs observation noise, biasing the noise SD low) to the
+#' range (above which the GP is indistinguishable from a constant). Prevents the
+#' sub-resolution regime that a fixed, scale-blind lengthscale prior admits.
+#'
+#' @return A `smoothbp_prior` object.
+#' @export
+prior_lengthscale <- function() {
+  structure(list(family = "lengthscale"), class = "smoothbp_prior")
+}
+
+# Integer family codes shared with the Rust sampler (see log_scale_prior()).
+.gp_prior_code <- c(lognormal = 0L, halfnormal = 1L, halfcauchy = 2L,
+                    invgamma = 3L, gamma = 4L, halft = 5L, lengthscale = 6L)
+
+# Encode a GP hyperprior as c(family_code, p1, p2) for the FFI.
+.gp_prior_encode <- function(p) {
+  vals <- switch(p$family,
+    lognormal   = c(p$meanlog, p$sdlog),
+    halfnormal  = c(p$sd, 0),
+    halfcauchy  = c(p$scale, 0),
+    invgamma    = c(p$shape, p$scale),
+    gamma       = c(p$shape, p$scale),
+    halft       = c(p$df, p$scale),
+    lengthscale = c(0, 0),
+    stop(sprintf("Unsupported GP prior family '%s'.", p$family)))
+  as.double(c(.gp_prior_code[[p$family]], vals))
+}
+
+#' Priors for the latent Gaussian-process hyperparameters
+#'
+#' Bundle of priors for a latent-GP block (see [latent_gp()]). Each prior compiles to
+#' a fast, closed-form log-density on the log scale, so the sampler stays exact and
+#' cannot panic on an arbitrary distribution.
+#'
+#' @param alpha Prior for the GP marginal SD. A standard-deviation family:
+#'   [prior_lognormal()], [prior_halfnormal()], [prior_halfcauchy()], [prior_halft()],
+#'   or [prior_gamma()].
+#' @param rho Prior for the GP lengthscale: [prior_lengthscale()] (resolution-aware,
+#'   the recommended default), [prior_lognormal()], [prior_invgamma()] (Betancourt's
+#'   lengthscale prior), [prior_gamma()], or [prior_halft()].
+#' @param sigma_x Prior for the GP observation-noise SD. Same family set as `alpha`.
+#'
+#' @details Inverse-gamma is offered only for `rho` (directly on the lengthscale); it
+#'   is deliberately not offered for the SD slots, where it is conventionally placed on
+#'   the variance and would be ambiguous.
+#'
+#' @return A `gp_priors` object.
+#' @export
+gp_priors <- function(alpha   = prior_lognormal(0, 1),
+                      rho     = prior_lengthscale(),
+                      sigma_x = prior_lognormal(-1, 1)) {
+  sd_ok  <- c("lognormal", "halfnormal", "halfcauchy", "halft", "gamma")
+  rho_ok <- c("lengthscale", "lognormal", "invgamma", "gamma", "halft")
+  chk <- function(p, nm, ok) {
+    if (!inherits(p, "smoothbp_prior"))
+      stop(sprintf("`%s` must be a prior object (e.g. prior_lognormal()).", nm))
+    if (!p$family %in% ok)
+      stop(sprintf("`%s` prior family '%s' is not supported; choose one of: %s.",
+                   nm, p$family, paste(ok, collapse = ", ")))
+  }
+  chk(alpha, "alpha", sd_ok)
+  chk(rho, "rho", rho_ok)
+  chk(sigma_x, "sigma_x", sd_ok)
+  structure(list(alpha = alpha, rho = rho, sigma_x = sigma_x), class = "gp_priors")
+}
+
 #' @export
 print.smoothbp_prior <- function(x, ...) {
   if (x$family == "normal") {
@@ -101,6 +209,23 @@ print.smoothbp_prior <- function(x, ...) {
     cat(sprintf("Gamma(shape=%g, scale=%g)\n", x$shape, x$scale))
   } else if (x$family == "halfcauchy") {
     cat(sprintf("HalfCauchy(scale=%g)\n", x$scale))
+  } else if (x$family == "lognormal") {
+    cat(sprintf("LogNormal(meanlog=%g, sdlog=%g)\n", x$meanlog, x$sdlog))
+  } else if (x$family == "halfnormal") {
+    cat(sprintf("HalfNormal(sd=%g)\n", x$sd))
+  } else if (x$family == "halft") {
+    cat(sprintf("HalfT(df=%g, scale=%g)\n", x$df, x$scale))
+  } else if (x$family == "lengthscale") {
+    cat("Lengthscale(resolution-aware)\n")
+  }
+  invisible(x)
+}
+
+#' @export
+print.gp_priors <- function(x, ...) {
+  cat("GP hyperpriors:\n")
+  for (nm in c("alpha", "rho", "sigma_x")) {
+    cat(sprintf("  %-8s: ", nm)); print(x[[nm]])
   }
   invisible(x)
 }

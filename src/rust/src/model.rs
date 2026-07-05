@@ -35,22 +35,42 @@ pub struct ModelData {
     pub latent_gps: Vec<GpData>,
 }
 
+/// A GP hyperparameter prior, evaluated in log-space as a closed-form log-density
+/// (see log_scale_prior). family: 0 lognormal, 1 half-normal, 2 half-Cauchy,
+/// 3 inverse-gamma, 4 gamma, 5 half-t, 6 resolution-aware lengthscale.
+#[derive(Clone, Copy)]
+pub struct GpPrior {
+    pub family: u8,
+    pub p1: f64,
+    pub p2: f64,
+}
+
+impl GpPrior {
+    pub fn lognormal(m: f64, s: f64) -> Self { GpPrior { family: 0, p1: m, p2: s } }
+    pub fn lengthscale() -> Self { GpPrior { family: 6, p1: 0.0, p2: 0.0 } }
+}
+
 pub struct GpData {
     pub name: String,
     pub obs_time: Vec<f64>,
     pub obs_val: Vec<f64>,
     pub obs_group: Vec<usize>,
-    
+
     pub trt_time: Vec<f64>,
     pub trt_group: Vec<usize>,
-    
+
     pub out_time: Vec<f64>,
     pub out_group: Vec<usize>,
-    
+
     pub p_b0_idx: i32,
     pub p_b1_idx: i32,
     pub p_prop_idx: i32,
-    
+
+    // Hyperpriors for (alpha, rho, sigma_x).
+    pub alpha_prior: GpPrior,
+    pub rho_prior: GpPrior,
+    pub sigma_x_prior: GpPrior,
+
     // Processed data per subject
     pub subjects: Vec<GpSubjectData>,
 }
