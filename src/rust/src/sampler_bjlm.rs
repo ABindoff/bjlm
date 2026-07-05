@@ -599,16 +599,23 @@ fn compute_ll_noncentered(
 // f = L z against them (Murray-Adams informative-likelihood regime). The exact fix
 // is to MARGINALISE f (door-1 map taken to marginalisation): the hyperparameters see
 // the clean f-integrated marginal N(v; 0, A K A^T + P^{-1}) with NO funnel, then f is
-// redrawn from its exact Gaussian conditional f | theta, data. A GP that also feeds the
-// (logistic) propensity is handled by Polya-Gamma augmentation: conditional on the PG
-// variables the propensity term is Gaussian in f too, so it becomes one more pseudo-
-// observation and the marginal stays exact (Polson, Scott & Windle 2013). Requires a
-// Gaussian OUTCOME (that term must be Gaussian to marginalise f); BJLM_GP_NO_COLLAPSE=1
-// forces the whitened-conditional path (for reproducibility / A-B comparison).
+// redrawn from its exact Gaussian conditional f | theta, data. Non-Gaussian terms --
+// a Binomial/NB OUTCOME, or a GP that feeds the (logistic) propensity -- are handled by
+// Polya-Gamma augmentation: conditional on the PG variables each such term is Gaussian
+// in f too, so it becomes one more pseudo-observation and the marginal stays exact
+// (Polson, Scott & Windle 2013). BJLM_GP_NO_COLLAPSE=1 forces the whitened-conditional
+// path (for reproducibility / A-B comparison).
 fn gp_collapsible(outcome_data: &ModelData) -> bool {
+    // Gaussian and Binomial outcomes collapse exactly (Binomial via Polya-Gamma, and a
+    // GP in the propensity likewise). NB outcome-PG is implemented (see the dispatch in
+    // sample_gp_hyper_collapsed) but currently UNSTABLE: the count likelihood's large,
+    // per-iteration PG weights can trap the field in an over-fit state (short lengthscale,
+    // sigma_x -> 0), so NB falls back to the whitened path pending a proper fix.
+    // BJLM_GP_COLLAPSE_NB=1 opts an NB model back into the (experimental) collapse.
     std::env::var("BJLM_GP_NO_COLLAPSE").is_err()
-        && outcome_data.outcome_family == crate::model::OutcomeFamily::Gaussian
         && !outcome_data.latent_gps.is_empty()
+        && (outcome_data.outcome_family != crate::model::OutcomeFamily::NegativeBinomial
+            || std::env::var("BJLM_GP_COLLAPSE_NB").is_ok())
 }
 
 fn sample_gp_hyper_collapsed(
@@ -622,7 +629,6 @@ fn sample_gp_hyper_collapsed(
     rng: &mut StdRng,
 ) {
     use crate::model::OutcomeFamily;
-    if outcome_data.outcome_family != OutcomeFamily::Gaussian { return; }
     let normal = Normal::new(0.0, 1.0).unwrap();
     let n = outcome_data.n;
     let inv_sig2_y = 1.0 / (outcome_state.sigma * outcome_state.sigma);
@@ -713,7 +719,24 @@ fn sample_gp_hyper_collapsed(
                 let t_val = if let Some(c) = &center { outcome_data.tau[gidx] - c[gidx] } else { outcome_data.tau[gidx] };
                 let eff_beta = beta_b0 + beta_b1 * t_val;
                 let mu_no = mu_full[gidx] - eff_beta * cur_x[tidx];
-                obs.push(PObs { tidx, c: eff_beta, v: outcome_data.y[gidx] - mu_no, p_fixed: weights_obs[gidx] * inv_sig2_y, is_xobs: false });
+                // Gaussian: direct pseudo-obs. Binomial/NB: Polya-Gamma makes the
+                // outcome term Gaussian in the logit/log-scale predictor mu = mu_no +
+                // eff_beta*f, so it too is a Gaussian pseudo-obs of eff_beta*f.
+                let (v, p) = match outcome_data.outcome_family {
+                    OutcomeFamily::Gaussian => {
+                        (outcome_data.y[gidx] - mu_no, weights_obs[gidx] * inv_sig2_y)
+                    }
+                    OutcomeFamily::Binomial => {
+                        let omega = crate::polya_gamma::sample_pg(1.0, mu_full[gidx], rng).max(1e-9);
+                        ((outcome_data.y[gidx] - 0.5) / omega - mu_no, omega)
+                    }
+                    OutcomeFamily::NegativeBinomial => {
+                        let rp = outcome_state.r;
+                        let omega = crate::polya_gamma::sample_pg(outcome_data.y[gidx] + rp, mu_full[gidx], rng).max(1e-9);
+                        ((outcome_data.y[gidx] - rp) / 2.0 / omega - mu_no, omega)
+                    }
+                };
+                obs.push(PObs { tidx, c: eff_beta, v, p_fixed: p, is_xobs: false });
             }
             // Propensity contribution via Polya-Gamma: with omega ~ PG(1, eta), the logistic
             // term is a Gaussian pseudo-obs of beta_prop*f at the baseline time index.
