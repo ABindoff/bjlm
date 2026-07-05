@@ -599,24 +599,23 @@ fn compute_ll_noncentered(
 // f = L z against them (Murray-Adams informative-likelihood regime). The exact fix
 // is to MARGINALISE f (door-1 map taken to marginalisation): the hyperparameters see
 // the clean f-integrated marginal N(v; 0, A K A^T + P^{-1}) with NO funnel, then f is
-// redrawn from its exact Gaussian conditional f | theta, data. Eligible only when the
-// outcome is Gaussian and the GP does not enter the (logistic) propensity.
-// The collapsed GP hyperparameter update is exact (and a large mixing win) when the
-// latent field's whole likelihood is Gaussian: Gaussian outcome AND no GP feeds the
-// (logistic) propensity. Used by default in that case; BJLM_GP_NO_COLLAPSE=1 forces
-// the whitened-conditional path (for reproducibility / A-B comparison).
+// redrawn from its exact Gaussian conditional f | theta, data. A GP that also feeds the
+// (logistic) propensity is handled by Polya-Gamma augmentation: conditional on the PG
+// variables the propensity term is Gaussian in f too, so it becomes one more pseudo-
+// observation and the marginal stays exact (Polson, Scott & Windle 2013). Requires a
+// Gaussian OUTCOME (that term must be Gaussian to marginalise f); BJLM_GP_NO_COLLAPSE=1
+// forces the whitened-conditional path (for reproducibility / A-B comparison).
 fn gp_collapsible(outcome_data: &ModelData) -> bool {
     std::env::var("BJLM_GP_NO_COLLAPSE").is_err()
         && outcome_data.outcome_family == crate::model::OutcomeFamily::Gaussian
         && !outcome_data.latent_gps.is_empty()
-        && outcome_data.latent_gps.iter().all(|gp| gp.p_prop_idx < 0)
 }
 
 fn sample_gp_hyper_collapsed(
     outcome_data: &ModelData,
-    _prop_data: &PropensityData,
+    prop_data: &PropensityData,
     outcome_state: &mut State,
-    _prop_state: &PropensityState,
+    prop_state: &PropensityState,
     weights_obs: &[f64],
     adapts: &mut [GpHyperAdapt],
     adapting: bool,
@@ -660,13 +659,37 @@ fn sample_gp_hyper_collapsed(
         }
     }
 
+    // Propensity linear predictor at baseline, at the current field. Mirrors
+    // propensity::get_x: a GP design column contributes the LATENT value (not the
+    // placeholder x_prop entry), so there is no double counting. Used to Polya-Gamma
+    // augment any GP that feeds the propensity.
+    let mut eta_full = vec![0.0f64; prop_data.n_subjects];
+    for i in 0..prop_data.n_subjects {
+        let mut e = 0.0;
+        for j in 0..prop_data.p_prop {
+            let mut gp_col = false;
+            for (g_idx, g) in outcome_data.latent_gps.iter().enumerate() {
+                if g.p_prop_idx == j as i32 {
+                    gp_col = true;
+                    let subj = &g.subjects[i];
+                    if !subj.trt_indices.is_empty() {
+                        e += outcome_state.gp_states[g_idx].x[i][subj.trt_indices[0]] * prop_state.alpha[j];
+                    }
+                    break;
+                }
+            }
+            if !gp_col {
+                e += prop_data.x_prop[(i, j)] * prop_state.alpha[j];
+            }
+        }
+        eta_full[i] = e;
+    }
+
     // Gaussian pseudo-observation of f: value v, coefficient c (f enters as c*f[tidx]),
     // precision p (fixed part, or -1.0 to mark an X_obs row whose precision is 1/sigma_x^2).
     struct PObs { tidx: usize, c: f64, v: f64, p_fixed: f64, is_xobs: bool }
 
     for (gp_idx, gp) in outcome_data.latent_gps.iter().enumerate() {
-        if gp.p_prop_idx >= 0 { continue; } // GP feeds logistic propensity -> not collapsible here
-
         let beta_b0 = if gp.p_b0_idx >= 0 { outcome_state.beta_b0[gp.p_b0_idx as usize] } else { 0.0 };
         let beta_b1 = if gp.p_b1_idx >= 0 && outcome_state.gamma_b1[gp.p_b1_idx as usize] {
             outcome_state.beta_b1[gp.p_b1_idx as usize]
@@ -691,6 +714,16 @@ fn sample_gp_hyper_collapsed(
                 let eff_beta = beta_b0 + beta_b1 * t_val;
                 let mu_no = mu_full[gidx] - eff_beta * cur_x[tidx];
                 obs.push(PObs { tidx, c: eff_beta, v: outcome_data.y[gidx] - mu_no, p_fixed: weights_obs[gidx] * inv_sig2_y, is_xobs: false });
+            }
+            // Propensity contribution via Polya-Gamma: with omega ~ PG(1, eta), the logistic
+            // term is a Gaussian pseudo-obs of beta_prop*f at the baseline time index.
+            if gp.p_prop_idx >= 0 && !subj.trt_indices.is_empty() && s < eta_full.len() {
+                let beta_prop = prop_state.alpha[gp.p_prop_idx as usize];
+                let tidx = subj.trt_indices[0];
+                let eta_no = eta_full[s] - beta_prop * cur_x[tidx];
+                let omega_pg = crate::polya_gamma::sample_pg(1.0, eta_full[s], rng).max(1e-9);
+                let kappa = prop_data.treatment[s] - 0.5;
+                obs.push(PObs { tidx, c: beta_prop, v: kappa / omega_pg - eta_no, p_fixed: omega_pg, is_xobs: false });
             }
             subj_obs.push(obs);
         }
