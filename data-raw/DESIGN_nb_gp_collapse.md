@@ -52,9 +52,50 @@ Marginalising `f` against `X_obs` ONLY for the hyperparameter step is BIASED: it
 `p(theta | X_obs)`, dropping `y`'s (indirect) information about `theta`. The correct
 marginal is `p(theta, b0_gp | X_obs, y-PG)`, which the primary fix above computes.
 
+## Revised plan after an independent critique (Fable)
+The critique refined the diagnosis and changed the recommendation:
+
+- The runaway is a CROSS-SWEEP feedback loop (omega frozen given current f, f redrawn,
+  omega refreshed -> lagging, overshooting pseudo-data), and the escape routes are the
+  two SE-kernel DEGENERACIES: `rho->0, sigma_x->0` (f = X_obs exactly) and `rho->inf`
+  (f -> per-subject intercept, X variance dumped into sigma_x). These live in theta
+  ALONE, so freeing b0 helps but does not SEAL them. The engine is the `omega->0` tilt
+  `exp(kappa*psi)`, an anti-shrinkage force that rewards larger GP variance -- inherent
+  to marginalising f against a count likelihood.
+- Joint (theta, b0) collapse is VALID and removes the acute initiation mechanism, but is
+  incomplete (degeneracies remain; needs proper priors both rho tails; limited mixing
+  win because theta-mixing is now rate-limited by the omega<->f coupling for large counts).
+- RECOMMENDED, structurally-right fix = the conditional-transport reparameterisation
+  (Option 2 above): `f = mu_f(theta; X_obs) + L_f(theta) z`, update (theta, b0, z)
+  against the EXACT NB likelihood. It keeps the collapse only where it is exact (the
+  Gaussian X_obs sub-likelihood) -> no lagging pseudo-data, no anti-shrinkage tilt, no
+  random per-sweep target. This is Murray-Adams surrogate data with X_obs as the free
+  surrogate.
+
+Target factorisation for the transport route:
+    p(theta, b0, z | X_obs, y) ∝ p(theta) p(b0) N(z; 0, I)
+        * N(X_obs; 0, alpha^2 R(rho) + sigma_x^2 I)      # the sub-marginal -- REQUIRED
+        * p_NB(y | f = mu_f(theta) + L_f(theta) z, b0)
+with mu_f = K (K + sigma_x^2 I)^{-1} X_obs, Sigma_f = (K^{-1} + sigma_x^{-2} I)^{-1},
+L_f = chol(Sigma_f), K = alpha^2 R(rho).
+
+MUST-GET details:
+- theta-acceptance MUST include the sub-marginal N(X_obs; ...); omit it -> wrong posterior.
+- NEVER form kappa/omega (overflows in the omega->0 tilt regime); use natural-parameter
+  (potential kappa, precision omega) / info form throughout.
+- b0 sign IS identified (X-vs-outcome cross-cov is linear in b0): normal RW that crosses
+  zero, NOT log b0.
+- proper priors on rho (BOTH tails) and half-normal-type on alpha, sigma_x to seal the
+  kernel degeneracies; proper prior on b0.
+- z | theta, b0, y updated by ESS (prior N(0,I), NB likelihood) or PG-Gaussian.
+- if the NB dispersion r is updated while omega is frozen, that needs CRT augmentation.
+
 ## Validation plan
-1. Implement the primary fix; keep NB gated behind `BJLM_GP_COLLAPSE_NB=1`.
-2. NB-GP A/B vs whitened: require (a) NO runaway, (b) recovery agreement with a LONG
-   whitened reference run, (c) ESS improvement on the GP hyperparameters.
-3. If it agrees and is stable, ungate NB.
-4. SBC (NB outcome + latent GP, no IPW) for calibration, as for the Gaussian case.
+1. R PROTOTYPE the transport sampler first (de-risk the sub-marginal + recovery), on a
+   small NB + GP problem in the HIGH-COUNT regime.
+2. Confirm: no runaway; recovers alpha/rho/sigma_x/b0_gp; agrees with a long whitened
+   reference.
+3. Implement in Rust; keep NB gated behind `BJLM_GP_COLLAPSE_NB=1` until certified.
+4. SBC (NB outcome + latent GP, no IPW) SPECIFICALLY in the high-count regime -- Fable's
+   warning: that is where a wrong fix looks fine but is miscalibrated.
+5. If calibrated, ungate NB.
