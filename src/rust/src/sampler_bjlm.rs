@@ -605,17 +605,23 @@ fn compute_ll_noncentered(
 // in f too, so it becomes one more pseudo-observation and the marginal stays exact
 // (Polson, Scott & Windle 2013). BJLM_GP_NO_COLLAPSE=1 forces the whitened-conditional
 // path (for reproducibility / A-B comparison).
+// Gaussian and Binomial GP outcomes collapse exactly (Binomial via Polya-Gamma, and a
+// GP in the propensity likewise). NB never collapses (the marginalising collapse runs
+// away): it defaults to the whitened-conditional path (correct, slow).
 fn gp_collapsible(outcome_data: &ModelData) -> bool {
-    // Gaussian and Binomial outcomes collapse exactly (Binomial via Polya-Gamma, and a
-    // GP in the propensity likewise). NB outcome-PG is implemented (see the dispatch in
-    // sample_gp_hyper_collapsed) but currently UNSTABLE: the count likelihood's large,
-    // per-iteration PG weights can trap the field in an over-fit state (short lengthscale,
-    // sigma_x -> 0), so NB falls back to the whitened path pending a proper fix.
-    // BJLM_GP_COLLAPSE_NB=1 opts an NB model back into the (experimental) collapse.
     std::env::var("BJLM_GP_NO_COLLAPSE").is_err()
         && !outcome_data.latent_gps.is_empty()
-        && (outcome_data.outcome_family != crate::model::OutcomeFamily::NegativeBinomial
-            || std::env::var("BJLM_GP_COLLAPSE_NB").is_ok())
+        && outcome_data.outcome_family != crate::model::OutcomeFamily::NegativeBinomial
+}
+
+// Conditional-transport GP update for NB (sample_gp_transport). The approach is validated
+// in R (data-raw/prototype_transport_nb_gp.R) but the Rust port is still WIP: it can
+// diverge in the full model, so it is OPT-IN via BJLM_GP_TRANSPORT=1 while it is debugged.
+// Default NB path is the correct whitened-conditional sampler.
+fn gp_use_transport(outcome_data: &ModelData) -> bool {
+    std::env::var("BJLM_GP_TRANSPORT").is_ok()
+        && !outcome_data.latent_gps.is_empty()
+        && outcome_data.outcome_family == crate::model::OutcomeFamily::NegativeBinomial
 }
 
 fn sample_gp_hyper_collapsed(
@@ -837,6 +843,210 @@ fn sample_gp_hyper_collapsed(
             let draw = lchol.l().transpose().solve_upper_triangular(&xi).unwrap_or_else(|| DVector::zeros(nt));
             let f_new = &mean + draw;
             outcome_state.gp_states[gp_idx].x[s] = f_new.iter().cloned().collect();
+        }
+    }
+}
+
+// Per-subject GP-regression pieces for the conditional transport: the posterior of the
+// field f (at all its time points) given the noisy measurement X_obs (at obs_idx):
+//   mu_f = K_ao (K_oo + sx^2 I)^{-1} X_obs,   Sigma_f = K - K_ao (K_oo+sx^2 I)^{-1} K_ao^T.
+// Returns mu_w = K_ao (K_oo+sx^2 I)^{-1} (so mu_f = mu_w * X_obs), the Cholesky L_f of
+// Sigma_f, and the pieces of the X_obs sub-marginal N(X_obs; 0, K_oo + sx^2 I).
+struct TransportPieces { mu_w: DMatrix<f64>, lf: DMatrix<f64>, koo_inv: DMatrix<f64>, logdet_oo: f64 }
+
+fn transport_pieces(times: &[f64], obs_idx: &[usize], alpha: f64, rho: f64, sigma_x: f64) -> Option<TransportPieces> {
+    let nt = times.len();
+    let no = obs_idx.len();
+    if nt == 0 || no == 0 { return None; }
+    let k = crate::gp::compute_cov_matrix(times, alpha, rho, 1e-6);
+    let mut koo = DMatrix::<f64>::zeros(no, no);
+    for a in 0..no {
+        for b in 0..no { koo[(a, b)] = k[(obs_idx[a], obs_idx[b])]; }
+        koo[(a, a)] += sigma_x * sigma_x;
+    }
+    let ch = koo.cholesky()?;
+    let koo_inv = ch.inverse();
+    let logdet_oo = 2.0 * ch.l().diagonal().iter().map(|d| d.ln()).sum::<f64>();
+    let mut kao = DMatrix::<f64>::zeros(nt, no);
+    for t in 0..nt { for b in 0..no { kao[(t, b)] = k[(t, obs_idx[b])]; } }
+    let mu_w = &kao * &koo_inv;
+    let mut sigf = &k - &mu_w * kao.transpose();
+    for t in 0..nt { sigf[(t, t)] += 1e-9; }
+    let lf = sigf.cholesky()?.l();
+    Some(TransportPieces { mu_w, lf, koo_inv, logdet_oo })
+}
+
+// Conditional-transport GP update (fibr door-1 on the CLEAN X_obs sub-likelihood; see
+// data-raw/DESIGN_nb_gp_collapse.md). Whitens the field against its X_obs-conditional
+// posterior, f = mu_f(theta) + L_f(theta) z, and updates (theta, z) against the EXACT
+// outcome/propensity likelihood with the X_obs sub-marginal N(X_obs; 0, K_oo + sx^2 I)
+// in the theta acceptance. Stable for non-Gaussian (NB) outcomes where the marginalising
+// collapse runs away. b0_gp stays with the linear-coefficient sampler (the field is
+// pinned by X_obs, so its scale is well identified).
+fn sample_gp_transport(
+    outcome_data: &ModelData,
+    prop_data: &PropensityData,
+    outcome_state: &mut State,
+    prop_state: &PropensityState,
+    weights_obs: &[f64],
+    adapts: &mut [GpHyperAdapt],
+    adapting: bool,
+    rng: &mut StdRng,
+) {
+    use crate::model::OutcomeFamily;
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    let ln_2pi = (2.0 * std::f64::consts::PI).ln();
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let sigma2 = outcome_state.sigma * outcome_state.sigma;
+    let r_param = outcome_state.r;
+    let mu_no = outcome_state.means(outcome_data); // outcome linear predictor excl. GP
+
+    for (gp_idx, gp) in outcome_data.latent_gps.iter().enumerate() {
+        let ns = gp.subjects.len();
+        let beta_b0 = if gp.p_b0_idx >= 0 { outcome_state.beta_b0[gp.p_b0_idx as usize] } else { 0.0 };
+        let beta_b1 = if gp.p_b1_idx >= 0 && outcome_state.gamma_b1[gp.p_b1_idx as usize] {
+            outcome_state.beta_b1[gp.p_b1_idx as usize] } else { 0.0 };
+        let beta_prop = if gp.p_prop_idx >= 0 { prop_state.alpha[gp.p_prop_idx as usize] } else { 0.0 };
+        let center = if outcome_data.n_breakpoints > 0 {
+            Some(outcome_state.omega_vec(0, &outcome_data.x_om[0])) } else { None };
+
+        // no-GP propensity linear predictor per subject (GP design columns excluded).
+        let mut eta_prop_no = vec![0.0f64; prop_data.n_subjects];
+        if gp.p_prop_idx >= 0 {
+            for i in 0..prop_data.n_subjects {
+                let mut e = 0.0;
+                for j in 0..prop_data.p_prop {
+                    let is_gp = outcome_data.latent_gps.iter().any(|g| g.p_prop_idx == j as i32);
+                    if !is_gp { e += prop_data.x_prop[(i, j)] * prop_state.alpha[j]; }
+                }
+                eta_prop_no[i] = e;
+            }
+        }
+
+        // outcome + propensity log-likelihood for subject s given its field values f.
+        let field_ll = |s: usize, f: &[f64]| -> f64 {
+            let subj = &gp.subjects[s];
+            let mut ll = 0.0;
+            for i in 0..subj.out_indices.len() {
+                let tidx = subj.out_indices[i];
+                let gidx = subj.out_global[i];
+                let t_val = if let Some(c) = &center { outcome_data.tau[gidx] - c[gidx] } else { outcome_data.tau[gidx] };
+                let eff = beta_b0 + beta_b1 * t_val;
+                let eta = mu_no[gidx] + eff * f[tidx];
+                let w = weights_obs[gidx];
+                let y = outcome_data.y[gidx];
+                match outcome_data.outcome_family {
+                    OutcomeFamily::Gaussian => { let e = y - eta; ll += -0.5 * w * e * e / sigma2; }
+                    OutcomeFamily::Binomial => { ll += w * (y * eta - softplus(eta)); }
+                    OutcomeFamily::NegativeBinomial => { ll += w * (y * eta - (y + r_param) * softplus(eta)); }
+                }
+            }
+            if gp.p_prop_idx >= 0 && !subj.trt_indices.is_empty() {
+                let tidx = subj.trt_indices[0];
+                let eta = eta_prop_no[s] + beta_prop * f[tidx];
+                ll += prop_data.treatment[s] * eta - softplus(eta);
+            }
+            ll
+        };
+
+        let a0 = outcome_state.gp_states[gp_idx].alpha;
+        let r0 = outcome_state.gp_states[gp_idx].rho;
+        let s0 = outcome_state.gp_states[gp_idx].sigma_x;
+
+        // Per subject: obs_idx list, X_obs vector, pieces(theta0), z (whiten current f).
+        let mut sub_obs_idx: Vec<Vec<usize>> = Vec::with_capacity(ns);
+        let mut sub_xobs: Vec<DVector<f64>> = Vec::with_capacity(ns);
+        let mut pieces0: Vec<Option<TransportPieces>> = Vec::with_capacity(ns);
+        let mut zs: Vec<DVector<f64>> = Vec::with_capacity(ns);
+        for s in 0..ns {
+            let subj = &gp.subjects[s];
+            let nt = subj.times.len();
+            let oi: Vec<usize> = subj.obs_indices.clone();
+            let xo = DVector::from_iterator(oi.len(), (0..oi.len()).map(|i| gp.obs_val[subj.obs_global[i]]));
+            let pc = transport_pieces(&subj.times, &oi, a0, r0, s0);
+            let z = if let Some(ref p) = pc {
+                let mu_f = &p.mu_w * &xo;
+                let f = DVector::from_column_slice(&outcome_state.gp_states[gp_idx].x[s]);
+                p.lf.clone().solve_lower_triangular(&(f - mu_f)).unwrap_or_else(|| DVector::zeros(nt))
+            } else { DVector::zeros(nt) };
+            sub_obs_idx.push(oi); sub_xobs.push(xo); pieces0.push(pc); zs.push(z);
+        }
+
+        // theta target = sum_s [ X_obs sub-marginal + field_ll(f = mu_f + L_f z) ] + logprior.
+        let (rloc, rscale) = gp_rho_log_prior_params(gp);
+        let target = |a: f64, r: f64, sx: f64,
+                      pieces: &[Option<TransportPieces>], zref: &[DVector<f64>],
+                      fields: &mut Vec<DVector<f64>>| -> f64 {
+            let mut t = log_scale_prior(a, &gp.alpha_prior, rloc, rscale)
+                + log_scale_prior(r, &gp.rho_prior, rloc, rscale)
+                + log_scale_prior(sx, &gp.sigma_x_prior, rloc, rscale);
+            for s in 0..ns {
+                if let Some(ref p) = pieces[s] {
+                    let mu_f = &p.mu_w * &sub_xobs[s];
+                    let f = &mu_f + &p.lf * &zref[s];
+                    let sm = -0.5 * (sub_xobs[s].dot(&(&p.koo_inv * &sub_xobs[s])) + p.logdet_oo
+                        + (sub_obs_idx[s].len() as f64) * ln_2pi);
+                    t += sm + field_ll(s, f.as_slice());
+                    fields[s] = f;
+                } else { fields[s] = DVector::zeros(0); }
+            }
+            t
+        };
+        let mut fields0: Vec<DVector<f64>> = vec![DVector::zeros(0); ns];
+        let cur = target(a0, r0, s0, &pieces0, &zs, &mut fields0);
+
+        let eps = adapts[gp_idx].joint_da.epsilon;
+        let ap = (a0.ln() + eps * adapts[gp_idx].inv_mass[0].sqrt() * normal.sample(rng)).exp();
+        let rp = (r0.ln() + eps * adapts[gp_idx].inv_mass[1].sqrt() * normal.sample(rng)).exp();
+        let sp = (s0.ln() + eps * adapts[gp_idx].inv_mass[2].sqrt() * normal.sample(rng)).exp();
+        let mut acc = 0.0;
+        let mut pieces_use = pieces0;
+        if ap.is_finite() && rp.is_finite() && sp.is_finite() && ap > 0.0 && rp > 0.0 && sp > 0.0 {
+            let pieces_p: Vec<Option<TransportPieces>> = (0..ns)
+                .map(|s| transport_pieces(&gp.subjects[s].times, &sub_obs_idx[s], ap, rp, sp)).collect();
+            let mut fields_p: Vec<DVector<f64>> = vec![DVector::zeros(0); ns];
+            let prop = target(ap, rp, sp, &pieces_p, &zs, &mut fields_p);
+            let lr = prop - cur;
+            acc = if lr.is_nan() { 0.0 } else { lr.exp().min(1.0) };
+            if rng.gen::<f64>() < acc {
+                outcome_state.gp_states[gp_idx].alpha = ap;
+                outcome_state.gp_states[gp_idx].rho = rp;
+                outcome_state.gp_states[gp_idx].sigma_x = sp;
+                for s in 0..ns {
+                    if pieces_p[s].is_some() {
+                        outcome_state.gp_states[gp_idx].x[s] = fields_p[s].iter().cloned().collect();
+                    }
+                }
+                pieces_use = pieces_p;
+            }
+        }
+        if adapting { adapts[gp_idx].joint_da.update(acc); }
+
+        // z-step: elliptical slice sampling per subject (prior N(0,I) on z, likelihood
+        // = the outcome/propensity at f = mu_f + L_f z). X_obs is already absorbed.
+        for s in 0..ns {
+            if let Some(ref p) = pieces_use[s] {
+                let nt = gp.subjects[s].times.len();
+                if nt == 0 { continue; }
+                let mu_f = &p.mu_w * &sub_xobs[s];
+                let cur_z = zs[s].clone();
+                let mut nu = DVector::<f64>::zeros(nt);
+                for t in 0..nt { nu[t] = normal.sample(rng); }
+                let f_cur = &mu_f + &p.lf * &cur_z;
+                let log_y = field_ll(s, f_cur.as_slice()) + rng.gen::<f64>().ln();
+                let mut ang = rng.gen::<f64>() * two_pi;
+                let (mut amin, mut amax) = (ang - two_pi, ang);
+                let mut new_z = cur_z.clone();
+                for _ in 0..40 {
+                    let zp = &cur_z * ang.cos() + &nu * ang.sin();
+                    if field_ll(s, (&mu_f + &p.lf * &zp).as_slice()) > log_y { new_z = zp; break; }
+                    if ang < 0.0 { amin = ang; } else { amax = ang; }
+                    ang = amin + rng.gen::<f64>() * (amax - amin);
+                }
+                zs[s] = new_z.clone();
+                let f_new = &mu_f + &p.lf * &new_z;
+                outcome_state.gp_states[gp_idx].x[s] = f_new.iter().cloned().collect();
+            }
         }
     }
 }
@@ -2586,18 +2796,25 @@ pub fn run_chain_bjlm(
         };
 
         // === GP BLOCK ===
-        sample_gp_state(
-            outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng,
-        );
-        if gp_collapsible(outcome_data) {
-            // fibr collapsed hyperparameter update (marginalise the Gaussian GP fibre).
-            sample_gp_hyper_collapsed(
+        if gp_use_transport(outcome_data) {
+            // NB: conditional transport (field + hyperparameters together, X_obs absorbed).
+            sample_gp_transport(
                 outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut gp_hyper_adapts, iter < n_warmup, &mut rng,
             );
         } else {
-            sample_gp_hyperparameters(
-                outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng, &mut gp_hyper_adapts, iter < n_warmup,
+            sample_gp_state(
+                outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng,
             );
+            if gp_collapsible(outcome_data) {
+                // fibr collapsed hyperparameter update (marginalise the Gaussian GP fibre).
+                sample_gp_hyper_collapsed(
+                    outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut gp_hyper_adapts, iter < n_warmup, &mut rng,
+                );
+            } else {
+                sample_gp_hyperparameters(
+                    outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng, &mut gp_hyper_adapts, iter < n_warmup,
+                );
+            }
         }
 
         // === OUTCOME BLOCK (weighted) ===
@@ -2907,11 +3124,15 @@ pub fn run_chain_bjlm_ss(
         };
 
         // === GP BLOCK ===
-        sample_gp_state(outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng);
-        if gp_collapsible(outcome_data) {
-            sample_gp_hyper_collapsed(outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut gp_hyper_adapts, iter < n_warmup, &mut rng);
+        if gp_use_transport(outcome_data) {
+            sample_gp_transport(outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut gp_hyper_adapts, iter < n_warmup, &mut rng);
         } else {
-            sample_gp_hyperparameters(outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng, &mut gp_hyper_adapts, iter < n_warmup);
+            sample_gp_state(outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng);
+            if gp_collapsible(outcome_data) {
+                sample_gp_hyper_collapsed(outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut gp_hyper_adapts, iter < n_warmup, &mut rng);
+            } else {
+                sample_gp_hyperparameters(outcome_data, prop_data, &mut outcome_state, &prop_state, &weights_obs, &mut rng, &mut gp_hyper_adapts, iter < n_warmup);
+            }
         }
 
         // === OUTCOME BLOCK (weighted) ===
