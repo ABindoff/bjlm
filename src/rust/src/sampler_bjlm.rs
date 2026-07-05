@@ -435,6 +435,24 @@ fn sample_gp_state(
 }
 
 
+// Resolution-aware lengthscale prior: ln(rho) ~ N(loc, scale) with the band set by
+// the data's own time grid -- from the median gap (below which a GP cannot be resolved
+// and it absorbs observation noise, biasing sigma_x low) up to the range (above which a
+// GP is indistinguishable from a constant). A fixed lognormal(0,1) is blind to the time
+// scale; on a [0,10] grid it sits below resolution and lets sigma_x collapse.
+fn gp_rho_log_prior_params(gp: &crate::model::GpData) -> (f64, f64) {
+    let times = match gp.subjects.first() { Some(s) => &s.times, None => return (0.0, 1.0) };
+    if times.len() < 2 { return (0.0, 1.0); }
+    let range = times[times.len() - 1] - times[0];
+    let mut gaps: Vec<f64> = times.windows(2).map(|w| w[1] - w[0]).collect();
+    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let spacing = gaps[gaps.len() / 2].max(1e-6);
+    if !(range > spacing) { return (0.0, 1.0); }
+    let loc = 0.5 * (spacing.ln() + range.ln());          // geometric mean of the band
+    let scale = (0.25 * (range / spacing).ln()).max(0.35); // ~+/-2 sd spans [spacing, range]
+    (loc, scale)
+}
+
 fn compute_ll_noncentered(
     a: f64,
     r: f64,
@@ -547,8 +565,9 @@ fn compute_ll_noncentered(
     // (the -ln(theta) that a density-in-theta form would carry is exactly the proposal
     // Jacobian, so it is omitted here rather than added back in each accept step):
     //   ln(alpha), ln(rho) ~ N(0, 1);  ln(sigma_x) ~ N(-1, 1).
+    let (rloc, rscale) = gp_rho_log_prior_params(gp);
     ll -= 0.5 * a.ln().powi(2);
-    ll -= 0.5 * r.ln().powi(2);
+    ll -= 0.5 * ((r.ln() - rloc) / rscale).powi(2);
     ll -= 0.5 * (s.ln() + 1.0).powi(2);
 
     (ll, x_list)
@@ -688,11 +707,13 @@ fn sample_gp_hyper_collapsed(
             }
             ll
         };
-        // Hyperpriors as log-space log-densities (ln alpha, ln rho ~ N(0,1);
-        // ln sigma_x ~ N(-1,1)); the symmetric log-scale RW below needs no extra
-        // Jacobian, matching compute_ll_noncentered.
+        // Hyperpriors as log-space log-densities (ln alpha ~ N(0,1); ln sigma_x ~
+        // N(-1,1); ln rho resolution-aware, see gp_rho_log_prior_params); the symmetric
+        // log-scale RW below needs no extra Jacobian, matching compute_ll_noncentered.
+        let (rloc, rscale) = gp_rho_log_prior_params(gp);
         let log_prior = |a: f64, r: f64, sx: f64| -> f64 {
-            -0.5 * a.ln().powi(2) - 0.5 * r.ln().powi(2) - 0.5 * (sx.ln() + 1.0).powi(2)
+            -0.5 * a.ln().powi(2) - 0.5 * ((r.ln() - rloc) / rscale).powi(2)
+                - 0.5 * (sx.ln() + 1.0).powi(2)
         };
 
         let a0 = outcome_state.gp_states[gp_idx].alpha;

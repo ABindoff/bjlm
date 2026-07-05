@@ -18,13 +18,20 @@ ITER  <- as.integer(Sys.getenv("SBC_ITER", "3000"))
 
 # ---- priors (drawn == fitted) ----------------------------------------------
 rtn <- function(m, s, lb, ub) qnorm(runif(1, pnorm(lb, m, s), pnorm(ub, m, s)), m, s)
+# Resolution-aware lengthscale prior, matching gp_rho_log_prior_params() in Rust:
+# ln(rho) ~ N(loc, scale) with the band from the grid's median gap to its range.
+.gt <- seq(0, 10, length.out = 8L)                      # the simulate_bjlm time grid
+.gap <- median(diff(.gt)); .rng <- max(.gt) - min(.gt)
+RHO_LOC <- 0.5 * (log(.gap) + log(.rng))                # ~1.33
+RHO_SCALE <- max(0.35, 0.25 * log(.rng / .gap))         # ~0.49
 draw_prior <- function() list(
   b0 = rnorm(1, 0, 1), b1 = rnorm(1, 0, 0.5), delta = rnorm(1, 0, 0.8),
   omega = rtn(5, 1.5, 0.5, 9.5), rho = rtn(4, 1.5, 1, 10),
   sigma = 1 / sqrt(rgamma(1, shape = 5, rate = 2)),   # sigma^2 ~ IG(5,2)
   sigma_u = abs(rcauchy(1, 0, 0.5)),                  # half-Cauchy(0,0.5) on SD
   b0_gp = rnorm(1, 0, 1),
-  gp_alpha = exp(rnorm(1, 0, 1)), gp_rho = exp(rnorm(1, 0, 1)),
+  gp_alpha = exp(rnorm(1, 0, 1)),                     # lognormal(0,1)
+  gp_rho = exp(rnorm(1, RHO_LOC, RHO_SCALE)),         # resolution-aware
   gp_sigma_x = exp(rnorm(1, -1, 1))                   # lognormal(-1,1)
 )
 fit_priors <- bjlm_priors(outcome = smoothbp_priors(
