@@ -75,22 +75,42 @@ pub fn sample_pg1(c: f64, rng: &mut StdRng) -> f64 {
     }
 }
 
-/// Coefficients for the alternating series.
-/// a_n(x) = pi * (n + 0.5) * exp(-(n + 0.5)^2 * pi^2 * x / 2)
+/// Coefficients a_n(x) for the alternating series in Devroye's J*(1,0) sampler.
+///
+/// The series representation of the J* density is PIECEWISE (Devroye 2009;
+/// Windle et al. 2014, as in the BayesLogit reference implementation): the two
+/// forms are analytically equal but only one is a decreasing-in-`n` alternating
+/// sequence in each regime, and the accept/reject squeeze in `sample_pg1`
+/// REQUIRES that monotonicity to be a valid bound. The truncated-inverse-Gaussian
+/// proposal branch only ever produces `x < TRUNC`, so using the large-x form there
+/// (which is non-monotone for small x, e.g. a_1 > a_0 at x = 0.01) silently
+/// corrupts the accepted draws. Match the regime to `x`:
+///   x >  TRUNC:  a_n(x) = K * exp(-K^2 x / 2)
+///   x <= TRUNC:  a_n(x) = K * (pi x / 2)^(-3/2) * exp(-2 (n+1/2)^2 / x)
+/// with K = (n + 1/2) * pi.
 fn a_coef(n: u32, x: f64) -> f64 {
     let nh = n as f64 + 0.5;
-    PI * nh * (-nh * nh * PI * PI * x * 0.5).exp()
+    let k = nh * PI;
+    if x > TRUNC {
+        k * (-0.5 * k * k * x).exp()
+    } else if x > 0.0 {
+        let expnt = k.ln() - 1.5 * ((0.5 * PI).ln() + x.ln()) - 2.0 * nh * nh / x;
+        expnt.exp()
+    } else {
+        0.0
+    }
 }
 
-/// PG(1, 0) via truncated series.
-/// PG(1, 0) = sum_{k=0}^inf G_k / ((k+0.5)^2 * 4 * pi^2)
-/// where G_k ~ Exp(1).
+/// PG(1, 0) via the truncated Gamma series (Polson, Scott & Windle 2013):
+/// PG(1, 0) = sum_{k=0}^inf G_k / ((k+0.5)^2 * 2 * pi^2),  G_k ~ Exp(1).
+/// The denominator constant is 2*pi^2, not 4*pi^2: with 4*pi^2 the mean is
+/// 1/8 instead of the correct E[PG(1,0)] = 1/4 (since sum 1/(k+1/2)^2 = pi^2/2).
 fn sample_pg1_zero(rng: &mut StdRng) -> f64 {
     let mut x = 0.0;
     for k in 0..20 {
         let g: f64 = Exp1.sample(rng);
         let kh = k as f64 + 0.5;
-        x += g / (kh * kh * 4.0 * PI * PI);
+        x += g / (kh * kh * 2.0 * PI * PI);
     }
     x
 }
@@ -246,4 +266,110 @@ pub fn test_pg_mean(c: f64, n_samples: usize) -> (f64, f64) {
         (c * 0.5).tanh() / (2.0 * c)
     };
     (sample_mean, true_mean)
+}
+
+// ---------------------------------------------------------------------------
+// Validation harness for the PG(1, c) sampler.
+//
+// Runs at `cargo test` (dev-time only; NOT part of R CMD check). Guards the
+// Devroye accept/reject primitive against the two defects that biased it
+// historically: the missing small-x branch in `a_coef` (which corrupted every
+// truncated-inverse-Gaussian proposal, x < TRUNC) and the factor-of-2 in
+// `sample_pg1_zero`. Both are caught here: the moment test pins mean AND
+// variance to closed forms, and the KS test compares the sampler's law to the
+// exact Polson-Scott-Windle Gamma-series representation.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+
+    // Exact PG(1, c) via the infinite Gamma series (Polson, Scott & Windle 2013,
+    // eq. 1): PG(1,c) = (1/(2 pi^2)) sum_{k>=1} g_k / ((k-1/2)^2 + c^2/(4 pi^2)),
+    // g_k ~ Exp(1). Truncating the tail at `n_terms` biases the draw downward by
+    // O(1/n_terms) (each dropped term has mean < 1/(2 pi^2 (k-1/2)^2)); n_terms
+    // = 4000 keeps that below ~1e-5, negligible against the test tolerances.
+    fn pg1_series_reference(c: f64, n_terms: usize, rng: &mut StdRng) -> f64 {
+        let shift = c * c / (4.0 * PI * PI);
+        let mut x = 0.0;
+        for k in 1..=n_terms {
+            let g: f64 = Exp1.sample(rng);
+            let km = k as f64 - 0.5;
+            x += g / (km * km + shift);
+        }
+        x / (2.0 * PI * PI)
+    }
+
+    fn analytic_mean(c: f64) -> f64 {
+        if c.abs() < 1e-9 { 0.25 } else { (c * 0.5).tanh() / (2.0 * c) }
+    }
+
+    // Var[PG(1,c)] = (1/(4 c^3)) (sinh c - c) / cosh^2(c/2); limit 1/24 as c -> 0.
+    fn analytic_var(c: f64) -> f64 {
+        if c.abs() < 1e-4 {
+            1.0 / 24.0
+        } else {
+            let ch = (c * 0.5).cosh();
+            (c.sinh() - c) / (4.0 * c * c * c) / (ch * ch)
+        }
+    }
+
+    // Two-sample Kolmogorov-Smirnov statistic.
+    fn ks_two_sample(a: &mut [f64], b: &mut [f64]) -> f64 {
+        a.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        b.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        let (na, nb) = (a.len() as f64, b.len() as f64);
+        let (mut i, mut j) = (0usize, 0usize);
+        let mut d: f64 = 0.0;
+        while i < a.len() && j < b.len() {
+            let v = a[i].min(b[j]);
+            while i < a.len() && a[i] <= v { i += 1; }
+            while j < b.len() && b[j] <= v { j += 1; }
+            d = d.max((i as f64 / na - j as f64 / nb).abs());
+        }
+        d
+    }
+
+    #[test]
+    fn pg1_moments_match_analytic() {
+        let mut rng = StdRng::seed_from_u64(20_260_706);
+        let n = 400_000usize;
+        // c = 0 exercises sample_pg1_zero; the rest exercise both proposal
+        // branches (truncated-IG for x < TRUNC, truncated-exponential above).
+        for &c in &[0.0, 0.3, 0.8, 1.5, 3.0, 5.0] {
+            let (mut s, mut s2) = (0.0f64, 0.0f64);
+            for _ in 0..n {
+                let x = sample_pg1(c, &mut rng);
+                s += x;
+                s2 += x * x;
+            }
+            let mean = s / n as f64;
+            let var = s2 / n as f64 - mean * mean;
+            let (em, ev) = (analytic_mean(c), analytic_var(c));
+            assert!(
+                (mean - em).abs() < 0.004,
+                "PG(1,{c}) mean {mean:.5} vs analytic {em:.5}"
+            );
+            assert!(
+                (var - ev).abs() < 0.05 * ev + 5e-4,
+                "PG(1,{c}) var {var:.5} vs analytic {ev:.5}"
+            );
+        }
+    }
+
+    #[test]
+    fn pg1_ks_vs_series_reference() {
+        let mut rng = StdRng::seed_from_u64(11_235_813);
+        let m = 30_000usize;
+        // KS critical value at ~1e-3 significance for n = m = 30_000 is
+        // 1.95 * sqrt(2/m) ~= 0.016; 0.03 leaves headroom against Monte-Carlo
+        // noise while still failing decisively on a mis-specified a_coef
+        // (the missing small-x branch distorts the whole x < TRUNC region).
+        for &c in &[0.4, 1.0, 2.5] {
+            let mut samp: Vec<f64> = (0..m).map(|_| sample_pg1(c, &mut rng)).collect();
+            let mut refr: Vec<f64> = (0..m).map(|_| pg1_series_reference(c, 4000, &mut rng)).collect();
+            let d = ks_two_sample(&mut samp, &mut refr);
+            assert!(d < 0.03, "PG(1,{c}) KS D = {d:.4} vs series reference (threshold 0.03)");
+        }
+    }
 }

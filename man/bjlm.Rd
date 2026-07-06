@@ -13,7 +13,7 @@ bjlm(
   rho = list(),
   latent_gps = list(),
   propensity,
-  weights = c("stabilised_ate", "ate", "att", "stabilised_att"),
+  weights = c("stabilised_ate", "ate", "att", "stabilised_att", "none"),
   max_weight = 20,
   data,
   priors = NULL,
@@ -52,7 +52,9 @@ Supports random intercepts via \code{(1 | subject)}.}
 specifying the propensity score model. The LHS must be a binary (0/1) variable.}
 
 \item{weights}{Character string specifying the weight type:
-\code{"stabilised_ate"} (default), \code{"ate"}, \code{"att"}, or \code{"stabilised_att"}.}
+\code{"stabilised_ate"} (default), \code{"ate"}, \code{"att"}, \code{"stabilised_att"},
+or \code{"none"} (uniform weights = an unweighted outcome fit; used internally for
+the conditional outcome regression behind G-computation/AIPW).}
 
 \item{max_weight}{Numeric. Trimming threshold for extreme weights (default: 20).}
 

@@ -151,11 +151,19 @@ test_that("Piped API: dataset alignment, warning, and compile_report generation 
       data = dat_observations
     )
 
-  # 3. Compile and check warnings/messages
-  # We expect a warning about shared covariate name 'X_shared'
-  expect_warning(
-    compiled <- compile(spec),
-    "Shared covariate name\\(s\\) detected: 'X_shared'"
+  # 3. Compile and check warnings/messages.
+  # compile() no longer writes compile_report.md to the working directory (CRAN
+  # policy); it is opt-in via options(bjlm.compile_report=). Point it at a tempfile.
+  report_file <- tempfile(fileext = ".md")
+  withr::local_options(bjlm.compile_report = report_file)
+
+  # We expect a warning about shared covariate name 'X_shared' (compile() also
+  # emits an informational DR note for the shared covariate; suppress messages).
+  suppressMessages(
+    expect_warning(
+      compiled <- compile(spec),
+      "Shared covariate name\\(s\\) detected: 'X_shared'"
+    )
   )
 
   expect_s3_class(compiled, "bjlm_compiled_model")
@@ -168,22 +176,14 @@ test_that("Piped API: dataset alignment, warning, and compile_report generation 
   # The mean of dat_observations$X_shared should be around 0, not 2
   expect_equal(compiled$model$outcome$data$X_shared, dat_observations$X_shared)
 
-  # 4. Verify that compile_report.md is generated and contains the Mermaid flowchart
-  report_file <- "compile_report.md"
+  # 4. Verify the opt-in compile report contains the Mermaid flowchart
   expect_true(file.exists(report_file))
-
-  report_lines <- readLines(report_file)
-  report_text <- paste(report_lines, collapse = "\n")
+  report_text <- paste(readLines(report_file), collapse = "\n")
 
   expect_true(grepl("graph TD", report_text))
   expect_true(grepl("Propensity Block", report_text))
   expect_true(grepl("Outcome Block", report_text))
   expect_true(grepl("Shared variables: X_shared", report_text))
-
-  # Clean up the report file
-  if (file.exists(report_file)) {
-    file.remove(report_file)
-  }
 
   # 5. Fit the model to ensure it runs without "Allocation from iterator error"
   fit_res <- compiled |> fit(

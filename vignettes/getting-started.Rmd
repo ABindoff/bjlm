@@ -140,7 +140,7 @@ gp_model <- bjlm_model() |>
   compile()
 
 # Fit using the fast Rust sampler
-fit_long <- fit(gp_model, chains = 4, iter = 2000, cores = 4)
+fit_long <- fit(gp_model, chains = 4, iter = 2000, cores = 2)
 ```
 
 ---
@@ -241,7 +241,7 @@ bad_model <- bjlm_model() |>
   ) |>
   compile()
 
-fit_bad <- fit(bad_model, chains = 4, iter = 2000, cores = 4)
+fit_bad <- fit(bad_model, chains = 4, iter = 2000, cores = 2)
 
 # Run LFO-CV on the competing model
 lfo_bad <- lfo_cv(fit_bad, min_tau = 2.0)

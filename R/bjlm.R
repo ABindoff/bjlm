@@ -40,7 +40,9 @@
 #' @param propensity A two-sided formula of the form \code{treatment ~ covariates},
 #'   specifying the propensity score model. The LHS must be a binary (0/1) variable.
 #' @param weights Character string specifying the weight type:
-#'   \code{"stabilised_ate"} (default), \code{"ate"}, \code{"att"}, or \code{"stabilised_att"}.
+#'   \code{"stabilised_ate"} (default), \code{"ate"}, \code{"att"}, \code{"stabilised_att"},
+#'   or \code{"none"} (uniform weights = an unweighted outcome fit; used internally for
+#'   the conditional outcome regression behind G-computation/AIPW).
 #' @param max_weight Numeric. Trimming threshold for extreme weights (default: 20).
 #' @param data A data frame containing all variables.
 #' @param priors A \code{\link{bjlm_priors}} object specifying priors for both
@@ -70,7 +72,7 @@ bjlm <- function(
     rho = list(),
     latent_gps = list(),
     propensity,
-    weights = c("stabilised_ate", "ate", "att", "stabilised_att"),
+    weights = c("stabilised_ate", "ate", "att", "stabilised_att", "none"),
     max_weight = 20,
     data,
     priors = NULL,
@@ -91,7 +93,7 @@ bjlm <- function(
 ) {
   cl <- match.call()
   weights <- match.arg(weights)
-  weight_type_int <- match(weights, c("ate", "att", "stabilised_ate", "stabilised_att")) - 1L
+  weight_type_int <- match(weights, c("ate", "att", "stabilised_ate", "stabilised_att", "none")) - 1L
 
   if (is.null(warmup)) warmup <- floor(iter / 2)
   if (is.null(seed)) seed <- sample.int(.Machine$integer.max, 1L)

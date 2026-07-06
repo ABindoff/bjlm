@@ -10,6 +10,10 @@ pub enum WeightType {
     Att,
     StabilisedAte,
     StabilisedAtt,
+    /// Uniform (all weights = 1): an UNWEIGHTED outcome fit. Used for the
+    /// conditional outcome regression E[Y|X,T] that G-computation and textbook
+    /// AIPW require (the weighted MSM fit is not a conditional regression).
+    Uniform,
 }
 
 impl WeightType {
@@ -19,6 +23,7 @@ impl WeightType {
             1 => WeightType::Att,
             2 => WeightType::StabilisedAte,
             3 => WeightType::StabilisedAtt,
+            4 => WeightType::Uniform,
             _ => WeightType::StabilisedAte, // default
         }
     }
@@ -45,6 +50,13 @@ pub fn compute_weights(
     max_weight: f64,
 ) -> Vec<f64> {
     let n = treatment.len();
+
+    // Uniform weights = unweighted fit (conditional outcome regression), independent
+    // of treatment type or propensity. Return early before any pi-based logic.
+    if let WeightType::Uniform = weight_type {
+        return vec![1.0; n];
+    }
+
     let is_continuous = treatment.iter().any(|&t| t != 0.0 && t != 1.0);
 
     if is_continuous {
@@ -122,6 +134,8 @@ pub fn compute_weights(
                     p_marginal * pi_i / ((1.0 - p_marginal) * (1.0 - pi_i))
                 }
             }
+            // Unreachable: handled by the early return above. Present for exhaustiveness.
+            WeightType::Uniform => 1.0,
         };
 
         weights[i] = weights[i].min(max_weight);

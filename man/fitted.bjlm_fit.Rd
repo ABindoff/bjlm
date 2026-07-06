@@ -46,24 +46,30 @@ Estimates marginal counterfactual predictions and causal effects (ATE and margin
 using either G-computation (standardisation) or doubly robust Augmented Inverse Probability Weighting (AIPW).
 }
 \details{
-\subsection{G-Computation vs. IPW}{
-Inverse Probability Weighting (IPW) adjusts for confounding by reweighting the observed sample during MCMC
-to make the treatment independent of measured confounders. This yields conditional causal outcome parameters.
-
-G-computation predicts individual-level potential outcomes \eqn{\hat{Y}_i(a)} under a counterfactual treatment
-\eqn{a \in \{0, 1\}} for the target population, then averages them:
-\deqn{\hat{\mu}_a^{\text{G-comp},(s)} = \frac{1}{N} \sum_{i=1}^N \hat{Y}_i(a)^{(s)}}
-The marginal Risk Ratio (RR) and Average Treatment Effect (ATE) are computed as:
-\deqn{\text{RR}^{\text{G-comp},(s)} = \frac{\hat{\mu}_1^{\text{G-comp},(s)}}{\hat{\mu}_0^{\text{G-comp},(s)}}}
-\deqn{\text{ATE}^{\text{G-comp},(s)} = \hat{\mu}_1^{\text{G-comp},(s)} - \hat{\mu}_0^{\text{G-comp},(s)}}
+\subsection{Two outcome fits: weighted (MSM) and unweighted (conditional)}{
+The primary \code{bjlm} outcome model is fitted with the estimated
+inverse-probability weights carried through MCMC, i.e. a Bayesian
+\emph{marginal structural model} (MSM); this is what \code{type = "link"} and
+\code{"response"} return. The causal estimators below (\code{"ate"}, \code{"rr"},
+\code{"aipw_ate"}, \code{"aipw_rr"}) instead require the \emph{conditional} outcome
+regression \eqn{E[Y \mid X, T]}, so they are built from an auxiliary
+\strong{unweighted} outcome fit. That fit is done once, on first use, and cached on
+the object (pass \code{dr = TRUE} to \code{fit()} to precompute it). Using the
+weighted MSM fit here would double-count the propensity.
 }
-\subsection{Augmented Inverse Probability Weighting (AIPW)}{
-AIPW is a doubly robust estimator combining the propensity and outcome models. It is robust to the
-misspecification of either the propensity score or outcome model (but not both). The draw-level
-counterfactual means are estimated as:
-\deqn{\hat{\mu}_1^{\text{AIPW},(s)} = \frac{1}{N} \sum_{i=1}^N \left( \hat{Y}_i(1)^{(s)} + \frac{T_i (Y_i - \hat{Y}_i(1)^{(s)})}{\hat{\pi}_i^{(s)}} \right)}
-\deqn{\hat{\mu}_0^{\text{AIPW},(s)} = \frac{1}{N} \sum_{i=1}^N \left( \hat{Y}_i(0)^{(s)} + \frac{(1 - T_i) (Y_i - \hat{Y}_i(0)^{(s)})}{1 - \hat{\pi}_i^{(s)}} \right)}
-where \eqn{Y_i} is the observed outcome, \eqn{T_i} is the observed binary treatment, \eqn{\hat{\pi}_i^{(s)}} is the
-propensity score at draw \eqn{s}, and \eqn{\hat{Y}_i(a)^{(s)}} is the outcome prediction under treatment \eqn{a}.
+\subsection{G-computation (\code{type = "ate"}, \code{"rr"})}{
+Predict individual-level potential outcomes \eqn{\hat{Y}_i(a)} under a counterfactual
+treatment \eqn{a \in \{0, 1\}} from the unweighted outcome regression, then average:
+\deqn{\hat{\mu}_a^{(s)} = \frac{1}{N} \sum_{i=1}^N \hat{Y}_i(a)^{(s)}}
+\deqn{\text{RR}^{(s)} = \hat{\mu}_1^{(s)} / \hat{\mu}_0^{(s)}, \qquad \text{ATE}^{(s)} = \hat{\mu}_1^{(s)} - \hat{\mu}_0^{(s)}}
+This is standard G-computation (consistent if the outcome model is correctly specified).
+}
+\subsection{AIPW (\code{type = "aipw_ate"}, \code{"aipw_rr"})}{
+Doubly robust: the unweighted outcome regression \eqn{\hat{Y}_i(a)} augmented by an
+IPW term using the propensity \eqn{\hat{\pi}_i} from the propensity model,
+\deqn{\hat{\mu}_a^{\text{AIPW},(s)} = \frac{1}{N} \sum_{i=1}^N \left( \hat{Y}_i(a)^{(s)} + \frac{\mathbb{1}\{T_i=a\} (Y_i - \hat{Y}_i(a)^{(s)})}{\hat{\pi}_{i,a}^{(s)}} \right)}
+consistent if \emph{either} the propensity or the outcome model is correctly specified.
+It is normal, and desirable, for confounders to appear in \emph{both} the propensity
+and outcome models.
 }
 }

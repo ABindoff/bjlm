@@ -498,15 +498,67 @@ compile <- function(model) {
     population  = model$population
   )
   class(compiled) <- "bjlm_compiled_model"
-  
-  # Write compile report
-  tryCatch({
-    .write_compile_report(compiled, "compile_report.md")
-  }, error = function(e) {
-    warning("Could not write compile_report.md: ", e$message, call. = FALSE)
-  })
-  
+
+  # Optionally write a compile report. Off by default: writing to the working
+  # directory on every compile() is surprising and violates CRAN policy (packages
+  # must not write outside tempdir() unasked). Opt in with a path via
+  # options(bjlm.compile_report = "path/to/report.md"), or TRUE for the tempdir.
+  report_target <- getOption("bjlm.compile_report", FALSE)
+  if (!isFALSE(report_target)) {
+    report_path <- if (isTRUE(report_target)) {
+      file.path(tempdir(), "compile_report.md")
+    } else {
+      as.character(report_target)
+    }
+    tryCatch({
+      .write_compile_report(compiled, report_path)
+    }, error = function(e) {
+      warning("Could not write compile report: ", e$message, call. = FALSE)
+    })
+  }
+
+  .dr_shared_confounder_note(compiled)
+
   compiled
+}
+
+# One-time informational note (NOT a warning) when a covariate appears in BOTH the
+# propensity model and the outcome design. This is CORRECT and expected for doubly
+# robust G-computation/AIPW (both nuisance models use the confounders), so a warning
+# would cry wolf. But the choice of where a variable belongs -- confounder (propensity),
+# effect modifier or precision covariate (outcome) -- needs subject-matter judgement,
+# and in the IPW-weighted MSM fit a shared variable is adjusted twice. Surface it so an
+# expert can confirm intent. Suppress with options(bjlm.quiet_dr = TRUE).
+.dr_shared_confounder_note <- function(compiled) {
+  if (isTRUE(getOption("bjlm.quiet_dr", FALSE))) return(invisible())
+  if (isTRUE(compiled$model$auto_propensity)) return(invisible())
+  prop_fml <- compiled$model$propensity$formula
+  if (is.null(prop_fml)) return(invisible())
+
+  gather_vars <- function(x) {
+    if (is.null(x)) return(character(0))
+    if (inherits(x, "formula")) return(all.vars(x))
+    if (is.list(x)) return(unlist(lapply(x, gather_vars)))
+    character(0)
+  }
+  prop_all  <- all.vars(prop_fml)
+  trt_var   <- if (length(prop_all) > 0) prop_all[1] else character(0)
+  prop_conf <- setdiff(prop_all, trt_var)
+  out_vars  <- unique(gather_vars(list(
+    compiled$b0_formula, compiled$b1_formula,
+    compiled$deltas, compiled$omega, compiled$rho
+  )))
+  shared <- setdiff(intersect(prop_conf, out_vars), compiled$subject_var)
+  if (length(shared) == 0) return(invisible())
+
+  message(
+    "bjlm: ", paste0("'", shared, "'", collapse = ", "),
+    " appear(s) in both the propensity and outcome models. This is expected for ",
+    "G-computation / AIPW, but in the IPW-weighted (MSM) fit such variables are ",
+    "adjusted twice (weights and outcome regression) -- confirm that is intended. ",
+    "See ?fitted.bjlm_fit; silence with options(bjlm.quiet_dr = TRUE)."
+  )
+  invisible()
 }
 
 #' Fit a compiled model
@@ -524,11 +576,15 @@ fit <- function(object, ...) {
 #'
 #' @param object A `bjlm_compiled_model` object.
 #' @param priors A `bjlm_priors` object specifying priors.
+#' @param dr Logical. If `TRUE`, eagerly fit the auxiliary *unweighted* outcome
+#'   regression used by G-computation and AIPW (`fitted(type = "ate"/"rr"/"aipw_*")`)
+#'   at fit time. If `FALSE` (default), that fit is deferred until first requested and
+#'   then cached on the returned object. Requires a propensity model.
 #' @param ... Additional arguments passed to the fitting engine `bjlm()`.
 #'
 #' @return A `bjlm_fit` object.
 #' @export
-fit.bjlm_compiled_model <- function(object, priors = NULL, ...) {
+fit.bjlm_compiled_model <- function(object, priors = NULL, dr = FALSE, ...) {
   # If it is a zero-breakpoint shortcut and priors are NULL, use our preset shortcut priors
   if (object$zero_breakpoint && is.null(priors)) {
     priors <- object$shortcut_priors
@@ -594,7 +650,53 @@ fit.bjlm_compiled_model <- function(object, priors = NULL, ...) {
   fit_obj$rho <- object$rho
   fit_obj$population <- object$population
 
+  # Retain what the lazy unweighted-outcome refit needs (the conditional outcome
+  # regression E[Y|X,T] behind G-computation/AIPW; see .ensure_unweighted).
+  # `cache` is an environment (reference semantics) so a draw computed on first
+  # use persists across subsequent fitted() calls on the same object.
+  fit_obj$compiled_model <- object
+  fit_obj$priors_used <- priors
+  fit_obj$fit_dots <- list(...)
+  fit_obj$cache <- new.env(parent = emptyenv())
+
+  # Eager precompute if requested (only meaningful with a propensity model).
+  if (isTRUE(dr) && !is.null(fit_obj$propensity_formula)) {
+    .ensure_unweighted(fit_obj)
+  }
+
   fit_obj
+}
+
+# Fit (once) and cache the auxiliary UNWEIGHTED outcome regression that
+# G-computation and textbook AIPW require. The primary fit is IPW-weighted (an
+# MSM), so its draws are NOT a conditional outcome regression E[Y|X,T]; these
+# estimators need the unweighted fit for the outcome arm. Returns the unweighted
+# posterior draws (same parameterisation/column names as object$draws).
+.ensure_unweighted <- function(object) {
+  cache <- object$cache
+  if (!is.null(cache) && !is.null(cache$draws_unweighted)) {
+    return(cache$draws_unweighted)
+  }
+  if (is.null(object$compiled_model)) {
+    stop("This fit does not retain the compiled model needed to fit the unweighted ",
+         "outcome regression for G-computation/AIPW. Re-fit with a current version ",
+         "of bjlm (or use fitted(type = 'link'/'response')).", call. = FALSE)
+  }
+  if (is.null(object$propensity_formula)) {
+    stop("G-computation/AIPW require a propensity model.", call. = FALSE)
+  }
+  message("bjlm: fitting the unweighted outcome regression E[Y|X,T] for ",
+          "G-computation / AIPW (one-time; cached on this fit object). ",
+          "Pass dr = TRUE to fit() to precompute this at fit time.")
+  args <- object$fit_dots %||% list()
+  args$weights <- "none"      # uniform weights => unweighted conditional fit
+  args$verbose <- FALSE
+  uw <- do.call(fit, c(list(object$compiled_model, priors = object$priors_used), args))
+  if (is.null(cache)) cache <- new.env(parent = emptyenv())
+  cache$draws_unweighted <- uw$draws
+  cache$outcome_names <- uw$outcome_names
+  object$cache <- cache
+  cache$draws_unweighted
 }
 
 #' @export
@@ -917,25 +1019,31 @@ view_flowchart <- function(x, ...) {
 #' using either G-computation (standardisation) or doubly robust Augmented Inverse Probability Weighting (AIPW).
 #'
 #' @details
-#' \subsection{G-Computation vs. IPW}{
-#'   Inverse Probability Weighting (IPW) adjusts for confounding by reweighting the observed sample during MCMC
-#'   to make the treatment independent of measured confounders. This yields conditional causal outcome parameters.
-#'
-#'   G-computation predicts individual-level potential outcomes \eqn{\hat{Y}_i(a)} under a counterfactual treatment
-#'   \eqn{a \in \{0, 1\}} for the target population, then averages them:
-#'   \deqn{\hat{\mu}_a^{\text{G-comp},(s)} = \frac{1}{N} \sum_{i=1}^N \hat{Y}_i(a)^{(s)}}
-#'   The marginal Risk Ratio (RR) and Average Treatment Effect (ATE) are computed as:
-#'   \deqn{\text{RR}^{\text{G-comp},(s)} = \frac{\hat{\mu}_1^{\text{G-comp},(s)}}{\hat{\mu}_0^{\text{G-comp},(s)}}}
-#'   \deqn{\text{ATE}^{\text{G-comp},(s)} = \hat{\mu}_1^{\text{G-comp},(s)} - \hat{\mu}_0^{\text{G-comp},(s)}}
+#' \subsection{Two outcome fits: weighted (MSM) and unweighted (conditional)}{
+#'   The primary \code{bjlm} outcome model is fitted with the estimated
+#'   inverse-probability weights carried through MCMC, i.e. a Bayesian
+#'   \emph{marginal structural model} (MSM); this is what \code{type = "link"} and
+#'   \code{"response"} return. The causal estimators below (\code{"ate"}, \code{"rr"},
+#'   \code{"aipw_ate"}, \code{"aipw_rr"}) instead require the \emph{conditional} outcome
+#'   regression \eqn{E[Y \mid X, T]}, so they are built from an auxiliary
+#'   \strong{unweighted} outcome fit. That fit is done once, on first use, and cached on
+#'   the object (pass \code{dr = TRUE} to \code{fit()} to precompute it). Using the
+#'   weighted MSM fit here would double-count the propensity.
 #' }
-#' \subsection{Augmented Inverse Probability Weighting (AIPW)}{
-#'   AIPW is a doubly robust estimator combining the propensity and outcome models. It is robust to the
-#'   misspecification of either the propensity score or outcome model (but not both). The draw-level
-#'   counterfactual means are estimated as:
-#'   \deqn{\hat{\mu}_1^{\text{AIPW},(s)} = \frac{1}{N} \sum_{i=1}^N \left( \hat{Y}_i(1)^{(s)} + \frac{T_i (Y_i - \hat{Y}_i(1)^{(s)})}{\hat{\pi}_i^{(s)}} \right)}
-#'   \deqn{\hat{\mu}_0^{\text{AIPW},(s)} = \frac{1}{N} \sum_{i=1}^N \left( \hat{Y}_i(0)^{(s)} + \frac{(1 - T_i) (Y_i - \hat{Y}_i(0)^{(s)})}{1 - \hat{\pi}_i^{(s)}} \right)}
-#'   where \eqn{Y_i} is the observed outcome, \eqn{T_i} is the observed binary treatment, \eqn{\hat{\pi}_i^{(s)}} is the
-#'   propensity score at draw \eqn{s}, and \eqn{\hat{Y}_i(a)^{(s)}} is the outcome prediction under treatment \eqn{a}.
+#' \subsection{G-computation (\code{type = "ate"}, \code{"rr"})}{
+#'   Predict individual-level potential outcomes \eqn{\hat{Y}_i(a)} under a counterfactual
+#'   treatment \eqn{a \in \{0, 1\}} from the unweighted outcome regression, then average:
+#'   \deqn{\hat{\mu}_a^{(s)} = \frac{1}{N} \sum_{i=1}^N \hat{Y}_i(a)^{(s)}}
+#'   \deqn{\text{RR}^{(s)} = \hat{\mu}_1^{(s)} / \hat{\mu}_0^{(s)}, \qquad \text{ATE}^{(s)} = \hat{\mu}_1^{(s)} - \hat{\mu}_0^{(s)}}
+#'   This is standard G-computation (consistent if the outcome model is correctly specified).
+#' }
+#' \subsection{AIPW (\code{type = "aipw_ate"}, \code{"aipw_rr"})}{
+#'   Doubly robust: the unweighted outcome regression \eqn{\hat{Y}_i(a)} augmented by an
+#'   IPW term using the propensity \eqn{\hat{\pi}_i} from the propensity model,
+#'   \deqn{\hat{\mu}_a^{\text{AIPW},(s)} = \frac{1}{N} \sum_{i=1}^N \left( \hat{Y}_i(a)^{(s)} + \frac{\mathbb{1}\{T_i=a\} (Y_i - \hat{Y}_i(a)^{(s)})}{\hat{\pi}_{i,a}^{(s)}} \right)}
+#'   consistent if \emph{either} the propensity or the outcome model is correctly specified.
+#'   It is normal, and desirable, for confounders to appear in \emph{both} the propensity
+#'   and outcome models.
 #' }
 #'
 #' @param object A \code{bjlm_fit} object.
@@ -986,14 +1094,20 @@ fitted.bjlm_fit <- function(object, newdata = NULL, type = c("link", "response",
       stop("Causal effect estimation for these types is only supported for binary treatments/exposures (treatment must be 0 or 1).")
     }
 
-    # 1. Compute potential outcomes under Trt=1 and Trt=0
+    # 1. Compute potential outcomes under Trt=1 and Trt=0 from the UNWEIGHTED
+    #    conditional outcome regression E[Y|X,T]. The primary fit is IPW-weighted
+    #    (an MSM); standardising / augmenting that would double-count the propensity.
+    #    G-computation and AIPW both require the unweighted outcome arm.
+    obj_pred <- object
+    obj_pred$draws <- .ensure_unweighted(object)
+
     data1 <- data
     data1[[trt_var]] <- 1
-    p1_draws <- .build_predictions(object, newdata = data1, type = "response", summary = FALSE)
-    
+    p1_draws <- .build_predictions(obj_pred, newdata = data1, type = "response", summary = FALSE)
+
     data0 <- data
     data0[[trt_var]] <- 0
-    p0_draws <- .build_predictions(object, newdata = data0, type = "response", summary = FALSE)
+    p0_draws <- .build_predictions(obj_pred, newdata = data0, type = "response", summary = FALSE)
     
     n_draws <- nrow(p1_draws)
     n_obs <- ncol(p1_draws)
@@ -1025,7 +1139,10 @@ fitted.bjlm_fit <- function(object, newdata = NULL, type = c("link", "response",
         ))
       }
     } else {
-      # AIPW (Doubly Robust)
+      # AIPW (doubly robust): unweighted conditional outcome regression Yhat(a)
+      # (via obj_pred above) + IPW augmentation with pi from the propensity model.
+      # This is the textbook augmentation and is consistent if EITHER the
+      # propensity or the outcome model is correct.
       outcome_vars <- all.vars(object$outcome_formula)
       y_name <- outcome_vars[1]
       if (!y_name %in% names(data)) {

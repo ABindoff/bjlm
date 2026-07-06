@@ -4,12 +4,17 @@
 \alias{fit.bjlm_compiled_model}
 \title{Fit a compiled BJLM model}
 \usage{
-\method{fit}{bjlm_compiled_model}(object, priors = NULL, ...)
+\method{fit}{bjlm_compiled_model}(object, priors = NULL, dr = FALSE, ...)
 }
 \arguments{
 \item{object}{A \code{bjlm_compiled_model} object.}
 
 \item{priors}{A \code{bjlm_priors} object specifying priors.}
+
+\item{dr}{Logical. If \code{TRUE}, eagerly fit the auxiliary \emph{unweighted} outcome
+regression used by G-computation and AIPW (\code{fitted(type = "ate"/"rr"/"aipw_*")})
+at fit time. If \code{FALSE} (default), that fit is deferred until first requested and
+then cached on the returned object. Requires a propensity model.}
 
 \item{...}{Additional arguments passed to the fitting engine \code{bjlm()}.}
 }

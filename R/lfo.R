@@ -227,9 +227,15 @@ lfo_cv <- function(object, t_var = NULL, t_grid = NULL, min_tau = NULL, k_thresh
       })
       diagnostics$pareto_k[step_idx] <- NA_real_
     } else {
-      # APPROXIMATE predictive density using cached importance weights
+      # APPROXIMATE predictive density using cached importance weights.
+      # Self-normalised IS: log(sum_s w_s p_s) - log(sum_s w_s). loo::psis()
+      # returns UNNORMALISED log-weights (sum_s w_s ~ S, not 1), so the
+      # denominator is essential; omitting it inflates every approximate step by
+      # ~log(S). The exact branch above uses log(S) as the denominator because
+      # there the weights are uniformly 1.
+      log_norm <- .log_sum_exp(active_log_weights)
       elpd_pointwise[val_indices] <- apply(ll_matrix, 2, function(col) {
-        .log_sum_exp(col + active_log_weights)
+        .log_sum_exp(col + active_log_weights) - log_norm
       })
     }
     

@@ -17,8 +17,10 @@ test_that("G-computation and AIPW work successfully for causal effect estimation
     compile() |>
     fit(chains = 1L, iter = 60L, warmup = 30L, seed = 123L, verbose = FALSE)
 
-  # A. G-computation ATE
-  expect_silent(ate_sum <- fitted(fit_bin, type = "ate", summary = TRUE))
+  # A. G-computation ATE. The FIRST causal-estimand call fits (once, cached) the
+  #    auxiliary unweighted outcome regression E[Y|X,T] and emits a one-time message.
+  expect_message(ate_sum <- fitted(fit_bin, type = "ate", summary = TRUE),
+                 "unweighted outcome regression")
   expect_s3_class(ate_sum, "data.frame")
   expect_named(ate_sum, c(".observation", "fitted_mean", "fitted_Q2.5", "fitted_Q97.5"))
   expect_equal(nrow(ate_sum), 1)
@@ -38,7 +40,7 @@ test_that("G-computation and AIPW work successfully for causal effect estimation
   expect_equal(dim(rr_draws), c(30, 1))
   expect_equal(colnames(rr_draws), "RR")
 
-  # C. AIPW ATE
+  # C. AIPW ATE (unweighted arm now cached -> silent; textbook doubly robust)
   expect_silent(aipw_ate_sum <- fitted(fit_bin, type = "aipw_ate", summary = TRUE))
   expect_s3_class(aipw_ate_sum, "data.frame")
   expect_equal(nrow(aipw_ate_sum), 1)
@@ -57,7 +59,7 @@ test_that("G-computation and AIPW work successfully for causal effect estimation
   expect_true(is.matrix(aipw_rr_draws))
   expect_equal(dim(aipw_rr_draws), c(30, 1))
   expect_equal(colnames(aipw_rr_draws), "AIPW_RR")
-  
+
   # E. Propensity truncation check
   expect_silent(aipw_trunc <- fitted(fit_bin, type = "aipw_ate", summary = FALSE, truncation = 0.05))
   expect_equal(dim(aipw_trunc), c(30, 1))
@@ -72,8 +74,9 @@ test_that("G-computation and AIPW work successfully for causal effect estimation
     compile() |>
     fit(chains = 1L, iter = 60L, warmup = 30L, seed = 123L, verbose = FALSE)
 
-  # G-comp ATE & AIPW ATE work for Gaussian outcomes
-  expect_silent(fitted(fit_gauss, type = "ate", summary = FALSE))
+  # G-comp ATE & AIPW ATE work for Gaussian outcomes. First causal call for this
+  # fit triggers the one-time unweighted-arm message; subsequent calls are cached.
+  expect_message(fitted(fit_gauss, type = "ate", summary = FALSE), "unweighted outcome regression")
   expect_silent(fitted(fit_gauss, type = "aipw_ate", summary = FALSE))
 
   # Risk Ratio should error for Gaussian outcomes
