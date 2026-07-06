@@ -482,11 +482,22 @@ fn sample_random_effects(data: &ModelData, _priors: &Priors, state: &mut State, 
                     count[g as usize] += omega * sigma2;
                 }
                 OutcomeFamily::NegativeBinomial => {
+                    // DEAD CODE today: every run_mcmc* entry point hardcodes
+                    // outcome_family = Gaussian (lib.rs), so this branch is
+                    // unreachable. It is kept convention-correct anyway: bjlm's NB
+                    // convention is psi = ln(mean), so PG augments at the NB-logit
+                    // psi - ln r and the pseudo-observation shifts back by ln r
+                    // (see sampler_bjlm.rs and the HANDOFF_nb_gp_transport.md
+                    // postmortem for what an unshifted site does to the joint).
+                    // NB through THIS sampler would also need family dispatch in
+                    // the coefficient/sigma/change-point kernels and an r update
+                    // (state.r is never sampled here) -- do not enable piecemeal.
                     let c_i = mu_fixed[i] + state.u_b0[g as usize];
                     let r_param = state.r;
-                    let omega = crate::polya_gamma::sample_pg(data.y[i] + r_param, c_i, rng);
+                    let log_r = r_param.ln();
+                    let omega = crate::polya_gamma::sample_pg(data.y[i] + r_param, c_i - log_r, rng);
                     let kappa = (data.y[i] - r_param) / 2.0;
-                    sum_r[g as usize] += (kappa - omega * mu_fixed[i]) * sigma2;
+                    sum_r[g as usize] += (kappa + omega * log_r - omega * mu_fixed[i]) * sigma2;
                     count[g as usize] += omega * sigma2;
                 }
             }
