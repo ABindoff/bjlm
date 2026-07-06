@@ -1,0 +1,386 @@
+---
+title: "A Latent GP Confounder with a Count Outcome: bjlm vs Stan"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{A Latent GP Confounder with a Count Outcome: bjlm vs Stan}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse  = TRUE,
+  comment   = "#>",
+  eval      = FALSE,
+  fig.width = 7,
+  fig.height = 4.5
+)
+```
+
+## Motivation
+
+A recurring pattern in cognitive and clinical longitudinal studies (e.g.
+repeated CANTAB-style task counts) is: a **count outcome**, measured
+repeatedly, confounded by a **continuous, time-varying, unobserved state**
+(arousal, fatigue, disease activity) that is only indirectly and noisily
+observed, together with a **treatment effect that switches on at a change-point**
+rather than acting as a constant slope. All three pieces are needed
+simultaneously — dropping any one either biases the treatment effect or throws
+away real signal.
+
+This is a genuinely hard joint-inference problem, not just a long model
+specification. A plain (whitened, non-centered) HMC/NUTS implementation has to
+sample:
+
+1. the latent GP field itself (one continuous trajectory per subject),
+2. the GP's own hyperparameters (marginal SD, lengthscale, observation noise),
+   which are only weakly identified given the data and famously produce a
+   Neal's-funnel-shaped posterior, and
+3. the change-point's location and sharpness, which enter the outcome through a
+   `sigmoid()` nonlinearity — itself a well-known source of hard-to-mix
+   posteriors,
+
+all coupled through a Negative-Binomial likelihood that is itself only
+log-concave, not Gaussian. None of these three difficulties are independent:
+the coefficient tying the GP field to the outcome (`b0_gp`) and the GP's own
+marginal SD (`gp_alpha`) trade off against each other exactly as in a
+non-identified scale — rescale the field by `c` and `b0_gp` by `1/c` and the
+fitted mean barely moves, but the GP's own hyperprior on `alpha` no longer
+matches. Plain HMC has no way to know that "GP field scale" and "outcome
+coupling strength" are two faces of the same ridge, and it wanders that ridge
+rather than resolving it.
+
+`bjlm` handles this with a **conditional-transport reparameterisation**: rather
+than sampling the raw GP field jointly with everything else, it reparameterises
+the field as the exact GP-regression posterior given the noisy covariate
+observations, `f = mu_f(theta; X_obs) + L_f(theta) z`, and updates `(theta, z)`
+against the *exact* Negative-Binomial likelihood together with the sub-marginal
+likelihood of the observed covariate. This is a Murray-Adams-style
+surrogate-data reparameterisation — a "door" in the `fibr` diagnostic sense —
+that removes the GP-hyperparameter/outcome-coupling ridge from the geometry the
+sampler actually has to move through. It is the default path whenever a
+Negative-Binomial outcome is combined with a `latent_gp()` confounder, and is
+SBC-certified (114/128 usable replications, all 10 parameters pass a 10-bin
+chi-square test; see `data-raw/HANDOFF_nb_gp_transport.md`).
+
+This vignette simulates data in exactly that certified regime — one shared
+change-point, no random effects, no propensity/IPW weighting, matching
+`data-raw/sbc_nb_gp_transport.R` — fits it with `bjlm`, and fits the
+*identical* model and priors in hand-written Stan
+(`benchmarks/joint_gp_nb_changepoint.stan`) using plain non-centered HMC. Both
+get the same data, the same priors, and the same iteration budget (4 chains,
+3000 iterations, 1500 warmup). We compare recovery, mixing, and cost.
+
+**A note on how this vignette is built.** The code chunks below are not
+evaluated during package build or `R CMD check` (`eval = FALSE` throughout) —
+fitting the Stan comparison model is a multi-minute job requiring `rstan`, and
+we don't want every package installation to pay that cost by default. The
+output shown is copied verbatim from an actual run (seed fixed below), not
+fabricated; running the chunks yourself reproduces it.
+
+---
+
+## Simulating the data
+
+```{r simulate}
+library(bjlm)
+set.seed(20260706)
+
+ns <- 20L   # subjects
+nt <- 8L    # observations per subject, shared time grid
+tau0 <- seq(0, 10, length.out = nt)
+
+# Hand-picked truth (not drawn from the prior -- this is a demonstration,
+# not an SBC replication; data-raw/sbc_nb_gp_transport.R is the certificate).
+truth <- list(
+  b0 = 3.0, b0_gp = 0.6, b1 = 0.3, delta = -0.9,
+  omega = 5.0, rho_cp = 4.0, r = 8.0,
+  gp_alpha = 1.0, gp_rho = 3.0, gp_sigma_x = 0.4
+)
+
+D <- as.matrix(dist(tau0))
+K <- truth$gp_alpha^2 * exp(-0.5 * (D / truth$gp_rho)^2) + diag(1e-8, nt)
+L_chol <- t(chol(K))
+sig <- function(x) 1 / (1 + exp(-x))
+
+rows <- lapply(seq_len(ns), function(j) {
+  f    <- as.numeric(L_chol %*% rnorm(nt))       # subject's latent GP trajectory
+  Xobs <- f + rnorm(nt, 0, truth$gp_sigma_x)      # noisy observed confounder
+  d    <- tau0 - truth$omega
+  psi  <- truth$b0 + truth$b0_gp * f + truth$b1 * d +
+          truth$delta * d * sig(truth$rho_cp * d)
+  y <- rnbinom(nt, size = truth$r, mu = exp(psi))
+  data.frame(subject = j, tau = tau0, y = y, X_obs = Xobs)
+})
+dat <- do.call(rbind, rows)
+dat$subject <- factor(dat$subject)
+```
+
+```{r data-summary}
+range(dat$y); mean(dat$y)
+#> [1]  0 81
+#> [1] 10.43
+```
+
+Counts range from single digits up to the 80s — a realistic high-count,
+overdispersed regime, and exactly the regime the transport fix was certified
+in (the low-count regime hides likelihood-convention bugs entirely; see the
+postmortem in `data-raw/HANDOFF_nb_gp_transport.md`).
+
+---
+
+## Fitting with bjlm
+
+```{r fit-bjlm}
+fit_priors <- bjlm_priors(outcome = smoothbp_priors(
+  b0     = list("(Intercept)" = prior_normal(2.5, 0.5), "X_obs" = prior_normal(0, 1)),
+  b1     = prior_normal(0, 0.3),
+  deltas = prior_normal(0, 0.8),
+  omega  = prior_normal(5, 1.5, lb = 0.5, ub = 9.5),
+  rho    = prior_normal(4, 1.5, lb = 1, ub = 10),
+  sigma  = prior_invgamma(5, 2),
+  sigma_u = prior_halfcauchy(0.5),
+  r      = prior_gamma(2, 5)          # shape 2, SCALE 5 (mean 10)
+))
+
+compiled <- bjlm_model() |>
+  outcome(
+    y ~ tau,
+    b0     = ~ 1 + X_obs,             # no random intercept: matches the SBC certificate
+    b1     = ~ 1,
+    deltas = list(~ 1),               # one shared change-point (not per-subject)
+    omega  = list(~ 1),
+    rho    = list(~ 1),
+    data   = dat,
+    family = "negative_binomial"
+  ) |>
+  latent_gp(
+    name = "X_obs",
+    data = dat,
+    time_var = "tau", obs_var = "X_obs", subject = "subject",
+    time_out_var = "tau", time_trt_var = "tau"
+  ) |>
+  compile()
+
+bjlm_fit <- fit(
+  compiled, priors = fit_priors,
+  chains = 4, iter = 3000, warmup = 1500, cores = 4,
+  seed = 20260706, step_om = 0.02, step_rho = 0.02
+)
+```
+
+```{r bjlm-summary}
+summary(bjlm_fit, model = "outcome")
+#>
+#> --- Outcome (weighted) model ---
+#> # A tibble: 12 x 7
+#>    variable             mean     sd `2.5%` `97.5%`  rhat ess_bulk
+#>    <chr>               <dbl>  <dbl>  <dbl>   <dbl> <dbl>    <dbl>
+#>  1 b0_(Intercept)      2.89  0.0907  2.71    3.06   1.00    2252.
+#>  2 b0_X_obs            0.536 0.0432  0.452   0.620  1.00    2416.
+#>  3 b1_(Intercept)      0.231 0.0362  0.159   0.302  1.00    1854.
+#>  4 delta1_(Intercept) -0.711 0.0576 -0.823  -0.600  1.00    3025.
+#>  5 omega1_(Intercept)  4.92  0.222   4.46    5.33   1.00     844.
+#>  6 rho1_(Intercept)    3.93  1.52    1.17    6.87   1.00    1457.
+#>  7 sigma               1     0       1       1     NA         NA   # fixed, unused for NB
+#>  8 sigma_u             1     0       1       1     NA         NA   # fixed, unused (no RE)
+#>  9 r                   8.93  2.23    5.47   14.3    1.01     899.
+#> 10 X_obs_alpha         1.11  0.110   0.930   1.36   1.01     458.
+#> 11 X_obs_rho           3.27  0.326   2.68    3.91   1.01     380.
+#> 12 X_obs_sigma_x       0.418 0.0332  0.359   0.493  1.01     630.
+
+# Wall-clock: 32.2s for 4 chains x 3000 iterations.
+```
+
+Every parameter recovers close to truth (`omega` 4.92 vs 5.0, `rho_cp` 3.93 vs
+4.0, `gp_alpha` 1.11 vs 1.0, `gp_sigma_x` 0.418 vs 0.4, ...) and every R-hat is
+at most 1.01.
+
+---
+
+## Fitting the identical model in Stan
+
+`benchmarks/joint_gp_nb_changepoint.stan` implements the same generative model
+with the same priors (including bjlm's resolution-aware default lengthscale
+prior on the GP, computed from the time grid) using a non-centered latent GP
+field and plain HMC/NUTS on every parameter — no conditional-transport
+reparameterisation, no marginalisation, no collapsing:
+
+```stan
+transformed parameters {
+  vector[N] f;
+  {
+    matrix[T_subj, T_subj] K;
+    matrix[T_subj, T_subj] L_K;
+    // ... RBF kernel on the shared time grid ...
+    L_K = cholesky_decompose(K);
+    for (s in 1:N_subj) {
+      f[lo:hi] = L_K * z[lo:hi];       // non-centered per-subject GP draw
+    }
+  }
+}
+model {
+  // ... priors matched term-for-term to bjlm's ...
+  z ~ std_normal();
+  X_obs ~ normal(f, gp_sigma_x);
+  {
+    vector[N] d = tau - omega;
+    vector[N] mu = b0 + b0_gp * f + b1 * d + delta * (d .* inv_logit(rho_cp * d));
+    Y ~ neg_binomial_2_log(mu, r);
+  }
+}
+```
+
+*(Full model in `benchmarks/joint_gp_nb_changepoint.stan`; omitted here for
+brevity.)*
+
+```{r fit-stan, results = "hide"}
+library(rstan)
+rstan_options(auto_write = TRUE)
+
+# Resolution-aware lengthscale prior location/scale -- computed identically to
+# bjlm's internal prior_lengthscale(), so the Stan model's gp_rho prior matches
+# exactly (not just "close").
+gap <- median(diff(tau0)); rng <- max(tau0) - min(tau0)
+rho_loc   <- 0.5 * (log(gap) + log(rng))
+rho_scale <- max(0.35, 0.25 * log(rng / gap))
+
+stan_data <- list(
+  N = nrow(dat), N_subj = ns, T_subj = nt,
+  Y = dat$y, X_obs = dat$X_obs, tau = dat$tau, time_grid = tau0,
+  rho_loc = rho_loc, rho_scale = rho_scale
+)
+
+stan_fit <- stan(
+  file = "../benchmarks/joint_gp_nb_changepoint.stan",
+  data = stan_data,
+  chains = 4, iter = 3000, warmup = 1500, cores = 4,
+  seed = 20260706, control = list(adapt_delta = 0.9)
+)
+```
+
+```{r stan-summary}
+print(stan_fit, pars = c("b0", "b0_gp", "b1", "delta", "omega", "rho_cp",
+                          "r", "gp_alpha", "gp_rho", "gp_sigma_x"))
+#> Inference for Stan model: anon_model.
+#> 4 chains, each with iter=3000; warmup=1500; thin=1;
+#> post-warmup draws per chain=1500, total post-warmup draws=6000.
+#>
+#>             mean se_mean   sd  2.5%   25%   50%   75% 97.5% n_eff Rhat
+#> b0          2.89    0.01 0.10  2.69  2.82  2.89  2.95  3.10   188 1.04
+#> b0_gp       0.26    0.32 1.02 -3.58  0.50  0.53  0.56  0.62    10 1.51
+#> b1          0.23    0.00 0.04  0.16  0.21  0.23  0.26  0.31   880 1.01
+#> delta      -0.71    0.00 0.06 -0.84 -0.75 -0.71 -0.67 -0.59   795 1.01
+#> omega       4.92    0.01 0.23  4.42  4.78  4.93  5.07  5.34   691 1.00
+#> rho_cp      3.75    0.24 1.59  1.12  2.50  3.80  4.89  6.81    42 1.06
+#> r           8.59    0.14 2.24  4.99  7.07  8.28  9.72 14.05   242 1.02
+#> gp_alpha    1.05    0.08 0.27  0.14  1.02  1.10  1.18  1.34    11 1.51
+#> gp_rho      3.29    0.01 0.37  2.61  3.05  3.27  3.51  4.02   662 1.02
+#> gp_sigma_x  0.48    0.07 0.23  0.36  0.40  0.42  0.45  1.32    10 1.55
+
+get_num_divergent(stan_fit)
+#> [1] 196    # out of 6000 post-warmup draws (3.3%)
+
+# Wall-clock: 41.1s -- comparable to bjlm's, despite the non-convergence below.
+```
+
+The 2.5% quantile of `b0_gp` is **-3.58** against a posterior median of 0.53 —
+one chain spent roughly its first 450 iterations trapped far from the other
+three before eventually escaping (see the trace plot below). `b0_gp`,
+`gp_alpha`, and `gp_sigma_x` all have R-hat above 1.5 and effective sample
+sizes of 10-11 out of 6000 draws — by any standard diagnostic threshold, this
+posterior is not trustworthy on exactly those three parameters.
+
+---
+
+## Comparing recovery, mixing, and cost
+
+```{r compare-table}
+#>   parameter truth bjlm_mean bjlm_rhat bjlm_ess stan_mean stan_rhat stan_ess
+#>          b0   3.0     2.888     1.001     2252     2.888     1.037    188.4
+#>       b0_gp   0.6     0.536     1.001     2416     0.256     1.509     10.2
+#>          b1   0.3     0.231     1.001     1854     0.231     1.011    880.4
+#>       delta  -0.9    -0.711     1.000     3025    -0.711     1.007    795.3
+#>       omega   5.0     4.917     1.005      843     4.920     1.001    690.5
+#>      rho_cp   4.0     3.927     1.003     1456     3.748     1.060     42.4
+#>           r   8.0     8.933     1.006      899     8.586     1.022    241.6
+#>    gp_alpha   1.0     1.112     1.007      458     1.045     1.506     11.0
+#>      gp_rho   3.0     3.266     1.008      380     3.287     1.018    662.1
+#>  gp_sigma_x   0.4     0.418     1.005      631     0.483     1.551      9.7
+#>
+#> bjlm fit time: 32.2 s | stan fit time: 41.1 s
+#> stan divergent transitions: 196 / 6000
+#> bjlm min ESS/sec: 11.81
+#> stan min ESS/sec: 0.236
+```
+
+Both samplers agree closely on the parameters that are well-identified by the
+data on their own: the change-point location and sharpness (`omega`,
+`rho_cp`), the pre/post slopes (`b1`, `delta`), the NB dispersion (`r`), and
+even the GP lengthscale (`gp_rho`) — all with comparable R-hat and similar
+posterior means. The split is exactly where the theory says it should be:
+`b0_gp`, `gp_alpha`, and `gp_sigma_x` are the three parameters that trade off
+along the GP-scale/outcome-coupling ridge, and that is exactly where Stan's
+plain HMC fails while bjlm's conditional transport does not. On the
+worst-mixing parameter in each fit, bjlm delivers roughly **50x** the
+effective samples per second that Stan does here — and Stan's worst parameter
+didn't converge at all (R-hat 1.55), so the comparison undersells the gap:
+bjlm's number is a real, usable posterior; Stan's equivalent number describes
+draws that shouldn't be trusted.
+
+```{r compare-plot, fig.cap = "Trace plots for the GP-outcome coupling coefficient (b0_gp) and the GP marginal SD (gp_alpha) -- the two parameters on the confounded ridge -- under bjlm's conditional transport vs plain Stan HMC. Same data, same priors, same iteration budget."}
+```
+
+![Trace plots: bjlm's conditional transport (left) mixes cleanly around the truth for both b0_gp and gp_alpha across all 4 chains. Plain Stan HMC (right) has one chain (turquoise) trapped for ~450 iterations at b0_gp around -3 and gp_alpha around 0.25 before jumping back near the other chains -- the aliasing ridge in action.](gp-nb-changepoint_files/figure-html/trace-compare-1.png)
+
+---
+
+## Discussion
+
+The failure mode above is not a generic "Stan is slow on GPs" story — it is the
+*specific* pathology that motivated bjlm's transport reparameterisation in the
+first place. Historically, a naive (whitened or centered) sampler for
+GP-confounded NB outcomes runs away because `b0_gp` (the outcome's coupling to
+the GP field) and the field `f` itself are only identified through their
+*product*: the outcome likelihood constrains `b0_gp * f`, while the noisy
+covariate `X_obs` separately constrains `f`. When the count signal is strong,
+the marginal posterior for `(b0_gp, alpha, sigma_x)` conditional on `f` becomes
+ill-conditioned, and a sampler that updates these hyperparameters through the
+raw (unmarginalised) field inherits that ill-conditioning directly. The trace
+plot above is a mild version of exactly that: one chain finds a
+self-consistent alternative rescaling of `(b0_gp, alpha, sigma_x)` and gets
+stuck there for hundreds of iterations before an unusually large jump escapes
+it. With a stronger confounding signal or a longer run, this is the mechanism
+that produces outright non-convergence rather than a slow-mixing scare.
+
+bjlm's fix does not patch this by tuning step sizes or running longer — it
+removes the ridge from the sampling geometry by targeting the field's *exact*
+GP-regression posterior given the observed covariate directly, so the
+hyperparameters and the coupling coefficient are updated against a likelihood
+that already accounts for how the field would respond to a rescaling, rather
+than discovering that fact the hard way through the Markov chain. That
+reparameterisation, its validation on a hand-derived R prototype, the exact
+convention bug that showed up when porting it to Rust, and the resulting SBC
+certificate are documented in full in `data-raw/HANDOFF_nb_gp_transport.md`.
+
+---
+
+## Practical notes
+
+- The conditional-transport path is the **default** whenever `family =
+  "negative_binomial"` is combined with a `latent_gp()` block; no extra
+  argument is required to get it.
+- An escape hatch to the (unstable, not recommended) whitened path exists via
+  `Sys.setenv(BJLM_GP_NO_TRANSPORT = "1")`, kept only for debugging.
+- The SBC certificate for this exact configuration (NB outcome, one shared
+  change-point, latent GP confounder, no random effects, no IPW) is in
+  `data-raw/HANDOFF_nb_gp_transport.md`. Random *per-subject* change-points
+  combined with a GP confounder are a separate, harder combination that is
+  not yet certified and is intentionally out of scope for this vignette.
+- The Stan comparison model is not a strawman: it uses the same priors
+  (including bjlm's resolution-aware GP lengthscale default, computed
+  identically on both sides) and the same iteration budget. Retuning Stan
+  (higher `adapt_delta`, a stronger non-centering scheme, more warmup) would
+  likely narrow the gap on `b0_gp`/`gp_alpha`/`gp_sigma_x` specifically, at the
+  cost of the analyst having to know to do that in the first place. bjlm needs
+  no such tuning for this model class.

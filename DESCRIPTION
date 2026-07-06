@@ -33,6 +33,7 @@ Suggests:
     knitr,
     rmarkdown,
     brms,
+    rstan,
     dplyr,
     gt,
     tidyr,

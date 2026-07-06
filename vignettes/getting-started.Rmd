@@ -40,8 +40,8 @@ fit <- bjlm_model() |>
 
 * **`bjlm_model()`**: Initializes an empty model specification builder.
 * **`propensity(model, formula, data, family)`**: Stages the treatment assignment model. Use the default `family = binomial("logit")` for binary treatments, or `family = gaussian("identity")` for continuous treatments (generalized propensity score weighting).
-* **`latent_gp(model, name, time, subject, kernel = "se")`**: Registers continuous-time latent Gaussian Process confounders.
-* **`outcome(model, formula, b0, b1, deltas, omega, rho, data)`**: Stages the outcome model. Can fit standard linear regressions or piecewise change-point models.
+* **`latent_gp(model, name, data, obs_var, time_var, time_trt_var, time_out_var, subject, kernel = "se")`**: Registers continuous-time latent Gaussian Process confounders.
+* **`outcome(model, formula, b0, b1, deltas, omega, rho, data, family)`**: Stages the outcome model. Can fit standard linear regressions or piecewise change-point models, with `family` supporting `"gaussian"` (default), `"binomial"`, or `"negative_binomial"` outcomes (the latter mixes cleanly with `latent_gp()` confounders via a conditional-transport sampler).
 * **`compile(model)`**: Validates GP structures, aligns time-points, and enforces the strict Bayesian Cut to prevent outcome-to-propensity feedback.
 * **`fit(compiled_model, ...)`**: Compiles priors and runs the fast Rust sampler.
 

@@ -40,7 +40,6 @@ library(dplyr)
 library(ggplot2)
 library(bayesplot)
 library(loo)
-library(patchwork)
 
 set.seed(42)
 
@@ -271,7 +270,11 @@ if (file.exists("sim2_bjlm_fit.rds")) {
       obs_var = "X_obs",
       subject = "id",
       time_out_var = "time",
-      time_trt_var = "time"
+      time_trt_var = "time",
+      # Pin rho to LogNormal(0,1) to match the rstan reference model exactly.
+      # bjlm's own default (gp_priors()) instead uses a resolution-aware
+      # lengthscale prior, which the hand-written Stan file does not implement.
+      priors = gp_priors(rho = prior_lognormal(0, 1))
     ) |>
     compile() |>
     fit(chains = 4, iter = 10000, warmup = 5000, cores = 4, seed = 42)
@@ -281,7 +284,7 @@ if (file.exists("sim2_bjlm_fit.rds")) {
 
 ### rstan Implementation
 
-We use the identical `joint_gp.stan` model file established during benchmarking, which matches `bjlm`'s priors (e.g., $Inv-Gamma(1,1)$ for `sigma^2`, $LogNormal(0,1)$ for lengthscale $\rho$).
+We use the identical `joint_gp.stan` model file established during benchmarking, which matches `bjlm`'s priors (e.g., $Inv-Gamma(1,1)$ for `sigma^2`, $LogNormal(0,1)$ for lengthscale $\rho$). `bjlm`'s own default lengthscale prior (`gp_priors()`) is now a resolution-aware prior rather than a fixed $LogNormal(0,1)$, so we pin `rho` explicitly via `gp_priors(rho = prior_lognormal(0, 1))` to keep this an apples-to-apples comparison with the Stan model.
 
 *(We will skip inline printing of the raw stan code for brevity, but it is available in `benchmarks/joint_gp.stan`)*
 

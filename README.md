@@ -175,3 +175,4 @@ Both subgraphs sit inside a yellow background. Nodes in the propensity block (le
 | `vignette("population-inference", package = "bjlm")` | Census-weighted PATE |
 | `vignette("spike-and-slab", package = "bjlm")` | Variable selection at the change-point via spike-and-slab |
 | `vignette("model_comparisons", package = "bjlm")` | Validation against brms and Stan |
+| `vignette("gp-nb-changepoint", package = "bjlm")` | GP confounder + NB change-point outcome: bjlm's conditional transport vs plain Stan HMC |

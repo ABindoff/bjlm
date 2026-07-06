@@ -250,7 +250,6 @@ coefficients.
 
 ```{r compare-posteriors}
 library(posterior)
-library(bayesplot)
 
 # Extract draws for the real change-point modifier
 draws_full <- subset_draws(fit_full$draws,  variable = "delta1_Trt")
