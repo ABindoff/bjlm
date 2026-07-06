@@ -439,7 +439,9 @@ plot_gp <- function(fit, subjects = NULL, n_subjects = 5, n_draws = 200, ...) {
     stop("Package 'ggplot2' is required for plotting GP curves.")
   }
   if (is.null(fit$model) || length(fit$model$latent_gps) == 0) {
-    stop("No latent Gaussian Processes found in this fitted model.")
+    warning("No latent Gaussian Process draws found in this fitted model; ",
+            "nothing to plot.", call. = FALSE)
+    return(invisible(NULL))
   }
 
   draws_mat <- posterior::as_draws_matrix(fit$draws)

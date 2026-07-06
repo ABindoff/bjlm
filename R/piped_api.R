@@ -1372,7 +1372,17 @@ population_predict.bjlm_fit <- function(
 
   if (!is.null(seed)) set.seed(seed)
 
-  draw_mat  <- posterior::as_draws_matrix(object$draws)
+  # Causal PATE (ate/rr) standardises the CONDITIONAL outcome regression E[Y|X,T],
+  # so it uses the auxiliary UNWEIGHTED outcome fit (the primary fit is an
+  # IPW-weighted MSM; standardising that would double-count the propensity, exactly
+  # as in fitted(type = "ate")). Descriptive response/link predictions keep the
+  # primary (weighted) fit.
+  pred_object <- object
+  if (type %in% c("ate", "rr")) {
+    pred_object$draws <- .ensure_unweighted(object)
+  }
+
+  draw_mat  <- posterior::as_draws_matrix(pred_object$draws)
   col_names <- colnames(draw_mat)
   n_draws   <- nrow(draw_mat)
   n_cells   <- nrow(cells)
@@ -1398,7 +1408,7 @@ population_predict.bjlm_fit <- function(
 
   # Returns n_draws x n_cells link-scale prediction matrix, no observed RE applied.
   .lp_mat <- function(cells_eval) {
-    .build_predictions(object, newdata = cells_eval, type = "link", summary = FALSE)
+    .build_predictions(pred_object, newdata = cells_eval, type = "link", summary = FALSE)
   }
 
   # Applies RE marginalisation and census weighting; returns n_draws-length vector.
