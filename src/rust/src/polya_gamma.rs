@@ -181,8 +181,12 @@ pub fn sample_pg(b: f64, c: f64, rng: &mut StdRng) -> f64 {
         return sample_pg1(c, rng);
     }
     
-    // If b is an integer, we can sum PG(1, c) exactly
-    if (b.round() - b).abs() < 1e-9 && b > 0.0 && c_abs <= 5.0 {
+    // If b is a SMALL integer, we can sum PG(1, c) exactly. The cap matters: for
+    // NB the caller passes b = y + r, and r initialises to exactly 1.0, so integer
+    // b = y + 1 arrives on the first sweep -- summing y draws per observation is an
+    // effective hang for large counts (a high-count SBC rep burned 16 CPU-hours in
+    // one call). For b > 50 the moment-matched Gamma below is CLT-accurate anyway.
+    if (b.round() - b).abs() < 1e-9 && b > 0.0 && b <= 50.0 && c_abs <= 5.0 {
         let n = b.round() as u32;
         let mut sum = 0.0;
         for _ in 0..n {

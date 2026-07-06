@@ -131,7 +131,37 @@ likelihood/gradient site via the NB-logit `psi - ln r`. Legacy `run_chain` /
 unshifted PG site each -- audit for INTERNAL consistency before touching (fixing one
 site inside an internally-B-consistent sampler would create this same bug).
 
+**One more bug caught by the SBC run itself: PG integer-b hang.**
+`sample_pg(b, c)` summed b exact PG(1, c) draws whenever b was an integer with
+|c| <= 5. The NB dispersion initialises to exactly r = 1.0, so the FIRST sweep
+calls it with integer b = y + 1 -- a prior-tail SBC dataset with counts ~7e9 burned
+16 CPU-hours inside one call. Fixed: exact summation only for b <= 50; above that
+the moment-matched Gamma (CLT-accurate, and already the path for every non-integer
+b, i.e. every post-init sweep). The SBC script also skips degenerate prior-tail
+datasets (max y > 1e5): conditioning on a y-measurable event leaves p(theta | y),
+and hence SBC rank uniformity, unchanged.
+
 **Certification:** prototype-DGP A/B (transport vs whitened): all params agree to
 2-3 decimals, GP-hyper ESS 16-27x whitened. Full model (change-point + RE + sampled
-r): |z| <= 0.09 agreement, ESS 3.4-8.9x. SBC (NB + GP + change-point, high-count
-regime, no IPW): `data-raw/sbc_nb_gp_transport.R`.
+r): |z| <= 0.20 agreement, GP-hyper ESS 22x/11x/5.7x (alpha/rho/sigma_x); omega now
+recovers ~4.4 (truth 5) in BOTH paths where it previously pinned at the boundary.
+
+SBC certificate (data-raw/sbc_nb_gp_transport.R): NB outcome + latent GP + one
+change-point, high-count regime (b0 ~ N(2.5, 0.5), r ~ gamma(2, scale 5), counts
+regularly in the hundreds), no RE, no IPW, transport default path. 128 reps drawn,
+14 skipped as degenerate prior-tail sims (max y > 1e5), 0 fit failures ->
+114 usable reps, 10-bin chi-square, Bonferroni pass p > 0.0050:
+
+    b0          chisq   5.12  p 0.8235  PASS
+    b0_gp       chisq   8.28  p 0.5061  PASS
+    b1          chisq   8.28  p 0.5061  PASS
+    delta       chisq   3.54  p 0.9388  PASS
+    omega       chisq  16.18  p 0.0633  PASS
+    rho         chisq  12.32  p 0.1961  PASS
+    r           chisq   3.54  p 0.9388  PASS
+    gp_alpha    chisq   8.46  p 0.4889  PASS
+    gp_rho      chisq  11.96  p 0.2153  PASS
+    gp_sigma_x  chisq  10.04  p 0.3477  PASS
+
+Ranks: data-raw/sbc_nb_gp_transport_ranks.rds (local artifact, .rds is gitignored;
+regenerate with the script above).

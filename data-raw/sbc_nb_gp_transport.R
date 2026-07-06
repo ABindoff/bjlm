@@ -77,7 +77,12 @@ for (rep in START:(START + N - 1L)) {
     rows[[j]] <- data.frame(subject = j, tau = tau0, y = y, X_obs = Xobs)
   }
   dat <- do.call(rbind, rows); dat$subject <- factor(dat$subject)
-  if (any(!is.finite(dat$y))) { cat(sprintf("rep %d: bad sim, skipped\n", rep)); next }
+  # Skip degenerate prior-tail datasets. Valid for SBC: {max y <= 1e5} is a
+  # y-measurable event, and p(theta | y) is unchanged by conditioning on it, so
+  # ranks stay uniform on the retained reps. (Unguarded, a tail rep with counts
+  # ~1e8 also used to hang the PG sampler's integer-b summation branch.)
+  if (any(!is.finite(dat$y)) || max(dat$y) > 1e5) {
+    cat(sprintf("rep %d: degenerate sim (max y %.3g), skipped\n", rep, suppressWarnings(max(dat$y)))); next }
   fit <- tryCatch(
     bjlm_model() |>
       outcome(y ~ tau, b0 = ~ 1 + X_obs, b1 = ~ 1, deltas = list(~1),
