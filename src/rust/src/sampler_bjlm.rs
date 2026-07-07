@@ -2470,6 +2470,18 @@ fn hmc_step_om_weighted(
     let om_mean_eff: Vec<f64> = (0..p)
         .map(|j| if data.re_mask_om[k][j] { 0.0 } else { priors.om_mean[k][j] })
         .collect();
+    // RE deviation columns are UNBOUNDED: the change-point location bounds
+    // (om_lb/om_ub, e.g. lb=0) belong to omega itself, not to a per-group offset.
+    // The single omega prior spec is expanded to every column, so without this the
+    // deviations inherit those bounds and are truncated (e.g. forced >= 0), which
+    // (a) biases each subject's change-point and (b) breaks the untruncated
+    // conjugate sigma_re_om Gibbs update. Bounding is left to the fixed columns.
+    let om_lb_eff: Vec<f64> = (0..p)
+        .map(|j| if data.re_mask_om[k][j] { f64::NEG_INFINITY } else { priors.om_lb[k][j] })
+        .collect();
+    let om_ub_eff: Vec<f64> = (0..p)
+        .map(|j| if data.re_mask_om[k][j] { f64::INFINITY } else { priors.om_ub[k][j] })
+        .collect();
     let all_fixed = (0..p).all(|j| !data.re_mask_om[k][j] && priors.om_sd[k][j] <= 0.0);
     if all_fixed { return; }
 
@@ -2529,7 +2541,7 @@ fn hmc_step_om_weighted(
 
         let lp = log_truncated_normal_prior(
             q.as_slice(), &om_mean_eff, &om_sd_eff,
-            &priors.om_lb[k], &priors.om_ub[k],
+            &om_lb_eff, &om_ub_eff,
         );
 
         let mut grad = DVector::<f64>::zeros(p);
@@ -2552,7 +2564,7 @@ fn hmc_step_om_weighted(
     };
 
     let (q_new, accept) = hmc_sample(
-        &state.beta_om[k], energy_fn, adapt, rng, &priors.om_lb[k], &priors.om_ub[k],
+        &state.beta_om[k], energy_fn, adapt, rng, &om_lb_eff, &om_ub_eff,
     );
     state.beta_om[k] = q_new;
     adapt.update_epsilon(accept);
@@ -2603,8 +2615,10 @@ fn sample_om_laplace_weighted(
         let mean_c = om_mean_eff[c];
         let inv_prior = 1.0 / (sd_c * sd_c);
         let x0 = state.beta_om[k][c];
-        let lb = priors.om_lb[k][c];
-        let ub = priors.om_ub[k][c];
+        // RE deviation columns are unbounded (the change-point bounds belong to
+        // omega, not to a per-group offset); see hmc_step_om_weighted.
+        let lb = if data.re_mask_om[k][c] { f64::NEG_INFINITY } else { priors.om_lb[k][c] };
+        let ub = if data.re_mask_om[k][c] { f64::INFINITY } else { priors.om_ub[k][c] };
 
         // 1-D conditional (log value, gradient, curvature) at coefficient x, given
         // the current omega vector. Only rows with nonzero design entry contribute.

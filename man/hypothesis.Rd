@@ -7,7 +7,7 @@
 hypothesis(object, hypotheses, ci = 0.95, ...)
 }
 \arguments{
-\item{object}{A \code{smoothbp_fit} object.}
+\item{object}{A \code{bjlm_fit} (or legacy \code{smoothbp_fit}) object.}
 
 \item{hypotheses}{A character vector of hypothesis strings.}
 
@@ -37,8 +37,8 @@ ratios.
 
 
 Write hypotheses as character strings using exact parameter names as they
-appear in \code{fit$param_names} (e.g. \code{"b2_(Intercept)"},
-\code{"omega_(Intercept)"}). No backtick-quoting is needed; the function
+appear in \code{fit$param_names} (e.g. \code{"delta1_(Intercept)"},
+\code{"omega1_(Intercept)"}). No backtick-quoting is needed; the function
 handles special characters internally.
 
 Two forms are accepted:
@@ -49,14 +49,14 @@ Two forms are accepted:
 the left-hand side minus the right-hand side (direction-adjusted), and
 \eqn{P(H \mid \text{data})} is the proportion of posterior draws
 satisfying the condition.
-Examples: \code{"b2_(Intercept) > 0"},
-\code{"omega_(Intercept) < 4"},
-\code{"b2_(Intercept) - b1_(Intercept) > 0"}.}
+Examples: \code{"delta1_(Intercept) > 0"},
+\code{"omega1_(Intercept) < 4"},
+\code{"delta1_(Intercept) - b1_(Intercept) > 0"}.}
 \item{Contrast}{A numeric expression without a comparison operator.  The
 function summarises the posterior distribution of the derived quantity
 and reports \eqn{P(\text{expression} > 0)} as the directional
 probability.
-Example: \code{"b2_(Intercept) - b1_(Intercept)"}.}
+Example: \code{"delta1_(Intercept) - b1_(Intercept)"}.}
 }
 
 Point-null hypotheses (\code{==}) are not supported because they require
@@ -77,20 +77,20 @@ is equally split.  Star codes: \code{***} ER > 99, \code{**} ER > 19,
 \examples{
 \dontrun{
 # Is the change in slope positive?
-hypothesis(fit, "b2_(Intercept) > 0")
+hypothesis(fit, "delta1_(Intercept) > 0")
 
 # Does the change-point fall before time 4?
-hypothesis(fit, "omega_(Intercept) < 4")
+hypothesis(fit, "omega1_(Intercept) < 4")
 
 # Multiple hypotheses at once
 hypothesis(fit, c(
-  "b2_(Intercept) > 0",
-  "omega_(Intercept) < 4",
-  "b2_(Intercept) - b1_(Intercept) > 0"
+  "delta1_(Intercept) > 0",
+  "omega1_(Intercept) < 4",
+  "delta1_(Intercept) - b1_(Intercept) > 0"
 ))
 
 # Posterior summary of a contrast (no comparison operator)
-hypothesis(fit, "b2_(Intercept) - b1_(Intercept)")
+hypothesis(fit, "delta1_(Intercept) - b1_(Intercept)")
 }
 
 }

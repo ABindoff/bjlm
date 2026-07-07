@@ -34,9 +34,12 @@ the simulation.
 \examples{
 \dontrun{
 dat <- simulate_smoothbp(n_subj = 20, n_obs = 8, seed = 42)
-fit <- smoothbp(y ~ tau, b0 = ~ 1 + (1 | subject), data = dat,
-                priors = smoothbp_priors(omega = prior_normal(3, 2, lb = 0)),
-                chains = 4L, iter = 2000L, warmup = 1000L, seed = 42L)
+fit <- bjlm_model() |>
+  outcome(y ~ tau, b0 = ~ 1 + (1 | subject),
+          deltas = list(~ 1), omega = list(~ 1), rho = list(~ 1),
+          data = dat) |>
+  compile() |>
+  fit(chains = 4L, iter = 2000L, warmup = 1000L, seed = 42L)
 recovery_plot(fit, dat)
 }
 

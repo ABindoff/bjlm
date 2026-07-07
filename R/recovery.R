@@ -22,9 +22,12 @@
 #' @examples
 #' \dontrun{
 #' dat <- simulate_smoothbp(n_subj = 20, n_obs = 8, seed = 42)
-#' fit <- smoothbp(y ~ tau, b0 = ~ 1 + (1 | subject), data = dat,
-#'                 priors = smoothbp_priors(omega = prior_normal(3, 2, lb = 0)),
-#'                 chains = 4L, iter = 2000L, warmup = 1000L, seed = 42L)
+#' fit <- bjlm_model() |>
+#'   outcome(y ~ tau, b0 = ~ 1 + (1 | subject),
+#'           deltas = list(~ 1), omega = list(~ 1), rho = list(~ 1),
+#'           data = dat) |>
+#'   compile() |>
+#'   fit(chains = 4L, iter = 2000L, warmup = 1000L, seed = 42L)
 #' recovery_plot(fit, dat)
 #' }
 #'
@@ -56,12 +59,15 @@ recovery_plot <- function(fit, dat, level = 0.95) {
 
   # ---- Map true_params names -> fit parameter names ------------------------
   # Always look for the (Intercept) term; also check the exact name for sigma.
-  param_map <- c(
+  # bjlm_fit emits INDEXED change-point names for the first breakpoint
+  # (delta1_/omega1_/rho1_); the legacy smoothbp_fit emits b2_/omega_/rho_.
+  # Accept either: use the first candidate present in the fitted draws.
+  param_candidates <- list(
     b0      = "b0_(Intercept)",
     b1      = "b1_(Intercept)",
-    b2      = "b2_(Intercept)",
-    omega   = "omega_(Intercept)",
-    rho     = "rho_(Intercept)",
+    b2      = c("b2_(Intercept)", "delta1_(Intercept)"),
+    omega   = c("omega_(Intercept)", "omega1_(Intercept)"),
+    rho     = c("rho_(Intercept)", "rho1_(Intercept)"),
     sigma   = "sigma",
     sigma_u = "sigma_u"
   )
@@ -80,10 +86,12 @@ recovery_plot <- function(fit, dat, level = 0.95) {
   # ---- Build comparison data frame ----------------------------------------
   scalar_tp <- tp[!names(tp) %in% c("u", "seed")]
 
-  rows <- lapply(names(param_map), function(nm) {
+  rows <- lapply(names(param_candidates), function(nm) {
     truth  <- scalar_tp[[nm]]
-    pname  <- param_map[[nm]]
-    if (is.null(truth) || !pname %in% s$variable) return(NULL)
+    if (is.null(truth)) return(NULL)
+    cands  <- param_candidates[[nm]]
+    pname  <- cands[cands %in% s$variable][1]
+    if (is.na(pname)) return(NULL)
 
     row <- s[s$variable == pname, ]
     data.frame(
@@ -104,7 +112,7 @@ recovery_plot <- function(fit, dat, level = 0.95) {
   }
 
   # Order parameters in the conventional model order
-  param_order <- intersect(names(param_map), cmp$nm)
+  param_order <- intersect(names(param_candidates), cmp$nm)
   cmp$nm <- factor(cmp$nm, levels = rev(param_order))
 
   n_covered <- sum(cmp$covered)
