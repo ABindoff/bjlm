@@ -95,7 +95,21 @@ bjlm <- function(
   weights <- match.arg(weights)
   weight_type_int <- match(weights, c("ate", "att", "stabilised_ate", "stabilised_att", "none")) - 1L
 
-  if (is.null(warmup)) warmup <- floor(iter / 2)
+  # ---- Validate MCMC controls (fail early with a clear message rather than
+  #      passing nonsense to the Rust sampler / a cryptic subscript error) ----
+  chains <- suppressWarnings(as.integer(chains))
+  iter   <- suppressWarnings(as.integer(iter))
+  if (length(chains) != 1L || is.na(chains) || chains < 1L)
+    stop("`chains` must be a positive integer.", call. = FALSE)
+  if (length(iter) != 1L || is.na(iter) || iter < 2L)
+    stop("`iter` must be an integer >= 2.", call. = FALSE)
+  if (is.null(warmup)) warmup <- iter %/% 2L
+  warmup <- suppressWarnings(as.integer(warmup))
+  if (length(warmup) != 1L || is.na(warmup) || warmup < 0L || warmup >= iter)
+    stop("`warmup` must be an integer with 0 <= warmup < iter.", call. = FALSE)
+  cores <- suppressWarnings(as.integer(cores))
+  if (length(cores) != 1L || is.na(cores) || cores < 1L)
+    stop("`cores` must be a positive integer.", call. = FALSE)
   if (is.null(seed)) seed <- sample.int(.Machine$integer.max, 1L)
 
   # ---- Parse outcome formula ----

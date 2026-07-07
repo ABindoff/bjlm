@@ -1619,11 +1619,34 @@ pp_check.bjlm_fit <- function(object, n_draws = 50, ...) {
   outcome_vars <- all.vars(object$outcome_formula)
   y_name <- outcome_vars[1]
   y_obs <- as.double(object$data[[y_name]])
-  
-  fit_mat <- fitted(object, summary = FALSE)
-  sigma_draws <- as.numeric(posterior::as_draws_matrix(object$draws)[, "sigma"])
-  idx <- sample(nrow(fit_mat), min(n_draws, nrow(fit_mat)))
-  y_rep <- do.call(rbind, lapply(idx, function(s) stats::rnorm(length(y_obs), mean = fit_mat[s, ], sd = sigma_draws[s])))
+
+  family <- object$outcome_family
+  if (is.null(family)) family <- object$model$outcome$family$family
+  if (is.null(family)) family <- "gaussian"
+
+  # Draw replicates on the correct scale for the outcome family. `fitted(type =
+  # "link")` returns the linear predictor (identity/logit/log for gaussian/
+  # binomial/negative_binomial); replicate from the matching sampling distribution.
+  eta_mat   <- fitted(object, summary = FALSE, type = "link")
+  draws_mat <- posterior::as_draws_matrix(object$draws)
+  idx       <- sample(nrow(eta_mat), min(n_draws, nrow(eta_mat)))
+  n         <- length(y_obs)
+
+  y_rep <- switch(family,
+    gaussian = {
+      sigma_draws <- as.numeric(draws_mat[, "sigma"])
+      do.call(rbind, lapply(idx, function(s)
+        stats::rnorm(n, mean = eta_mat[s, ], sd = sigma_draws[s])))
+    },
+    binomial = do.call(rbind, lapply(idx, function(s)
+      stats::rbinom(n, size = 1, prob = 1 / (1 + exp(-eta_mat[s, ]))))),
+    negative_binomial = {
+      r_draws <- as.numeric(draws_mat[, "r"])
+      do.call(rbind, lapply(idx, function(s)
+        stats::rnbinom(n, size = r_draws[s], mu = exp(eta_mat[s, ]))))
+    },
+    stop("pp_check() does not support outcome family '", family, "'.", call. = FALSE)
+  )
   bayesplot::ppc_dens_overlay(y_obs, y_rep)
 }
 

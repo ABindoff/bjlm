@@ -19,6 +19,13 @@ const PI_SQ_OVER_8: f64 = PI * PI / 8.0;
 ///
 /// PG(1, c) has mean tanh(c/2) / (2c) and is symmetric in c.
 pub fn sample_pg1(c: f64, rng: &mut StdRng) -> f64 {
+    // A non-finite tilt (from a diverged linear predictor upstream) would make the
+    // rejection loop below spin forever (every proposal is NaN and is skipped).
+    // Fail fast with an actionable message instead of hanging the session.
+    if !c.is_finite() {
+        panic!("Polya-Gamma sampler received a non-finite tilt (c = {c}); the chain \
+                diverged (non-finite linear predictor). Check priors/data/scaling.");
+    }
     let z = c.abs() * 0.5;
 
     // For c ≈ 0, use the series representation
@@ -193,8 +200,12 @@ fn sample_truncated_ig(mu: f64, lambda: f64, trunc: f64, rng: &mut StdRng) -> f6
 /// For integer b, sums b independent PG(1, c) draws.
 /// For float b, approximates via a Gamma distribution with matched mean and variance.
 pub fn sample_pg(b: f64, c: f64, rng: &mut StdRng) -> f64 {
+    if !c.is_finite() || !b.is_finite() {
+        panic!("Polya-Gamma sampler received non-finite parameters (b = {b}, c = {c}); \
+                the chain diverged. Check priors/data/scaling.");
+    }
     let c_abs = c.abs();
-    
+
     // For large c, the exact sampler is exponentially inefficient.
     // We fall back to the Gamma approximation.
     if b == 1.0 && c_abs <= 5.0 {
@@ -371,5 +382,14 @@ mod tests {
             let d = ks_two_sample(&mut samp, &mut refr);
             assert!(d < 0.03, "PG(1,{c}) KS D = {d:.4} vs series reference (threshold 0.03)");
         }
+    }
+
+    // A non-finite tilt must fail fast, not hang (the historical bug: the
+    // rejection loop skipped every NaN proposal forever).
+    #[test]
+    #[should_panic(expected = "non-finite")]
+    fn pg1_panics_on_nonfinite_tilt() {
+        let mut rng = StdRng::seed_from_u64(1);
+        let _ = sample_pg1(f64::NAN, &mut rng);
     }
 }
