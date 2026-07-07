@@ -411,7 +411,10 @@ pip.bjlm_fit <- function(x, ...) {
          "Ensure the model was fitted with `spike = prior_spike_slab(...)`.")
   }
 
-  draws_mat <- as.matrix(posterior::subset_draws(x$draws, variable = gamma_cols))
+  # Use as_draws_matrix(): as.matrix() on a draws_array collapses it to a single
+  # column, so colMeans() below would return one grand-mean value recycled across
+  # every coefficient (i.e. wrong PIPs for all of them).
+  draws_mat <- posterior::as_draws_matrix(posterior::subset_draws(x$draws, variable = gamma_cols))
 
   pip_vals <- colMeans(draws_mat)
   n_draws  <- nrow(draws_mat)
