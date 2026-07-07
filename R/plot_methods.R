@@ -1,26 +1,3 @@
-#' Trace and density plots for a smoothbp_fit
-#'
-#' A thin wrapper around \code{\link{trace_plot}} for the standard
-#' \code{plot()} interface.
-#'
-#' @param x   A \code{smoothbp_fit} object.
-#' @param type One of \code{"trace"} (default), \code{"density"}, or
-#'   \code{"both"}.
-#' @param pars Character vector of parameter names.  Defaults to all
-#'   non-random-effect parameters.
-#' @param ...  Passed to \code{\link{trace_plot}}.
-#' @return A \code{ggplot} object, or a named list of two when
-#'   \code{type = "both"}.
-#' @export
-plot.smoothbp_fit <- function(x, type = "trace", pars = NULL, ...) {
-  if (is.null(pars)) {
-    all_pars <- posterior::variables(x$draws)
-    pars <- all_pars[!grepl("^u\\[", all_pars)]
-  }
-  trace_plot(x, pars = pars, type = type, ...)
-}
-
-
 #' Trace and density plots for a bjlm_fit
 #'
 #' A thin wrapper around \code{\link{trace_plot}} for the standard

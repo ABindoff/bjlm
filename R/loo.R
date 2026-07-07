@@ -61,17 +61,6 @@ log_lik.bjlm_fit <- function(object, ...) {
   return(ll_matrix)
 }
 
-#' Extract pointwise log-likelihood from a smoothbp_fit object
-#'
-#' @param object A \code{smoothbp_fit} object.
-#' @param ... Additional arguments passed to \code{fitted}.
-#'
-#' @return A matrix of size S x N containing pointwise log-likelihoods.
-#' @export
-log_lik.smoothbp_fit <- function(object, ...) {
-  log_lik.bjlm_fit(object, ...)
-}
-
 #' Compute LOO-IC for bjlm_fit objects
 #' 
 #' @param x A `bjlm_fit` object.
@@ -96,22 +85,4 @@ waic.bjlm_fit <- function(x, ...) {
   }
   ll <- log_lik(x)
   loo::waic(ll, ...)
-}
-
-#' Compute LOO-IC for smoothbp_fit objects
-#' 
-#' @param x A `smoothbp_fit` object.
-#' @param ... Additional arguments passed to `loo::loo`.
-#' @export
-loo.smoothbp_fit <- function(x, ...) {
-  loo.bjlm_fit(x, ...)
-}
-
-#' Compute WAIC for smoothbp_fit objects
-#' 
-#' @param x A `smoothbp_fit` object.
-#' @param ... Additional arguments passed to `loo::waic`.
-#' @export
-waic.smoothbp_fit <- function(x, ...) {
-  waic.bjlm_fit(x, ...)
 }

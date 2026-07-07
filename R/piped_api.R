@@ -1256,12 +1256,6 @@ fitted.bjlm_fit <- function(object, newdata = NULL, type = c("link", "response",
   .build_predictions(object, newdata, type, summary, ...)
 }
 
-#' @export
-fitted.smoothbp_fit <- function(object, newdata = NULL, type = c("link", "response"), summary = TRUE, ...) {
-  type <- match.arg(type)
-  .build_predictions(object, newdata, type, summary, ...)
-}
-
 #' Population-level G-computation for bjlm_fit objects
 #'
 #' Estimates the population-average outcome trajectory or the Population Average
@@ -1625,18 +1619,6 @@ pp_check.bjlm_fit <- function(object, n_draws = 50, ...) {
   outcome_vars <- all.vars(object$outcome_formula)
   y_name <- outcome_vars[1]
   y_obs <- as.double(object$data[[y_name]])
-  
-  fit_mat <- fitted(object, summary = FALSE)
-  sigma_draws <- as.numeric(posterior::as_draws_matrix(object$draws)[, "sigma"])
-  idx <- sample(nrow(fit_mat), min(n_draws, nrow(fit_mat)))
-  y_rep <- do.call(rbind, lapply(idx, function(s) stats::rnorm(length(y_obs), mean = fit_mat[s, ], sd = sigma_draws[s])))
-  bayesplot::ppc_dens_overlay(y_obs, y_rep)
-}
-
-#' @export
-pp_check.smoothbp_fit <- function(object, n_draws = 50, ...) {
-  response <- object$response %||% all.vars(object$outcome_formula)[1]
-  y_obs <- as.double(object$data[[response]])
   
   fit_mat <- fitted(object, summary = FALSE)
   sigma_draws <- as.numeric(posterior::as_draws_matrix(object$draws)[, "sigma"])

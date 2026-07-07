@@ -88,50 +88,6 @@
 hypothesis <- function(object, hypotheses, ci = 0.95, ...) UseMethod("hypothesis")
 
 #' @export
-hypothesis.smoothbp_fit <- function(object, hypotheses, ci = 0.95, ...) {
-  if (!is.character(hypotheses) || length(hypotheses) == 0) {
-    stop("`hypotheses` must be a non-empty character vector.")
-  }
-  if (any(grepl("==|!=", hypotheses))) {
-    stop(
-      "Point-null hypotheses (==) are not supported.\n",
-      "For equivalence testing use bayestestR::rope() on posterior_draws(fit)."
-    )
-  }
-  stopifnot(ci > 0, ci < 1)
-
-  # Build a plain data frame of draws (no .chain / .iteration / .draw cols)
-  draws_df <- as.data.frame(posterior::as_draws_df(object$draws))
-  draws_df  <- draws_df[, !grepl("^\\.", names(draws_df)), drop = FALSE]
-
-  # Sort parameter names longest-first to prevent partial substitution
-  # (e.g. "sigma_u" must be replaced before "sigma")
-  param_names   <- names(draws_df)
-  sorted_params <- param_names[order(nchar(param_names), decreasing = TRUE)]
-
-  # Map each parameter name to a syntactically safe placeholder
-  placeholders <- setNames(
-    paste0("..p", seq_along(sorted_params), ".."),
-    sorted_params
-  )
-  safe_df       <- draws_df
-  names(safe_df) <- placeholders[names(safe_df)]
-
-  rows <- lapply(hypotheses, function(h) {
-    .eval_hypothesis(h, safe_df, sorted_params, placeholders, ci)
-  })
-
-  out <- do.call(rbind, rows)
-  structure(
-    out,
-    class    = c("smoothbp_hypothesis", "data.frame"),
-    ci       = ci,
-    n_draws  = nrow(draws_df),
-    fit_call = object$formula
-  )
-}
-
-#' @export
 hypothesis.bjlm_fit <- function(object, hypotheses, ci = 0.95, ...) {
   if (!is.character(hypotheses) || length(hypotheses) == 0) {
     stop("`hypotheses` must be a non-empty character vector.")
@@ -273,38 +229,6 @@ hypothesis.bjlm_fit <- function(object, hypotheses, ci = 0.95, ...) {
 # ---------------------------------------------------------------------------
 # S3 print method
 # ---------------------------------------------------------------------------
-
-#' @export
-print.smoothbp_hypothesis <- function(x, digits = 3, ...) {
-  ci      <- attr(x, "ci")
-  n_draws <- attr(x, "n_draws")
-  ci_pct  <- round(ci * 100)
-
-  cat(sprintf(
-    "Hypothesis tests for smoothbp_fit  (%d posterior draws)\n",
-    n_draws
-  ))
-  cat(sprintf(
-    "Credible interval: %d%%   Evidence ratio = P(H) / (1 - P(H))\n",
-    ci_pct
-  ))
-  cat(sprintf("Stars: *** ER > 99  ** ER > 19  * ER > 3\n"))
-  cat(rep("-", 72), "\n", sep = "")
-
-  out <- x
-  class(out) <- "data.frame"
-
-  # Shorten column names for display
-  names(out)[names(out) == "CI.lower"] <- sprintf("CI.lo(%d%%)", ci_pct)
-  names(out)[names(out) == "CI.upper"] <- sprintf("CI.hi(%d%%)", ci_pct)
-
-  # Round numeric columns
-  num_cols <- sapply(out, is.numeric)
-  out[num_cols] <- lapply(out[num_cols], round, digits = digits)
-
-  print(out, row.names = FALSE)
-  invisible(x)
-}
 
 #' @export
 print.bjlm_hypothesis <- function(x, digits = 3, ...) {
