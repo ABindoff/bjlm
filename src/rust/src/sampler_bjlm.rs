@@ -2890,7 +2890,11 @@ pub fn run_chain_bjlm(
         .collect();
 
     let n_post = n_iter - n_warmup;
-    let n_outcome_params = outcome_state.n_params(false, false, false, outcome_data.outcome_family.clone());
+    // Return the learned random change-point SD(s) sigma_re_om when omega has a
+    // random effect (one per breakpoint; constant for breakpoints without an RE).
+    let has_om_re = outcome_data.n_breakpoints > 0
+        && outcome_data.re_mask_om.iter().any(|m| m.iter().any(|&b| b));
+    let n_outcome_params = outcome_state.n_params(false, false, has_om_re, outcome_data.outcome_family.clone());
     let n_prop_params = prop_data.p_prop;
     let n_total_params = n_outcome_params + n_prop_params + 1; // +1 for mean weight
     let mut draws = DMatrix::<f64>::zeros(n_post, n_total_params);
@@ -3058,7 +3062,7 @@ pub fn run_chain_bjlm(
         // === Store draws ===
         if iter >= n_warmup {
             let row = iter - n_warmup;
-            let outcome_draw = outcome_state.to_vec(false, false, false, outcome_data.outcome_family.clone());
+            let outcome_draw = outcome_state.to_vec(false, false, has_om_re, outcome_data.outcome_family.clone());
             for (col, &val) in outcome_draw.iter().enumerate() {
                 draws[(row, col)] = val;
             }

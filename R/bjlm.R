@@ -242,6 +242,14 @@ bjlm <- function(
     }))
   }
   outcome_names <- c(b0_names, re_names, b1_names, delta_names, om_names, rho_names, "sigma", "sigma_u")
+  # Learned random change-point SD(s). The (non-spike-and-slab) engine returns one
+  # sigma_re_om per breakpoint when omega has a random effect; this must match the
+  # Rust to_vec(..., hierarchical = has_om_re) ordering (right after sigma_u).
+  has_om_re <- n_bp > 0 && any(unlist(re_mask_om_list) == 1L)
+  is_spike  <- !is.null(spike) && inherits(spike, "smoothbp_spike_slab")
+  if (has_om_re && !is_spike) {
+    outcome_names <- c(outcome_names, paste0("sigma_re_om", seq_len(n_bp)))
+  }
   if (outcome_family == "negative_binomial") {
     outcome_names <- c(outcome_names, "r")
   }

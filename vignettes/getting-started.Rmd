@@ -8,7 +8,12 @@ vignette: >
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(collapse = TRUE, comment = "#>", eval = TRUE)
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>",
+  # Not evaluated at build time: this walkthrough fits several full MCMC models
+  # (including a latent-GP model) and runs lfo_cv(), which refits repeatedly --
+  # well beyond the CRAN vignette time budget. The code is shown for reference;
+  # set eval = TRUE to run it locally.
+  eval = FALSE)
 ```
 
 ## Overview

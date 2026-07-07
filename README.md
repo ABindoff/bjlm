@@ -111,6 +111,8 @@ where $\sigma$ is the logistic sigmoid. Each of $b_0$, $b_1$, $\delta_k$, $\omeg
 | `population_predict(fit, type = "ate")` | Population Average Treatment Effect |
 | `population_predict(fit, type = "rr")` | Population marginal Risk Ratio |
 
+Because the primary outcome model is IPW-weighted (a marginal structural model), these estimands are built from an auxiliary **unweighted** conditional outcome regression `E[Y | X, T]` — standing behind standard G-computation (`ate`/`rr`) and textbook doubly robust AIPW (`aipw_*`). That regression is fitted once on first use and cached on the fit object; pass `dr = TRUE` to `fit()` to precompute it. See `?fitted.bjlm_fit`.
+
 ### Weight diagnostics
 
 ```r

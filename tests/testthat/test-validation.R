@@ -41,3 +41,37 @@ test_that("pp_check draws replicates on the correct scale per family", {
   yrep_n <- pn$data$value
   expect_true(all(yrep_n >= 0 & yrep_n == round(yrep_n)))  # counts, not Normal
 })
+
+test_that("a random change-point fit returns the learned sigma_re_om", {
+  set.seed(3); ns <- 12; nt <- 8
+  subj    <- rep(seq_len(ns), each = nt)
+  time    <- rep(seq(0, 10, length.out = nt), ns)
+  omega_i <- (5 + rnorm(ns, 0, 1))[subj]
+  d       <- time - omega_i
+  y       <- 2 + 0.2 * d - 0.8 * d * plogis(3 * d) + rnorm(ns * nt, 0, 0.5)
+  dat     <- data.frame(y = y, time = time, subj = factor(subj))
+
+  cm <- bjlm_model() |>
+    outcome(y ~ time, b0 = ~ 1, b1 = ~ 1,
+            deltas = list(~ 1), omega = list(~ 1 + (1 | subj)), rho = list(~ 1),
+            data = dat) |>
+    compile()
+  fit <- suppressMessages(fit(cm, chains = 1L, iter = 60L, warmup = 30L, seed = 3L, verbose = FALSE))
+
+  vars <- posterior::variables(fit$draws)
+  expect_true("sigma_re_om1" %in% vars)           # was silently dropped before
+  s <- as.numeric(posterior::as_draws_matrix(fit$draws)[, "sigma_re_om1"])
+  expect_true(all(s > 0))
+  expect_gt(stats::sd(s), 0)                       # actually sampled, not a constant
+})
+
+test_that("a fixed change-point fit does NOT gain a sigma_re_om column", {
+  set.seed(4); n <- 40
+  dat <- data.frame(y = rnorm(n), time = rep(0, n))
+  cm <- bjlm_model() |>
+    outcome(y ~ time, b0 = ~ 1, b1 = ~ 1,
+            deltas = list(~ 1), omega = list(~ 1), rho = list(~ 1), data = dat) |>
+    compile()
+  fit <- suppressMessages(fit(cm, chains = 1L, iter = 60L, warmup = 30L, seed = 4L, verbose = FALSE))
+  expect_false(any(grepl("^sigma_re_om", posterior::variables(fit$draws))))
+})
