@@ -242,24 +242,15 @@ bjlm <- function(
     }))
   }
   outcome_names <- c(b0_names, re_names, b1_names, delta_names, om_names, rho_names, "sigma", "sigma_u")
-  # Learned random change-point SD(s). The (non-spike-and-slab) engine returns one
-  # sigma_re_om per breakpoint when omega has a random effect; this must match the
-  # Rust to_vec(..., hierarchical = has_om_re) ordering (right after sigma_u).
   has_om_re <- n_bp > 0 && any(unlist(re_mask_om_list) == 1L)
-  is_spike  <- !is.null(spike) && inherits(spike, "smoothbp_spike_slab")
-  if (has_om_re && !is_spike) {
-    outcome_names <- c(outcome_names, paste0("sigma_re_om", seq_len(n_bp)))
-  }
-  if (outcome_family == "negative_binomial") {
-    outcome_names <- c(outcome_names, "r")
-  }
-  outcome_names <- c(outcome_names, gp_hyper_names)
-
-  # ---- Spike-and-slab masks and names ----
   use_spike <- !is.null(spike) && inherits(spike, "smoothbp_spike_slab")
+
+  # ---- Spike-and-slab masks, slab-sd overrides, and gamma/pi names ----
+  b1_spike_mask <- NULL
+  delta_spike_mask <- NULL
+  ss_names <- character(0)
   if (use_spike) {
-    # Build masks: 1 = eligible for spike-and-slab, 0 = always included
-    # GP columns should NOT be in the spike mask (they are modelled separately)
+    # GP columns are modelled separately and are NOT spike-eligible.
     gp_b1_cols <- if (length(latent_gps) > 0) {
       vapply(latent_gps, function(g) g$name, character(1))
     } else character(0)
@@ -277,15 +268,29 @@ bjlm <- function(
       }
     }
 
-    # Gamma parameter names appended after standard outcome names
     gamma_b1_names <- if (p_b1 > 0) paste0("gamma_b1_", colnames(x_b1)) else character(0)
     gamma_delta_names <- if (n_bp > 0) {
       unlist(lapply(seq_len(n_bp), function(k)
         paste0("gamma_delta", k, "_", colnames(x_deltas_list[[k]]))))
     } else character(0)
     pi_name <- if (spike$learn_pi) "pi_ss" else character(0)
-    outcome_names <- c(outcome_names, gamma_b1_names, gamma_delta_names, pi_name)
+    ss_names <- c(gamma_b1_names, gamma_delta_names, pi_name)
   }
+
+  # Trailing draw-name segments MUST follow the Rust to_vec() order exactly (the
+  # draws are named positionally, with only a column-count check). to_vec emits:
+  # [gammas, pi] (spike-and-slab, right after sigma_u) -> [sigma_re_om] (non-SS
+  # random change-point) -> [r] (negative binomial) -> [gp hyperparameters].
+  # Previously the gammas/pi were appended AFTER r and gp_hyper, silently
+  # mislabelling every trailing column for spike-and-slab + NB or GP fits.
+  outcome_names <- c(outcome_names, ss_names)
+  if (has_om_re && !use_spike) {
+    outcome_names <- c(outcome_names, paste0("sigma_re_om", seq_len(n_bp)))
+  }
+  if (outcome_family == "negative_binomial") {
+    outcome_names <- c(outcome_names, "r")
+  }
+  outcome_names <- c(outcome_names, gp_hyper_names)
 
   # ---- Process Latent GPs ----
   gp_list <- list()

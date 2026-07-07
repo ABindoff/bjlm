@@ -75,3 +75,35 @@ test_that("a fixed change-point fit does NOT gain a sigma_re_om column", {
   fit <- suppressMessages(fit(cm, chains = 1L, iter = 60L, warmup = 30L, seed = 4L, verbose = FALSE))
   expect_false(any(grepl("^sigma_re_om", posterior::variables(fit$draws))))
 })
+
+test_that("spike-and-slab + NB draw columns are correctly aligned (names match values)", {
+  set.seed(5); ns <- 20; nt <- 8
+  subj <- rep(seq_len(ns), each = nt)
+  time <- rep(seq(0, 10, length.out = nt), ns)
+  X    <- rnorm(ns)[subj]
+  d    <- time - 5
+  eta  <- 2.5 + 0.2 * d - 0.8 * d * plogis(3 * d) + 0.3 * X
+  y    <- rnbinom(ns * nt, size = 6, mu = exp(eta))
+  dat  <- data.frame(y = y, time = time, X = X, subj = factor(subj))
+
+  cm <- bjlm_model() |>
+    outcome(y ~ time, b0 = ~ 1 + X, b1 = ~ 1, deltas = list(~ 1 + X),
+            omega = list(~ 1), rho = list(~ 1), data = dat, family = "negative_binomial") |>
+    compile()
+  fit <- suppressMessages(fit(cm, spike = prior_spike_slab(pi = 0.5),
+                              chains = 1L, iter = 80L, warmup = 40L, seed = 5L, verbose = FALSE))
+  dm <- posterior::as_draws_matrix(fit$draws)
+
+  # Before the reorder, gammas were named after r/gp_hyper while Rust emits them
+  # right after sigma_u -> every trailing column was mislabelled. Checks that would
+  # have failed then:
+  #  - the NB overdispersion "r" is strictly positive (not a 0/1 indicator)
+  expect_true(all(dm[, "r"] > 0))
+  expect_false(all(dm[, "r"] %in% c(0, 1)))
+  #  - every gamma_* column is a 0/1 Kuo-Mallick inclusion indicator
+  gcols <- grep("^gamma_", colnames(dm), value = TRUE)
+  expect_gte(length(gcols), 1L)
+  for (g in gcols)
+    expect_true(all(dm[, g] %in% c(0, 1)),
+                info = paste("column", g, "is not 0/1 -> misaligned draw names"))
+})
