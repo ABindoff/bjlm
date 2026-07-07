@@ -36,6 +36,7 @@ Suggests:
     brms,
     rstan,
     dplyr,
+    fibr,
     gt,
     DiagrammeR,
     htmltools
