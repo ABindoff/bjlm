@@ -26,6 +26,11 @@ interval; \code{"mean (SD)"} shows mean and posterior SD.}
 
 \item{show_rhat}{Logical; append \eqn{\hat{R}} to each cell (default
 \code{FALSE}).}
+
+\item{exponentiate}{Logical or \code{NULL}. Whether to exponentiate the
+coefficients (e.g. to report odds/rate ratios). \code{NULL} (default)
+exponentiates automatically for binomial and negative-binomial models and
+leaves Gaussian models on the identity scale.}
 }
 \value{
 A \code{gt_tbl} object (or a \code{knitr_kable} if \strong{gt} is not installed).

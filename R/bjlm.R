@@ -37,6 +37,8 @@
 #' @param deltas A list of one-sided formulas for slope-change parameters at each breakpoint.
 #' @param omega A list of one-sided formulas for breakpoint location parameters.
 #' @param rho A list of one-sided formulas for transition sharpness parameters.
+#' @param latent_gps A list of latent Gaussian-process blocks (as built by
+#'   \code{\link{latent_gp}}) to include as time-varying confounders; empty by default.
 #' @param propensity A two-sided formula of the form \code{treatment ~ covariates},
 #'   specifying the propensity score model. The LHS must be a binary (0/1) variable.
 #' @param weights Character string specifying the weight type:
@@ -50,8 +52,14 @@
 #'   over \code{outcome_priors} and \code{propensity_prior_sd}.
 #' @param outcome_priors A list of priors for the outcome model parameters (legacy).
 #'   See \code{\link{smoothbp_priors}} for details.
+#' @param outcome_family Character. Outcome likelihood: \code{"gaussian"} (default),
+#'   \code{"binomial"}, or \code{"negative_binomial"}.
+#' @param propensity_family Character. Propensity likelihood: \code{"binomial"}
+#'   (default) or \code{"gaussian"}.
 #' @param propensity_prior_sd Numeric. Standard deviation for the isotropic normal
 #'   prior on propensity model coefficients (legacy, default: 2.5).
+#' @param spike Optional \code{\link{prior_spike_slab}} object enabling
+#'   spike-and-slab variable selection on the \code{b1}/\code{delta} coefficients.
 #' @param chains Integer. Number of MCMC chains (default: 4).
 #' @param iter Integer. Total number of iterations per chain (default: 5000).
 #' @param warmup Integer. Number of warmup iterations (default: half of \code{iter}).

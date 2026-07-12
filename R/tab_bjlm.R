@@ -22,6 +22,10 @@
 #'   interval; `"mean (SD)"` shows mean and posterior SD.
 #' @param show_rhat Logical; append \eqn{\hat{R}} to each cell (default
 #'   `FALSE`).
+#' @param exponentiate Logical or `NULL`. Whether to exponentiate the
+#'   coefficients (e.g. to report odds/rate ratios). `NULL` (default)
+#'   exponentiates automatically for binomial and negative-binomial models and
+#'   leaves Gaussian models on the identity scale.
 #'
 #' @return A `gt_tbl` object (or a `knitr_kable` if **gt** is not installed).
 #'

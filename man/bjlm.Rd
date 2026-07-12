@@ -48,6 +48,9 @@ Supports random intercepts via \code{(1 | subject)}.}
 
 \item{rho}{A list of one-sided formulas for transition sharpness parameters.}
 
+\item{latent_gps}{A list of latent Gaussian-process blocks (as built by
+\code{\link{latent_gp}}) to include as time-varying confounders; empty by default.}
+
 \item{propensity}{A two-sided formula of the form \code{treatment ~ covariates},
 specifying the propensity score model. The LHS must be a binary (0/1) variable.}
 
@@ -67,8 +70,17 @@ over \code{outcome_priors} and \code{propensity_prior_sd}.}
 \item{outcome_priors}{A list of priors for the outcome model parameters (legacy).
 See \code{\link{smoothbp_priors}} for details.}
 
+\item{outcome_family}{Character. Outcome likelihood: \code{"gaussian"} (default),
+\code{"binomial"}, or \code{"negative_binomial"}.}
+
+\item{propensity_family}{Character. Propensity likelihood: \code{"binomial"}
+(default) or \code{"gaussian"}.}
+
 \item{propensity_prior_sd}{Numeric. Standard deviation for the isotropic normal
 prior on propensity model coefficients (legacy, default: 2.5).}
+
+\item{spike}{Optional \code{\link{prior_spike_slab}} object enabling
+spike-and-slab variable selection on the \code{b1}/\code{delta} coefficients.}
 
 \item{chains}{Integer. Number of MCMC chains (default: 4).}
 
