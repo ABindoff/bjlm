@@ -210,17 +210,24 @@ bjlm <- function(
     outcome_priors <- smoothbp_priors()
   }
 
-  # Expand outcome priors into vectors
-  dm_meta <- list(
-    col_names_b0 = colnames(x_b0),
-    col_names_b1 = colnames(x_b1),
-    col_names_deltas = if (n_bp > 0) lapply(x_deltas_list, colnames) else list(),
-    col_names_om = if (n_bp > 0) lapply(x_om_list, colnames) else list(),
-    col_names_rho = if (n_bp > 0) lapply(x_rho_list, colnames) else list(),
-    X_om = if (n_bp > 0) x_om_list else list(),
-    X_rho = if (n_bp > 0) x_rho_list else list()
+  # Expand outcome priors into per-coefficient vectors and, when spike-and-slab
+  # is active, apply the slab-SD override + build the inclusion masks. Shared
+  # with .sbc_draw_prior() so calibration draws use identical priors to the fit.
+  use_spike <- !is.null(spike) && inherits(spike, "smoothbp_spike_slab")
+  gp_b1_cols <- if (length(latent_gps) > 0) {
+    vapply(latent_gps, function(g) g$name, character(1))
+  } else character(0)
+  .opv <- .build_outcome_prior_vectors(
+    outcome_priors, spike,
+    x_b0, x_b1,
+    if (n_bp > 0) x_deltas_list else list(),
+    if (n_bp > 0) x_om_list else list(),
+    if (n_bp > 0) x_rho_list else list(),
+    gp_names = gp_b1_cols
   )
-  pv <- .build_prior_vectors(outcome_priors, dm_meta)
+  pv <- .opv$pv
+  b1_spike_mask <- .opv$b1_spike_mask
+  delta_spike_mask <- .opv$delta_spike_mask
 
   # ---- Parameter names ----
   b0_names <- paste0("b0_", colnames(x_b0))
@@ -243,31 +250,10 @@ bjlm <- function(
   }
   outcome_names <- c(b0_names, re_names, b1_names, delta_names, om_names, rho_names, "sigma", "sigma_u")
   has_om_re <- n_bp > 0 && any(unlist(re_mask_om_list) == 1L)
-  use_spike <- !is.null(spike) && inherits(spike, "smoothbp_spike_slab")
 
-  # ---- Spike-and-slab masks, slab-sd overrides, and gamma/pi names ----
-  b1_spike_mask <- NULL
-  delta_spike_mask <- NULL
+  # ---- Spike-and-slab gamma/pi names (masks + slab-sd override done above) ----
   ss_names <- character(0)
   if (use_spike) {
-    # GP columns are modelled separately and are NOT spike-eligible.
-    gp_b1_cols <- if (length(latent_gps) > 0) {
-      vapply(latent_gps, function(g) g$name, character(1))
-    } else character(0)
-    b1_spike_mask <- as.integer(!colnames(x_b1) %in% gp_b1_cols)
-    delta_spike_mask <- lapply(x_deltas_list, function(dm) rep(1L, ncol(dm)))
-
-    # Override slab prior sd for spike-eligible b1 and delta parameters
-    slab_sd <- spike$slab$sd
-    for (j in seq_len(p_b1)) {
-      if (b1_spike_mask[j] == 1L) pv$b1$sd[j] <- slab_sd
-    }
-    for (k in seq_len(n_bp)) {
-      for (j in seq_len(ncol(x_deltas_list[[k]]))) {
-        if (delta_spike_mask[[k]][j] == 1L) pv$deltas[[k]]$sd[j] <- slab_sd
-      }
-    }
-
     gamma_b1_names <- if (p_b1 > 0) paste0("gamma_b1_", colnames(x_b1)) else character(0)
     gamma_delta_names <- if (n_bp > 0) {
       unlist(lapply(seq_len(n_bp), function(k)

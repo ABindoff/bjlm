@@ -256,6 +256,63 @@
 }
 
 # ---------------------------------------------------------------------------
+# Build the per-coefficient outcome prior vectors AND the spike-and-slab masks,
+# applying the slab-SD override for spike-eligible b1/delta columns.
+#
+# This is the single source of truth for the outcome priors the sampler
+# actually uses. It is called by bjlm() at fit time and by .sbc_draw_prior()
+# during simulation-based calibration, so that "draw == fit" holds by shared
+# construction rather than by two copies of the same logic drifting apart.
+#
+# Inputs are the already-built design matrices (so column names and ordering
+# match exactly) plus the names of any latent-GP columns, which are modelled
+# separately and are NOT spike-eligible.
+#
+# Returns:
+#   $pv               : list(b0, b1, deltas, om, rho) of per-column data.frames
+#                       (name/mean/sd/lb/ub), with slab SDs already applied.
+#   $b1_spike_mask    : integer vector (1 = spike-eligible) or NULL if no spike.
+#   $delta_spike_mask : list of integer vectors per breakpoint, or NULL.
+# ---------------------------------------------------------------------------
+.build_outcome_prior_vectors <- function(outcome_priors, spike,
+                                         x_b0, x_b1, x_deltas_list,
+                                         x_om_list, x_rho_list,
+                                         gp_names = character(0)) {
+  n_bp <- length(x_deltas_list)
+  dm_meta <- list(
+    col_names_b0     = colnames(x_b0),
+    col_names_b1     = colnames(x_b1),
+    col_names_deltas = if (n_bp > 0) lapply(x_deltas_list, colnames) else list(),
+    col_names_om     = if (n_bp > 0) lapply(x_om_list, colnames) else list(),
+    col_names_rho    = if (n_bp > 0) lapply(x_rho_list, colnames) else list(),
+    X_om             = if (n_bp > 0) x_om_list else list(),
+    X_rho            = if (n_bp > 0) x_rho_list else list()
+  )
+  pv <- .build_prior_vectors(outcome_priors, dm_meta)
+
+  use_spike <- !is.null(spike) && inherits(spike, "smoothbp_spike_slab")
+  b1_spike_mask <- NULL
+  delta_spike_mask <- NULL
+  if (use_spike) {
+    # GP columns are modelled separately and are NOT spike-eligible.
+    b1_spike_mask    <- as.integer(!colnames(x_b1) %in% gp_names)
+    delta_spike_mask <- lapply(x_deltas_list, function(dm) rep(1L, ncol(dm)))
+
+    slab_sd <- spike$slab$sd
+    for (j in seq_len(ncol(x_b1))) {
+      if (b1_spike_mask[j] == 1L) pv$b1$sd[j] <- slab_sd
+    }
+    for (k in seq_len(n_bp)) {
+      for (j in seq_len(ncol(x_deltas_list[[k]]))) {
+        if (delta_spike_mask[[k]][j] == 1L) pv$deltas[[k]]$sd[j] <- slab_sd
+      }
+    }
+  }
+
+  list(pv = pv, b1_spike_mask = b1_spike_mask, delta_spike_mask = delta_spike_mask)
+}
+
+# ---------------------------------------------------------------------------
 # Build the full parameter name vector
 # ---------------------------------------------------------------------------
 .param_names <- function(dm, pv, learn_pi = FALSE) {
