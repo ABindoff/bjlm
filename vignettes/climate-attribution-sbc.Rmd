@@ -1,0 +1,232 @@
+---
+title: "Calibrating a Climate Attribution Model with SBC"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Calibrating a Climate Attribution Model with SBC}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>",
+  # Not evaluated at build time: this walkthrough fits a full latent-GP +
+  # change-point model and then runs simulation-based calibration, which refits
+  # the model ~100 times per panel -- far beyond the CRAN vignette budget. The
+  # code is shown for reference; set eval = TRUE to run it locally.
+  eval = FALSE)
+```
+
+## The attribution problem
+
+Suppose you have temperature records from a set of stations and you want to know
+whether an external **forcing event**, a volcanic eruption, an emissions change,
+the onset of a regional regime shift, changed the *rate* of warming, and if so,
+when. The clean way to state this is a continuous piecewise (change-point) trend:
+a baseline slope, then a slope **change** `delta` at an event time `omega`.
+
+The complication is **natural variability**. Temperature also wanders under slow
+internal modes (an oceanic oscillation, say) that have nothing to do with the
+forcing. If you ignore it, a run of naturally warm years right after the event
+will masquerade as a forced acceleration (a false positive). `bjlm` models that
+natural variability explicitly as a latent **Gaussian process** (GP), informed
+by a noisily observed index (here an oscillation index `enso`), and estimates the
+forced change-point *jointly* with it.
+
+That joint estimation raises the question this vignette is about:
+
+> **Does the GP soak up systematic (forced) variation from the outcome model, or
+> vice versa?** If the GP is too flexible it can absorb the forced trend shift,
+> hiding a real acceleration. If it is too rigid, genuine natural variability
+> leaks into the change-point, manufacturing an acceleration that is not there.
+
+Neither failure is visible from a single fit, which always returns *some* split
+between "forced" and "natural." The tool that detects it is **simulation-based
+calibration** (SBC): if the sampler and priors recover the truth on data
+simulated from the model, then the `delta` (attribution) posterior and the GP
+posterior are each honest, and in particular are not trading variance between
+them. We build the model, then certify exactly that.
+
+## 1. A generative model for forced trend + natural variability
+
+We work in **decades since 1970** so the time axis runs over `[0, 5]` (1970 to
+2020); this keeps the change-point priors on a natural scale. Each station sees
+the *same* forced response but its *own* natural-variability trajectory.
+
+```{r simulate}
+library(bjlm)
+set.seed(1)
+
+n_series <- 16      # stations / ensemble members
+n_obs    <- 12      # annual-ish observations per station
+series   <- rep(seq_len(n_series), each = n_obs)
+decade   <- rep(seq(0, 5, length.out = n_obs), n_series)   # decades since 1970
+sig      <- function(x) 1 / (1 + exp(-x))
+
+## --- true parameters ---
+alpha_true <- 0.4;  rho_gp_true <- 1.2;  sigx_true <- 0.12   # natural variability (GP)
+b0_true    <- 0.0;  bgp_true    <- 1.0                       # baseline + GP loading
+b1_true    <- 0.05                                           # baseline warming (per decade)
+delta_true <- 0.20                                           # FORCED slope change
+omega_true <- 3.0                                            # event at ~year 2000
+rhocp_true <- 4.0                                            # transition sharpness
+sigma_true <- 0.08                                           # measurement noise
+
+## --- draw one natural-variability path per station and build temperatures ---
+grid <- sort(unique(decade))
+D    <- as.matrix(dist(grid))
+K    <- alpha_true^2 * exp(-0.5 * (D / rho_gp_true)^2) + diag(1e-6, n_obs)
+L    <- t(chol(K))
+
+temp <- numeric(length(series)); enso <- numeric(length(series))
+for (s in seq_len(n_series)) {
+  idx <- which(series == s); ts <- decade[idx]
+  f   <- as.numeric(L %*% rnorm(n_obs))          # latent natural variability
+  enso[idx] <- f + rnorm(n_obs, 0, sigx_true)    # noisily observed oscillation index
+  d   <- ts - omega_true
+  mu  <- b0_true + bgp_true * f +                # level + natural variability
+         b1_true * (ts - omega_true) +           # baseline warming
+         delta_true * d * sig(rhocp_true * d)    # FORCED slope change after the event
+  temp[idx] <- mu + rnorm(n_obs, 0, sigma_true)
+}
+
+dat <- data.frame(temp = temp, decade = decade, enso = enso, series = factor(series))
+```
+
+Each generative term maps to a model parameter: `b1` is the baseline warming
+slope, `delta` is the forced change in slope (the attribution target), `omega`
+the event time, `rho` its abruptness, and the GP contributes `bgp * f` to the
+temperature level, where `f` is the latent oscillation with amplitude `alpha`,
+lengthscale `rho_gp`, observed through `enso` with noise `sigx`.
+
+## 2. Fitting the joint model
+
+The latent GP is declared on the observed `enso` index and loads on the outcome
+intercept (`b0 = ~ 1 + enso`); the change-point lives in the `deltas`/`omega`/`rho`
+blocks. No propensity model is needed, this is a calibration/attribution problem,
+not a treatment-effect problem, so `bjlm` fits a true posterior.
+
+```{r fit}
+clim_model <- bjlm_model() |>
+  outcome(
+    temp ~ decade,
+    b0     = ~ 1 + enso,     # GP (natural variability) loads on the level
+    b1     = ~ 1,            # baseline warming slope
+    deltas = list(~ 1),      # FORCED slope change
+    omega  = list(~ 1),      # event time
+    rho    = list(~ 1),      # transition sharpness
+    data   = dat
+  ) |>
+  latent_gp(
+    name = "enso", data = dat, obs_var = "enso",
+    time_var = "decade", time_out_var = "decade", time_trt_var = "decade",
+    subject = "series", kernel = "se"
+  ) |>
+  compile()
+
+# Priors on the year/decade scale: the event lies within the record, the
+# transition is resolvable, and the forced slope change is weakly informative.
+clim_priors <- bjlm_priors(outcome = smoothbp_priors(
+  b0     = list("(Intercept)" = prior_normal(0, 1), "enso" = prior_normal(0, 1)),
+  b1     = prior_normal(0, 0.3),
+  deltas = prior_normal(0, 0.3),
+  omega  = prior_normal(3, 1, lb = 0, ub = 5),
+  rho    = prior_normal(4, 1.5, lb = 0),
+  sigma  = prior_invgamma(3, 2)))
+
+clim_fit <- fit(clim_model, priors = clim_priors, chains = 4, iter = 2000, cores = 2)
+
+summary(clim_fit, model = "outcome")
+```
+
+`delta1_(Intercept)` is the attributed change in warming rate. `plot_gp()` shows
+the natural-variability paths the model peeled off, and `plot_predictions()` the
+reconstructed temperature trajectories:
+
+```{r plots}
+plot_gp(clim_fit, n_subjects = 4)
+plot_predictions(clim_fit, type = "subject", n_subjects = 4)
+```
+
+A single fit like this always produces an answer. The next section asks whether
+that answer can be *trusted*, and specifically whether the forced and natural
+parts are cleanly separated.
+
+## 3. Certifying the decomposition with SBC
+
+`sbc()` re-runs the whole "draw truth from the prior, simulate, re-fit, rank the
+truth in its posterior" loop many times. For a calibrated model the ranks are
+uniform. The quantities that matter here are checked by default:
+
+- **`delta1_(Intercept)`** — the forced slope change (the attribution claim);
+- **`b1_(Intercept)`**, **`omega1_(Intercept)`**, **`rho1_(Intercept)`** — the rest of the trend;
+- **`enso_alpha`**, **`enso_rho`**, **`b0_enso`** — the GP amplitude, lengthscale, and loading.
+
+If `delta` *and* the GP quantities are all calibrated **at the same time**, then
+neither component is systematically borrowing the other's variance, which is
+exactly the confounding we were worried about.
+
+```{r sbc}
+cal <- sbc(clim_model, priors = clim_priors, reps = 100, iter = 1500, chains = 2, cores = 2)
+
+cal          # plain-language verdict per quantity
+plot(cal)    # rank histograms; flat within the grey band = calibrated
+```
+
+Read the printed table directly. A verdict of *"well calibrated"* on
+`delta1_(Intercept)` means the attributed acceleration is neither inflated nor
+deflated by the presence of the GP. Watch the `n_used` column too: if `omega` is
+identified in only a fraction of prior-drawn datasets, that is telling you the
+event time is often unrecoverable when the forcing is weak, useful to know before
+you make a claim about *when* the change happened.
+
+Because the natural-variability confounding is the point, it is worth adding the
+two directional functionals explicitly, the pre- and post-event slopes, so you
+can see that both the baseline and the accelerated regime are calibrated:
+
+```{r sbc-functionals}
+cal2 <- sbc(clim_model, priors = clim_priors, reps = 100,
+  functionals = list(
+    slope_pre  = function(p) p[["b1_(Intercept)"]],
+    slope_post = function(p) p[["b1_(Intercept)"]] + p[["delta1_(Intercept)"]]
+  ))
+cal2
+```
+
+## 4. How much prior does the separation need? A lengthscale sweep
+
+The single knob that governs how much systematic variation the GP *can* absorb is
+its **lengthscale prior**. A very diffuse lengthscale prior lets the GP wander on
+long time scales, precisely the scales on which a forced trend lives, so it can
+quietly eat the acceleration and leave `delta` mis-calibrated. `bjlm` lets you
+find that breaking point directly:
+
+```{r prior-sensitivity}
+sens <- sbc_prior_sensitivity(
+  clim_model,
+  grid = c(0.3, 0.6, 1.0, 1.5, 2.0),   # GP lengthscale prior widths (log-sd)
+  target = "^delta",                   # watch the attribution functional
+  reps = 100, iter = 1500, chains = 2, cores = 2
+)
+
+sens         # min slope-calibration p-value vs prior width
+plot(sens)   # below the red line, the GP has started absorbing the forced trend
+```
+
+The plot turns a vague anxiety ("is my GP eating the trend?") into a concrete
+threshold: the lengthscale prior width beyond which the forced-slope calibration
+fails. Below that width the trend-versus-GP decomposition is trustworthy; above
+it, you are no longer measuring a forced change but partly re-labelling natural
+variability. That is a statement about *your* model on *your* observation grid,
+and it is not something a generic calibration check can give you.
+
+## Takeaways
+
+- A latent GP and a continuous change-point can, in principle, trade variance:
+  the GP can hide a forced trend, or absorb none and let natural variability
+  fake one. Which way it goes depends on the priors and the sampling grid.
+- `sbc()` certifies both directions at once. When `delta` (the attribution) and
+  the GP amplitude/lengthscale/loading are *jointly* calibrated, the
+  decomposition is honest.
+- `sbc_prior_sensitivity()` locates the lengthscale prior width at which that
+  honesty breaks, giving you a defensible statement of how much prior information
+  your attribution actually requires.
