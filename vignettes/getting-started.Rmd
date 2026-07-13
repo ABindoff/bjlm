@@ -256,3 +256,106 @@ loo::loo_compare(list(True_Model = lfo_res, Bad_Model = lfo_bad))
 ```
 
 As expected, the true model (which correctly specifies the outcome generating process) will yield a significantly higher ELPD score, demonstrating LFO-CV's ability to select the better forward-predicting model!
+
+---
+
+## 5. Checking Calibration with Simulation-Based Calibration (SBC)
+
+Before you trust a model's estimates, it is worth asking a sharper question than "did it converge?": **does this sampler, with these priors, actually recover the truth on data that look like mine?** Simulation-based calibration (SBC; Talts et al. 2018) answers it directly. For many replicates it draws a full parameter set from the prior, simulates a dataset from it, re-fits, and records where each true value falls within its posterior. If the model is calibrated, those ranks are uniform; a systematic departure tells you the intervals are too narrow (overconfident), too wide, or biased.
+
+`bjlm` builds this in with `sbc()`. It is designed so the result is easy to read, so you are never left staring at rank histograms wondering what they mean.
+
+### Running SBC
+
+You can call `sbc()` on a **compiled model** (to check calibration *before* committing to an expensive fit) or on a **fitted model** (which reuses that fit's model, priors, and design). Calibration is cleanest for a change-point outcome model, where the interpretable quantities, the segment slopes and breakpoints, are exactly what SBC checks by default.
+
+Note that SBC only needs the model's *design* (its covariates, times, and subject structure), not its response: each replicate simulates a fresh `Y`. So a small template dataset with the right columns is enough to compile the model we want to check:
+
+```{r sbc-data}
+set.seed(1)
+n_subj <- 25; n_obs <- 6
+subj  <- rep(seq_len(n_subj), each = n_obs)
+dat_cp <- data.frame(
+  Y   = 0,                                              # placeholder; SBC simulates Y
+  tau = rep(seq(0, 6, length.out = n_obs), n_subj),     # change-point stays inside [0, 6]
+  Trt = rbinom(n_subj, 1, 0.5)[subj],
+  id  = factor(subj)
+)
+```
+
+```{r sbc-basic}
+# A change-point outcome model: does the treatment change the slope, and when?
+cp_model <- bjlm_model() |>
+  outcome(
+    Y ~ tau,
+    b0     = ~ 1,
+    b1     = ~ 1,              # initial slope
+    deltas = list(~ 1 + Trt),  # slope CHANGE (modified by treatment) = "did it accelerate?"
+    omega  = list(~ 1),        # breakpoint location
+    rho    = list(~ 1),        # transition sharpness
+    data   = dat_cp
+  ) |>
+  compile()
+
+# Use priors that keep the change-point inside the observed time range; a
+# breakpoint prior with mass outside [min(tau), max(tau)] is unidentified for
+# reasons unrelated to the sampler, and sbc() will warn you if so.
+cal_priors <- bjlm_priors(outcome = smoothbp_priors(
+  b0 = prior_normal(0, 3), b1 = prior_normal(0, 1), deltas = prior_normal(0, 1),
+  omega = prior_normal(3, 1, lb = 0), rho = prior_normal(4, 1, lb = 0),
+  sigma = prior_invgamma(3, 2)))
+
+cal <- sbc(cp_model, priors = cal_priors, reps = 100, iter = 1500, chains = 2)
+
+cal          # a plain-language verdict per quantity
+plot(cal)    # rank histograms with the uniform envelope band
+```
+
+The `print()` output is the point of the whole exercise: each quantity gets a one-line reading, for example *"well calibrated"*, *"intervals too NARROW (overconfident)"*, or *"estimates biased HIGH"*, so you do not need to decode histogram shapes yourself. `plot()` shows the underlying rank histograms; a calibrated quantity is flat within the shaded band.
+
+To run SBC on a model you have already fitted, just pass the fit; it reuses the same model, priors, and design automatically:
+
+```{r sbc-on-fit}
+cal_fit <- sbc(fit_long, reps = 100)
+```
+
+### Reading the guards
+
+Two robustness details are handled for you and reported honestly:
+
+* **Thinning to independence.** SBC assumes independent draws, so `sbc()` thins each quantity by its effective sample size before ranking.
+* **Convergence filtering.** A replicate whose fit did not converge would otherwise masquerade as miscalibration, so `sbc()` drops per-quantity draws with high R-hat and reports an `n_used` column. A low `n_used` for, say, `omega1_(Intercept)` is itself informative: it means the change-point is often *non-identified* on prior-drawn data. The overall failed/degenerate-fit rate is reported too.
+
+Because SBC is conditional on convergence, and because IPW-weighted (marginal structural) fits target a pseudo-posterior, `sbc()` prints a short note when either applies so you can interpret the result correctly.
+
+### Custom target quantities
+
+The defaults, the initial slope, each slope difference, the breakpoints and sharpness, the GP amplitude and lengthscale, and the scales, cover most needs. You can add your own functionals as closures of the named parameter vector. For example, to calibrate the *treated* group's total slope change ("did the treated group accelerate?"):
+
+```{r sbc-functionals}
+cal2 <- sbc(cp_model, priors = cal_priors, reps = 100,
+  functionals = list(
+    treated_accel = function(p) p[["delta1_(Intercept)"]] + p[["delta1_Trt"]]
+  ))
+```
+
+### Spike-and-slab models
+
+When you fit with `prior_spike_slab()`, the selected coefficients have a point mass at zero, so a rank statistic is ill-defined for them. `sbc()` automatically excludes them from the rank check (calibrating the always-continuous quantities instead); calibrate the selection itself with `pip()`, which reports posterior inclusion probabilities.
+
+### Prior sensitivity: how much prior does my decomposition need?
+
+The distinctive question for a joint trend-plus-GP model is: *how much prior information does my decomposition actually require?* If the GP lengthscale prior is too diffuse, the GP can absorb genuine trend, quietly degrading the calibration of the slope estimates. `sbc_prior_sensitivity()` answers this by sweeping the GP lengthscale prior width and reporting where the slope (`delta`) calibration breaks:
+
+```{r sbc-prior-sensitivity}
+sens <- sbc_prior_sensitivity(
+  gp_model,
+  grid = c(0.3, 0.6, 1.0, 1.5, 2.0),  # GP lengthscale prior widths (sdlog)
+  reps = 100
+)
+
+sens         # a table of slope-calibration p-value vs prior width
+plot(sens)   # below the red line, the slope decomposition is miscalibrated
+```
+
+This turns a vague worry ("is my GP eating the trend?") into a concrete threshold, the prior width beyond which you can no longer trust the trend-versus-GP split, which no generic SBC tool can tell you for your model.
