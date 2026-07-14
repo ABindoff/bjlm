@@ -4,10 +4,15 @@
 \alias{plot.bjlm_sbc}
 \title{Plot SBC rank histograms with a uniform envelope}
 \usage{
-\method{plot}{bjlm_sbc}(x, ...)
+\method{plot}{bjlm_sbc}(x, style = c("ecdf", "hist"), conf = 0.95, ...)
 }
 \arguments{
 \item{x}{A \code{bjlm_sbc} object.}
+
+\item{style}{\code{"ecdf"} (default) for ECDF-difference panels with a
+simultaneous band, or \code{"hist"} for rank histograms.}
+
+\item{conf}{Simultaneous coverage of the ECDF band. Default \code{0.95}.}
 
 \item{...}{Unused.}
 }
@@ -15,9 +20,17 @@
 A \code{ggplot} object.
 }
 \description{
-One panel per calibrated quantity showing the rank histogram; a well-
-calibrated quantity is flat within the shaded band (the ~99\% interval of bin
-counts expected under uniformity). Departures translate to the verdicts in
-\link{print.bjlm_sbc}: a U-shape means overconfident intervals, a hump means
-under-confident intervals, and a slope means bias.
+The default \code{"ecdf"} style plots, per quantity, the empirical CDF of the
+fractional ranks minus the uniform CDF, inside a \strong{simultaneous}
+confidence band (Säilynoja, Bürkner & Vehtari 2022). A calibrated quantity
+stays entirely within the band; the ECDF-difference view is more sensitive
+and free of the bin-width choice that the rank histogram (\code{style = "hist"})
+depends on. A curve leaving the band \emph{downward then upward} (an S) means
+overconfident intervals, an inverted-S means under-confident, and a one-sided
+excursion means bias.
+}
+\references{
+Säilynoja, T., Bürkner, P.-C., & Vehtari, A. (2022). Graphical
+test for discrete uniformity and its applications in goodness-of-fit
+evaluation and multiple sample comparison. \emph{Statistics and Computing}.
 }

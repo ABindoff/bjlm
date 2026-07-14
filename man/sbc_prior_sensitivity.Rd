@@ -2,15 +2,23 @@
 % Please edit documentation in R/sbc_methods.R
 \name{sbc_prior_sensitivity}
 \alias{sbc_prior_sensitivity}
-\title{SBC prior-sensitivity sweep for the GP lengthscale}
+\title{Prior-sensitivity sweep over the GP lengthscale}
 \usage{
 sbc_prior_sensitivity(
   object,
   grid,
+  priors = NULL,
   gp_name = NULL,
   target = "^delta",
+  gen_priors = NULL,
+  gen_lengthscale = NULL,
+  gen_amplitude = NULL,
+  gen_sigma_x = NULL,
+  level = 0.9,
+  rhat_threshold = 1.05,
   reps = 50L,
   iter = 1000L,
+  warmup = NULL,
   chains = 2L,
   cores = 1L,
   seed = 1L,
@@ -23,23 +31,70 @@ sbc_prior_sensitivity(
 \item{grid}{Numeric vector of lengthscale-prior widths (\code{sdlog} of a
 log-normal centred at the resolution-aware location). Larger = more diffuse.}
 
+\item{priors}{The \emph{fitting} priors (your real analysis priors) whose GP
+lengthscale is swept. Defaults to a fit's own \code{priors_used}, else
+\code{\link[=bjlm_priors]{bjlm_priors()}}.}
+
 \item{gp_name}{Which GP to vary (defaults to the first).}
 
-\item{target}{Regex selecting the functionals to summarise. Default \code{"^delta"}
-(the slope differences).}
+\item{target}{Regex selecting the target coefficient(s): the uniformity
+functionals (default mode) or the coverage columns (coverage mode). Default
+\code{"^delta"} (the slope differences).}
 
-\item{reps, iter, chains, cores, seed, ...}{Passed to \code{\link[=sbc]{sbc()}} at each grid point.}
+\item{gen_priors}{Coverage mode only: a \code{\link[=bjlm_priors]{bjlm_priors()}} bundle defining the
+fixed data-generating reality. It is used only to \emph{generate} data (the
+fit still uses \code{priors}); supplying it switches the function into coverage
+mode. Make it informative (e.g. a real, non-zero slope change) so there is a
+true trend the GP could steal.}
+
+\item{gen_lengthscale}{Coverage mode only: the true GP lengthscale used to
+generate data (held fixed across the sweep). Defaults to the resolution-aware
+prior median.}
+
+\item{gen_amplitude, gen_sigma_x}{Coverage mode only: the true GP marginal SD
+and observation-noise SD used to generate data. Pin these to a realistic
+signal-to-noise so the forced trend is not swamped by natural variability;
+if \code{NULL}, they are drawn from the model's GP priors (which can be too
+diffuse to leave the slope identifiable).}
+
+\item{level}{Coverage mode only: nominal central posterior-interval level.
+Default \code{0.9}.}
+
+\item{rhat_threshold}{Convergence gate applied per target coefficient.
+Default \code{1.05}.}
+
+\item{reps, iter, warmup, chains, cores, seed}{Replicates and MCMC controls at each
+width. \code{warmup} defaults to \code{iter / 2}.}
+
+\item{...}{Passed to \code{\link[=sbc]{sbc()}} (default mode) or \code{\link[=fit]{fit()}} (coverage mode).}
 }
 \value{
-A \code{bjlm_sbc_sensitivity} object; \code{print()} and \code{plot()} show the
-minimum slope-calibration p-value against prior width.
+A \code{bjlm_sbc_sensitivity} object; \code{print()} and \code{plot()} show either
+the uniformity p-value or the coverage against prior width.
 }
 \description{
-Answers "how much prior information does my trend-versus-GP decomposition
-require?" by running \code{\link[=sbc]{sbc()}} over a grid of GP lengthscale prior widths and
-reporting where the slope (\code{delta}) calibration breaks. A wide lengthscale
-prior lets the GP absorb genuine trend, degrading the calibration of the
-slope-difference functionals; the sweep shows the width at which that happens.
+Two related questions about how the GP lengthscale prior affects the
+trend-versus-GP decomposition, selected by whether you supply \code{gen_priors}.
+}
+\details{
+\strong{Sampler-robustness mode (default, \code{gen_priors = NULL}).} Runs a
+self-consistent \code{\link[=sbc]{sbc()}} at each prior width (truth drawn from the \emph{same}
+prior used to fit) and reports the slope (\code{delta}) uniformity p-value. This
+checks whether the \emph{sampler} stays calibrated as the prior geometry changes.
+Because draw == fit, an exact sampler is uniform at \emph{every} width, so a
+dip here flags where the GP-hyperparameter geometry trips the sampler, not
+where the GP "absorbs the trend"; the curve is typically non-monotonic and
+should be read as a sampler-difficulty map, not an identifiability threshold.
+
+\strong{Coverage mode (supply \code{gen_priors}).} Answers the identifiability
+question directly. Data are generated from a \emph{fixed} reality
+(\code{gen_priors} for the coefficients and a fixed GP lengthscale \code{gen_lengthscale}),
+then \emph{fit} with an increasingly wide GP lengthscale prior. It reports the
+coverage of the true slope change by its posterior interval. As the fit prior
+widens, the GP gains the freedom to absorb the forced trend and the slope's
+coverage falls below nominal, giving a concrete threshold for how much
+lengthscale prior information your attribution needs. This deliberately breaks
+draw == fit, so coverage (not rank uniformity) is the honest metric.
 }
 \seealso{
 \code{\link[=sbc]{sbc()}}.

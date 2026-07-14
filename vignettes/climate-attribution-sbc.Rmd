@@ -169,8 +169,14 @@ exactly the confounding we were worried about.
 cal <- sbc(clim_model, priors = clim_priors, reps = 100, iter = 1500, chains = 2, cores = 2)
 
 cal          # plain-language verdict per quantity
-plot(cal)    # rank histograms; flat within the grey band = calibrated
+plot(cal)    # ECDF-difference bands (default); a flat line inside the band = calibrated
 ```
+
+`plot()` draws, per quantity, the empirical CDF of the ranks minus the uniform
+CDF, inside a *simultaneous* confidence band (Säilynoja, Bürkner & Vehtari 2022):
+a calibrated quantity stays entirely within the band, and unlike a histogram the
+view does not depend on a bin-width choice. Pass `style = "hist"` for the classic
+rank histograms instead.
 
 Read the printed table directly. A verdict of *"well calibrated"* on
 `delta1_(Intercept)` means the attributed acceleration is neither inflated nor
@@ -192,48 +198,81 @@ cal2 <- sbc(clim_model, priors = clim_priors, reps = 100,
 cal2
 ```
 
-## 4. How much prior does the separation need? A lengthscale sweep
+## 4. Does the GP actually steal the trend? A prior-robustness sweep
 
-The single knob that governs how much systematic variation the GP *can* absorb is
-its **lengthscale prior**. A very diffuse lengthscale prior lets the GP wander on
-long time scales, precisely the scales on which a forced trend lives, so it can
-quietly eat the acceleration and leave `delta` mis-calibrated. `bjlm` lets you
-find that breaking point directly:
+Section 3 checked the *sampler*. The sharper worry is *identifiability*: with a
+diffuse GP lengthscale prior, could the GP wander on long time scales, the scales
+a forced trend lives on, and quietly absorb the acceleration?
 
-```{r prior-sensitivity}
-sens <- sbc_prior_sensitivity(
+A tempting shortcut is to re-run `sbc()` across lengthscale prior widths and watch
+the `delta` uniformity, but that is the wrong tool, and it is worth saying why.
+`sbc()` draws the truth from the *same* prior it fits with, so an exact sampler is
+uniform at **every** width by construction; a model with a wide prior that
+genuinely *can* absorb the trend would still be SBC-calibrated (its `delta`
+posterior would simply be honestly wider). A self-consistent sweep therefore maps
+where the *sampler* struggles, not where the GP eats the trend, and its curve is
+typically non-monotonic. (`sbc_prior_sensitivity()` runs that self-consistent
+sweep if you omit `gen_priors`; read it only as a sampler-difficulty diagnostic.)
+
+The identifiability question needs a different experiment: hold a **fixed
+reality** (a real forced trend, natural variability at a plausible scale), then
+**fit** with an increasingly diffuse lengthscale prior and ask whether the true
+slope change still lands inside its posterior interval. That is coverage, and it
+is what `sbc_prior_sensitivity()` computes once you supply `gen_priors`:
+
+```{r coverage-sweep}
+# "Reality": a genuine +0.2 / decade forced slope change, with natural
+# variability at a ~1.2-decade lengthscale and modest amplitude.
+reality <- bjlm_priors(outcome = smoothbp_priors(
+  b0     = list("(Intercept)" = prior_normal(0, 0.5), "enso" = prior_normal(1, 0.1)),
+  b1     = prior_normal(0.05, 0.02),
+  deltas = prior_normal(0.20, 0.05),        # a real forced acceleration
+  omega  = prior_normal(3, 0.5, lb = 0, ub = 5),
+  rho    = prior_normal(4, 0.5, lb = 0),
+  sigma  = prior_invgamma(6, 1)))
+
+cov <- sbc_prior_sensitivity(
   clim_model,
-  grid = c(0.3, 0.6, 1.0, 1.5, 2.0),   # GP lengthscale prior widths (log-sd)
-  target = "^delta",                   # watch the attribution functional
+  grid            = c(0.3, 0.8, 1.5, 2.5),  # GP lengthscale prior widths (of the FIT)
+  priors          = clim_priors,            # the analysis priors used to fit
+  gen_priors      = reality,                # the fixed data-generating reality
+  gen_lengthscale = 1.2,                    # true natural-variability timescale
+  gen_amplitude   = 0.4, gen_sigma_x = 0.12,
+  target          = "^delta", level = 0.9,
   reps = 100, iter = 1500, chains = 2, cores = 2
 )
 
-sens         # min slope-calibration p-value at each prior width
-plot(sens)   # p-value (y) vs prior width (x); the red line is p = 0.05
+cov          # coverage of the true slope change at each prior width
+plot(cov)    # coverage (y) vs prior width (x); the red line is the nominal 90%
 ```
 
-Read the plot along the width axis, left to right. At **narrow** lengthscale
-priors the slope-calibration p-value sits **above** the red p = 0.05 line: the
-GP is constrained, and the trend-versus-GP decomposition is trustworthy. As the
-prior **widens**, the p-value falls and eventually drops **below** the line
-(here at a width of about 1): the GP now has enough freedom to absorb the forced
-trend, so a "forced change" is partly just re-labelled natural variability. The
-`print` output names that crossing width for you.
+For this model the answer is reassuring: the slope's coverage stays at its nominal
+level all the way out to a very diffuse lengthscale prior. The reason is physical,
+not lucky. The oscillation index is **observed**, so the GP lengthscale is pinned
+by the data (the index's own autocorrelation) rather than by the prior, and a
+forced change-point has a sharp, localised transition that a smooth GP cannot
+mimic. Widening the prior simply does not hand the GP enough freedom to eat the
+trend, so the decomposition is robust and you do **not** need a tight lengthscale
+prior to trust the attribution.
 
-That crossing point, the widest lengthscale prior your data can tolerate before
-the attribution stops being trustworthy, is a concrete answer to how much prior
-information your decomposition requires. It is a statement about *your* model on
-*your* observation grid, and not something a generic calibration check can give
-you.
+That robustness is a property of *this* design, not a theorem. Run the same sweep
+with the index removed, or made far noisier (a larger `gen_sigma_x`), and the GP,
+now unconstrained, can absorb the trend: coverage falls below nominal and the plot
+shows the width at which it does. That is the honest use of the tool, not to
+*assume* the GP eats the trend, but to find out whether, for your data, it can.
 
 ## Takeaways
 
-- A latent GP and a continuous change-point can, in principle, trade variance:
-  the GP can hide a forced trend, or absorb none and let natural variability
-  fake one. Which way it goes depends on the priors and the sampling grid.
-- `sbc()` certifies both directions at once. When `delta` (the attribution) and
-  the GP amplitude/lengthscale/loading are *jointly* calibrated, the
-  decomposition is honest.
-- `sbc_prior_sensitivity()` locates the lengthscale prior width at which that
-  honesty breaks, giving you a defensible statement of how much prior information
-  your attribution actually requires.
+- A latent GP and a continuous change-point can, in principle, trade variance.
+  Whether they actually do is an empirical question about your design, not a
+  foregone conclusion.
+- `sbc()` (Section 3) certifies the *sampler*: when `delta` and the GP
+  amplitude/lengthscale/loading are *jointly* calibrated, the posterior is
+  trustworthy for the priors you chose.
+- `sbc_prior_sensitivity(gen_priors = ...)` (Section 4) certifies
+  *identifiability*: it holds a fixed reality and asks whether the forced slope
+  survives an increasingly diffuse GP lengthscale prior. Here it does, because
+  the observed index pins the GP.
+- Read a self-consistent (`gen_priors = NULL`) prior sweep only as a
+  sampler-difficulty map; because draw == fit, an exact sampler is uniform at
+  every width, so it cannot answer the identifiability question.

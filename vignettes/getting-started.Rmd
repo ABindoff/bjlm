@@ -343,19 +343,25 @@ cal2 <- sbc(cp_model, priors = cal_priors, reps = 100,
 
 When you fit with `prior_spike_slab()`, the selected coefficients have a point mass at zero, so a rank statistic is ill-defined for them. `sbc()` automatically excludes them from the rank check (calibrating the always-continuous quantities instead); calibrate the selection itself with `pip()`, which reports posterior inclusion probabilities.
 
-### Prior sensitivity: how much prior does my decomposition need?
+### Prior sensitivity: does the GP steal the trend?
 
-The distinctive question for a joint trend-plus-GP model is: *how much prior information does my decomposition actually require?* If the GP lengthscale prior is too diffuse, the GP can absorb genuine trend, quietly degrading the calibration of the slope estimates. `sbc_prior_sensitivity()` answers this by sweeping the GP lengthscale prior width and reporting where the slope (`delta`) calibration breaks:
+The distinctive question for a joint trend-plus-GP model is whether a diffuse GP lengthscale prior lets the GP absorb genuine trend. `sbc_prior_sensitivity()` answers it in **coverage mode**: generate data from a fixed reality (`gen_priors`), then fit with an increasingly wide GP lengthscale prior and check whether the true slope change still lands in its posterior interval.
 
 ```{r sbc-prior-sensitivity}
+# `reality` is a bjlm_priors() bundle encoding a genuine, non-zero slope change
+# (see the climate-attribution vignette for a full worked example).
 sens <- sbc_prior_sensitivity(
   gp_model,
-  grid = c(0.3, 0.6, 1.0, 1.5, 2.0),  # GP lengthscale prior widths (sdlog)
+  grid       = c(0.3, 0.8, 1.5, 2.5),   # GP lengthscale prior widths (sdlog) of the fit
+  priors     = cal_priors,              # the analysis priors used to fit
+  gen_priors = reality,                 # a fixed reality with a real slope change
+  gen_lengthscale = 1.0,                # true natural-variability timescale
+  target     = "^delta", level = 0.9,
   reps = 100
 )
 
-sens         # a table of slope-calibration p-value vs prior width
-plot(sens)   # below the red line, the slope decomposition is miscalibrated
+sens         # slope-recovery coverage vs prior width
+plot(sens)   # coverage (y) vs width (x); below the red line the GP is eating the trend
 ```
 
-This turns a vague worry ("is my GP eating the trend?") into a concrete threshold, the prior width beyond which you can no longer trust the trend-versus-GP split, which no generic SBC tool can tell you for your model.
+If coverage holds across the grid, the decomposition is robust and you do not need a tight lengthscale prior; if it falls, the plot shows the width beyond which you can no longer trust the trend-versus-GP split. (Omit `gen_priors` and the function instead runs a *self-consistent* SBC sweep, which reports sampler robustness across priors rather than identifiability, see the climate-attribution vignette for the distinction.)

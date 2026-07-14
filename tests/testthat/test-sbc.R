@@ -105,6 +105,59 @@ test_that("sbc() errors clearly on misuse", {
   expect_error(sbc_prior_sensitivity(cm, grid = c(0.5, 1)), "latent GP")
 })
 
+test_that("ECDF simultaneous band flags uniform vs skewed ranks", {
+  band <- bjlm:::.sbc_ecdf_band(150L, conf = 0.95)
+  expect_named(band, c("p", "lo", "hi"))
+  expect_true(all(band$lo <= band$hi))
+  in_band <- function(r) {
+    d <- bjlm:::.sbc_ecdf_diff(r, band); all(d$diff >= d$lo & d$diff <= d$hi)
+  }
+  set.seed(1)
+  expect_true(in_band(runif(150)))          # uniform ranks stay inside
+  expect_false(in_band(rbeta(150, 2, 6)))   # skewed ranks leave the band
+})
+
+test_that("plot.bjlm_sbc supports both ecdf and hist styles", {
+  skip_if_not_installed("ggplot2")
+  set.seed(1)
+  ranks <- cbind(good = runif(120), biased = rbeta(120, 2, 6))
+  obj <- structure(list(ranks = ranks, n_kept = 120L,
+                        verdicts = bjlm:::.sbc_verdicts(ranks)), class = "bjlm_sbc")
+  expect_s3_class(plot(obj), "ggplot")                  # default = ecdf
+  expect_s3_class(plot(obj, style = "hist"), "ggplot")
+})
+
+test_that("sbc_prior_sensitivity coverage mode returns a coverage table", {
+  skip_if_not_installed("ggplot2")
+  set.seed(3); ns <- 8L; nt <- 6L
+  dat <- data.frame(Y = 0, tau = rep(seq(0, 5, length.out = nt), ns),
+                    X = rnorm(ns * nt), sid = factor(rep(seq_len(ns), each = nt)))
+  cm <- bjlm_model() |>
+    outcome(Y ~ tau, b0 = ~ 1 + X, b1 = ~ 1, deltas = list(~ 1),
+            omega = list(~ 1), rho = list(~ 1), data = dat) |>
+    latent_gp(name = "X", data = dat, obs_var = "X", time_var = "tau",
+              time_out_var = "tau", time_trt_var = "tau", subject = "sid") |>
+    compile()
+  fitp <- bjlm_priors(outcome = smoothbp_priors(
+    b0 = list("(Intercept)" = prior_normal(0, 1), "X" = prior_normal(0, 1)),
+    b1 = prior_normal(0, 0.3), deltas = prior_normal(0, 0.3),
+    omega = prior_normal(3, 1, lb = 0, ub = 5), rho = prior_normal(4, 1.5, lb = 0),
+    sigma = prior_invgamma(3, 2)))
+  genp <- bjlm_priors(outcome = smoothbp_priors(
+    b0 = list("(Intercept)" = prior_normal(0, 0.5), "X" = prior_normal(1, 0.1)),
+    b1 = prior_normal(0.05, 0.02), deltas = prior_normal(0.2, 0.05),
+    omega = prior_normal(3, 0.5, lb = 0, ub = 5), rho = prior_normal(4, 0.5, lb = 0),
+    sigma = prior_invgamma(6, 1)))
+  res <- suppressMessages(sbc_prior_sensitivity(
+    cm, grid = c(0.5, 1.5), priors = fitp, gen_priors = genp,
+    gen_lengthscale = 1.2, gen_amplitude = 0.4, gen_sigma_x = 0.12, level = 0.9,
+    reps = 2L, iter = 200L, chains = 2L, seed = 5L, rhat_threshold = 3))
+  expect_equal(res$mode, "coverage")
+  expect_true(all(c("width", "coverage", "bias", "n_kept") %in% names(res$table)))
+  expect_output(print(res), "coverage")
+  expect_s3_class(plot(res), "ggplot")
+})
+
 test_that("SBC uniformity certification (opt-in, slow)", {
   skip_on_cran()
   skip_if(!nzchar(Sys.getenv("BJLM_SBC_CERT")), "set BJLM_SBC_CERT=1 to run the SBC cert")
