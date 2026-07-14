@@ -80,6 +80,10 @@ test_that("fitted S3 method, diagnostics, and plotting functions work as expecte
   
   p_pred_sub <- plot_predictions(fit_res, type = "subject", n_subjects = 2)
   expect_s3_class(p_pred_sub, "ggplot")
+  # The per-subject 95% credible band must actually be drawn (it was previously
+  # computed and then discarded).
+  expect_true("GeomRibbon" %in% vapply(p_pred_sub$layers,
+                                       function(l) class(l$geom)[1], character(1)))
   
   p_pred_both <- plot_predictions(fit_res, type = "both", n_subjects = 2)
   expect_s3_class(p_pred_both, "ggplot")
@@ -97,6 +101,34 @@ test_that("fitted S3 method, diagnostics, and plotting functions work as expecte
   expect_type(p_prop_both, "list")
   expect_s3_class(p_prop_both$overlap, "ggplot")
   expect_s3_class(p_prop_both$weights, "ggplot")
+})
+
+test_that("plot_predictions draws subject bands for a GP model without a random intercept", {
+  skip_if_not_installed("ggplot2")
+  set.seed(7)
+  ns <- 6L; nt <- 5L
+  dat <- data.frame(
+    Y = rnorm(ns * nt),
+    tau = rep(seq(0, 4, length.out = nt), ns),
+    X_obs = rnorm(ns * nt),
+    series = factor(rep(seq_len(ns), each = nt))
+  )
+  fit_gp <- bjlm_model() |>
+    outcome(Y ~ tau, b0 = ~ 1 + X_obs, b1 = ~ 1, deltas = list(~ 1),
+            omega = list(~ 1), rho = list(~ 1), data = dat) |>
+    latent_gp(name = "X_obs", data = dat, obs_var = "X_obs", time_var = "tau",
+              time_out_var = "tau", time_trt_var = "tau", subject = "series") |>
+    compile() |>
+    fit(chains = 1L, iter = 12L, warmup = 6L, seed = 7L, verbose = FALSE)
+
+  # No random intercept, so the subject grouping must fall back to the GP's
+  # subject variable; the subject band was invisible before that fallback.
+  expect_null(fit_gp$subject_var)
+  p <- plot_predictions(fit_gp, type = "subject", n_subjects = 3)
+  expect_s3_class(p, "ggplot")
+  geoms <- vapply(p$layers, function(l) class(l$geom)[1], character(1))
+  expect_true("GeomRibbon" %in% geoms)   # credible band drawn
+  expect_true("GeomLine" %in% geoms)     # fitted trajectory drawn
 })
 
 test_that("recovery_plot works with bjlm_fit objects", {

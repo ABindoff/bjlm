@@ -291,7 +291,7 @@ trace_plot <- function(
 }
 
 # Suppress CRAN check warnings for ggplot variables
-Propensity <- Treatment <- Weight <- y_fit <- .data <- NULL
+Propensity <- Treatment <- Weight <- y_fit <- lo <- hi <- .data <- NULL
 
 #' Plot outcome predictions and piecewise trajectories
 #'
@@ -338,7 +338,10 @@ plot_predictions <- function(fit, type = c("population", "subject", "both"), sub
     pop_df$y_fit <- pop_pred$fitted_mean
     pop_df$lo <- pop_pred$fitted_Q2.5
     pop_df$hi <- pop_pred$fitted_Q97.5
-    
+    # Order by time so the ribbon/line connect left-to-right rather than in
+    # (unsorted) data-frame row order.
+    pop_df <- pop_df[order(pop_df[[tau_name]]), , drop = FALSE]
+
     p <- p +
       ggplot2::geom_ribbon(data = pop_df, ggplot2::aes(ymin = lo, ymax = hi), fill = "#2b5c8f", alpha = 0.15) +
       ggplot2::geom_line(data = pop_df, ggplot2::aes(y = y_fit, colour = "Population Trajectory"), linewidth = 1.2)
@@ -357,8 +360,14 @@ plot_predictions <- function(fit, type = c("population", "subject", "both"), sub
     }
   }
   
-  if (type %in% c("subject", "both") && !is.null(fit$subject_var)) {
-    sub_var <- fit$subject_var
+  # Subject grouping: prefer the random-intercept group, but fall back to a
+  # latent-GP subject when the model has per-subject GPs but no random intercept
+  # (e.g. a GP-confounder change-point model).
+  sub_var <- fit$subject_var
+  if (is.null(sub_var) && length(fit$model$latent_gps) > 0) {
+    sub_var <- fit$model$latent_gps[[1]]$subject
+  }
+  if (type %in% c("subject", "both") && !is.null(sub_var) && sub_var %in% names(fit$data)) {
     all_subs <- unique(fit$data[[sub_var]])
     if (is.null(subjects)) {
       subjects <- sample(all_subs, min(n_subjects, length(all_subs)))
@@ -370,14 +379,20 @@ plot_predictions <- function(fit, type = c("population", "subject", "both"), sub
       sub_df$y_fit <- sub_pred$fitted_mean
       sub_df$lo <- sub_pred$fitted_Q2.5
       sub_df$hi <- sub_pred$fitted_Q97.5
-      
-      # Convert subjects to factor for distinct colors
+
+      # Convert subjects to factor for distinct colors, and order by (subject,
+      # time) so each subject's ribbon and line connect in time order.
       sub_df[[sub_var]] <- as.factor(sub_df[[sub_var]])
-      
+      sub_df <- sub_df[order(sub_df[[sub_var]], sub_df[[tau_name]]), , drop = FALSE]
+
       p <- p +
-        ggplot2::geom_line(data = sub_df, ggplot2::aes(y = y_fit, group = .data[[sub_var]], colour = "Subject-specific Fitted"), 
-                           linewidth = 0.8, alpha = 0.8, linetype = "dashed")
-                           
+        # Per-subject 95% credible band (previously computed but not drawn).
+        ggplot2::geom_ribbon(data = sub_df,
+                             ggplot2::aes(ymin = lo, ymax = hi, group = .data[[sub_var]]),
+                             fill = "#2ecc71", alpha = 0.15) +
+        ggplot2::geom_line(data = sub_df, ggplot2::aes(y = y_fit, group = .data[[sub_var]], colour = "Subject-specific Fitted"),
+                           linewidth = 0.8, alpha = 0.9, linetype = "dashed")
+
       scale_colors["Subject-specific Fitted"] <- "#2ecc71"
     }
   }
