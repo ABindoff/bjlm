@@ -208,16 +208,23 @@ sens <- sbc_prior_sensitivity(
   reps = 100, iter = 1500, chains = 2, cores = 2
 )
 
-sens         # min slope-calibration p-value vs prior width
-plot(sens)   # below the red line, the GP has started absorbing the forced trend
+sens         # min slope-calibration p-value at each prior width
+plot(sens)   # p-value (y) vs prior width (x); the red line is p = 0.05
 ```
 
-The plot turns a vague anxiety ("is my GP eating the trend?") into a concrete
-threshold: the lengthscale prior width beyond which the forced-slope calibration
-fails. Below that width the trend-versus-GP decomposition is trustworthy; above
-it, you are no longer measuring a forced change but partly re-labelling natural
-variability. That is a statement about *your* model on *your* observation grid,
-and it is not something a generic calibration check can give you.
+Read the plot along the width axis, left to right. At **narrow** lengthscale
+priors the slope-calibration p-value sits **above** the red p = 0.05 line: the
+GP is constrained, and the trend-versus-GP decomposition is trustworthy. As the
+prior **widens**, the p-value falls and eventually drops **below** the line
+(here at a width of about 1): the GP now has enough freedom to absorb the forced
+trend, so a "forced change" is partly just re-labelled natural variability. The
+`print` output names that crossing width for you.
+
+That crossing point, the widest lengthscale prior your data can tolerate before
+the attribution stops being trustworthy, is a concrete answer to how much prior
+information your decomposition requires. It is a statement about *your* model on
+*your* observation grid, and not something a generic calibration check can give
+you.
 
 ## Takeaways
 
