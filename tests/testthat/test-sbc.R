@@ -50,6 +50,30 @@ test_that(".sbc_simulate replaces y and preserves the design", {
   expect_identical(sim$time, orig$time)      # covariates untouched
 })
 
+test_that(".sbc_simulate handles mismatched GP and outcome time grids", {
+  set.seed(4); ns <- 6L
+  cov_rows <- do.call(rbind, lapply(seq_len(ns), function(s)
+    data.frame(series = s, t_cov = sort(runif(7, 0, 5)), z = rnorm(7))))
+  out_rows <- do.call(rbind, lapply(seq_len(ns), function(s)
+    data.frame(series = s, t_out = sort(runif(5, 0, 5)), Y = 0, zgp = 0)))
+  cov_rows$series <- factor(cov_rows$series); out_rows$series <- factor(out_rows$series)
+  cm <- bjlm_model() |>
+    outcome(Y ~ t_out, b0 = ~ 1 + zgp, b1 = ~ 1, deltas = list(~ 1),
+            omega = list(~ 1), rho = list(~ 1), data = out_rows) |>
+    latent_gp(name = "zgp", data = cov_rows, obs_var = "z", time_var = "t_cov",
+              time_out_var = "t_out", time_trt_var = "t_out", subject = "series") |>
+    compile()
+  gp_info <- bjlm:::.sbc_gp_info(cm)
+  set.seed(9); d <- bjlm:::.sbc_draw_prior(cm, bjlm_priors()$outcome, NULL, gp_info)
+  sim <- bjlm:::.sbc_simulate(cm, d, gp_info)
+  gf <- attr(sim, "sbc_gp_frames")
+  expect_equal(nrow(sim), ns * 5L)             # simulated on the OUTCOME grid
+  expect_equal(nrow(gf[[1]]), ns * 7L)         # GP observations on a DIFFERENT grid
+  expect_true(all(sim$zgp == 0))               # outcome GP column is a 0 placeholder
+  expect_true(all(is.finite(sim$Y)))
+  expect_false(isTRUE(all.equal(gf[[1]]$z, cov_rows$z)))  # obs column filled with simulated X_obs
+})
+
 test_that("sbc() end-to-end returns well-formed ranks and prints", {
   cm <- .sbc_test_model()
   pri <- .sbc_test_priors()

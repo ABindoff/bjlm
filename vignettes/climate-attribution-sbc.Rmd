@@ -198,6 +198,17 @@ cal2 <- sbc(clim_model, priors = clim_priors, reps = 100,
 cal2
 ```
 
+A note on what the simulator does, because it matters here. bjlm's whole purpose
+is time-mismatched observations: the oscillation index is measured at one set of
+times and the GP is *queried* at the (different) outcome times. `sbc()` respects
+that. For each replicate it draws one latent GP realisation per subject over the
+**union** of that subject's observation and outcome times, reads it at the
+observation times to build the noisy index, and at the outcome times to build the
+mean, exactly the joint field the sampler represents. So even when your covariate
+frame and outcome frame live on different grids (as they usually do), the check
+above certifies the continuous-time interpolation, not merely a shared-grid
+special case.
+
 ## 4. Does the GP actually steal the trend? A prior-robustness sweep
 
 Section 3 checked the *sampler*. The sharper worry is *identifiability*: with a

@@ -74,8 +74,9 @@
   list(x_b0 = x_b0, x_b1 = x_b1, x_deltas = x_deltas, x_om = x_om, x_rho = x_rho, n_bp = n_bp)
 }
 
-# Per-GP metadata: name, channels, subject/time columns, prior bundle, and the
-# first-subject time grid used for the resolution-aware lengthscale prior.
+# Per-GP metadata: name, channels, the covariate data frame + its subject/time/
+# obs columns, the outcome-time column, prior bundle, and the first-subject time
+# grid used for the resolution-aware lengthscale prior.
 .sbc_gp_info <- function(cm) {
   gps <- cm$model$latent_gps
   if (is.null(gps) || length(gps) == 0) return(list())
@@ -84,8 +85,8 @@
     sv <- gd[[gp$subject]]
     grid <- sort(unique(as.numeric(gd[[gp$time_var]][sv == sv[1]])))
     list(name = gp$name, subject = gp$subject, time_var = gp$time_var,
-         obs_var = gp$obs_var, priors = gp$priors %||% gp_priors(),
-         time_grid = grid)
+         obs_var = gp$obs_var, time_out_var = gp$time_out_var %||% gp$time_var,
+         data = gd, priors = gp$priors %||% gp_priors(), time_grid = grid)
   })
 }
 
@@ -198,48 +199,58 @@
 # ---- 2. simulate a dataset from the drawn parameters -----------------------
 
 # Reuses .build_predictions(summary = FALSE) for the mean, then samples y from
-# the outcome family. Returns the model's data frame with y (and any GP-observed
-# covariate) replaced. `latent GP field f` is generated here and substituted
-# into the GP design column so the existing mean code produces loading * f.
+# the outcome family. Returns the outcome data frame with y replaced, carrying
+# the (separately) simulated GP covariate frames in attr "sbc_gp_frames".
+#
+# Each latent GP is one realisation per subject drawn over the UNION of that
+# subject's observation and outcome times (exactly as the sampler represents f:
+# a single joint MVN over the union grid, model.rs:99-107). It is read at the
+# observation times to build X_obs = f + noise (written into the GP covariate
+# frame) and at the outcome times to build the mean (substituted into the GP
+# design column). This handles observation and outcome grids that DIFFER, so the
+# SBC exercises bjlm's continuous-time interpolation rather than a single shared
+# grid. The outcome-frame GP column is a 0 placeholder; the backend zeros that
+# column of X_b0 (lib.rs:150-152) and adds beta * f(out_time) itself, so there is
+# no double counting whatever the column holds.
 .sbc_simulate <- function(cm, draw, gp_info) {
   theta <- draw$theta
-  data <- cm$model$outcome$data
+  out_data <- cm$model$outcome$data
   y_name <- all.vars(cm$model$outcome$formula)[1]
-  tau_name <- all.vars(cm$model$outcome$formula)[2]
-  n <- nrow(data)
+  n_out <- nrow(out_data)
   jitter <- 1e-6
 
-  mu_data <- data                     # gp column -> latent f for the mean
-  sim_data <- data                    # gp column -> observed f + noise for the fit
-  gp_replacements <- list()
-  for (g in gp_info) {
+  mu_data <- out_data                 # GP name column -> f(out_time) for the mean
+  gp_frames <- vector("list", length(gp_info))
+  for (gk in seq_along(gp_info)) {
+    g <- gp_info[[gk]]
     alpha <- theta[[paste0(g$name, "_alpha")]]
     rho   <- theta[[paste0(g$name, "_rho")]]
     sig_x <- theta[[paste0(g$name, "_sigma_x")]]
-    subj  <- as.factor(data[[g$subject]])
-    tau   <- as.numeric(data[[tau_name]])
-    f_full <- numeric(n); xobs_full <- numeric(n)
-    for (lv in levels(subj)) {
-      idx <- which(subj == lv)
-      tg <- tau[idx]
-      D <- as.matrix(stats::dist(tg))
-      K <- alpha^2 * exp(-0.5 * (D / rho)^2) + diag(jitter, length(tg))
-      L <- t(chol(K))
-      f <- as.numeric(L %*% stats::rnorm(length(tg)))
-      f_full[idx] <- f
-      xobs_full[idx] <- f + stats::rnorm(length(tg), 0, sig_x)
+    gp_data  <- g$data
+    obs_subj <- as.character(gp_data[[g$subject]]);  obs_t <- as.numeric(gp_data[[g$time_var]])
+    out_subj <- as.character(out_data[[g$subject]]); out_t <- as.numeric(out_data[[g$time_out_var]])
+    xobs_full <- numeric(nrow(gp_data)); f_out_full <- numeric(n_out)
+    for (lv in unique(c(obs_subj, out_subj))) {
+      oi <- which(obs_subj == lv); qi <- which(out_subj == lv)
+      util <- sort(unique(c(obs_t[oi], out_t[qi])))   # union of obs + outcome times
+      m <- length(util)
+      if (m == 0L) next
+      K <- alpha^2 * exp(-0.5 * (as.matrix(stats::dist(util)) / rho)^2) + diag(jitter, m)
+      f_u <- as.numeric(t(chol(K)) %*% stats::rnorm(m))
+      if (length(oi)) xobs_full[oi] <- f_u[match(obs_t[oi], util)] + stats::rnorm(length(oi), 0, sig_x)
+      if (length(qi)) f_out_full[qi] <- f_u[match(out_t[qi], util)]
     }
-    mu_data[[g$name]]  <- f_full
-    sim_data[[g$name]] <- xobs_full
-    sim_data[[g$obs_var]] <- xobs_full   # GP observation-model column (may differ)
-    gp_replacements[[g$name]] <- xobs_full
+    gp_frame <- gp_data
+    gp_frame[[g$obs_var]] <- xobs_full           # noisy observations of the field
+    gp_frames[[gk]] <- gp_frame
+    mu_data[[g$name]] <- f_out_full              # latent field at outcome times
   }
 
   # One-row "draws" object so .build_predictions computes the mean from theta.
   dm1 <- matrix(theta, nrow = 1, dimnames = list(NULL, names(theta)))
   shim <- list(
     draws = posterior::as_draws_matrix(dm1),
-    data = data,
+    data = out_data,
     outcome_formula = cm$model$outcome$formula,
     b0_formula = cm$b0_formula, b1_formula = cm$b1_formula,
     deltas = cm$deltas, omega = cm$omega, rho = cm$rho,
@@ -250,14 +261,16 @@
 
   family <- cm$model$outcome$family$family %||% "gaussian"
   y <- switch(family,
-    gaussian          = stats::rnorm(n, mu, theta[["sigma"]]),
-    binomial          = stats::rbinom(n, 1, stats::plogis(mu)),
-    negative_binomial = stats::rnbinom(n, size = theta[["r"]], mu = exp(mu)),
+    gaussian          = stats::rnorm(n_out, mu, theta[["sigma"]]),
+    binomial          = stats::rbinom(n_out, 1, stats::plogis(mu)),
+    negative_binomial = stats::rnbinom(n_out, size = theta[["r"]], mu = exp(mu)),
     stop(sprintf("SBC does not support outcome family '%s'.", family)))
 
-  sim_data[[y_name]] <- y
-  attr(sim_data, "sbc_gp_obs") <- gp_replacements
-  sim_data
+  sim_out <- out_data
+  sim_out[[y_name]] <- y
+  for (g in gp_info) if (g$name %in% names(sim_out)) sim_out[[g$name]] <- 0  # placeholder (backend zeros it)
+  attr(sim_out, "sbc_gp_frames") <- gp_frames
+  sim_out
 }
 
 # ---- 3. score a functional against the truth --------------------------------
@@ -490,8 +503,9 @@ sbc.bjlm_compiled_model <- function(object, priors = NULL, spike = NULL,
 
     cm_rep <- object
     cm_rep$model$outcome$data <- sim
+    gp_frames <- attr(sim, "sbc_gp_frames")
     if (length(gp_info) > 0)
-      for (i in seq_along(cm_rep$model$latent_gps)) cm_rep$model$latent_gps[[i]]$data <- sim
+      for (i in seq_along(cm_rep$model$latent_gps)) cm_rep$model$latent_gps[[i]]$data <- gp_frames[[i]]
 
     fit <- tryCatch(
       fit.bjlm_compiled_model(cm_rep, priors = priors, spike = spike,

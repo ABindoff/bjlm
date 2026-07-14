@@ -397,7 +397,8 @@ sbc_prior_sensitivity <- function(object, grid, priors = NULL, gp_name = NULL,
       if (is.null(sim)) next
       cm_rep <- cm_fit
       cm_rep$model$outcome$data <- sim
-      for (i in seq_along(cm_rep$model$latent_gps)) cm_rep$model$latent_gps[[i]]$data <- sim
+      gp_frames <- attr(sim, "sbc_gp_frames")
+      for (i in seq_along(cm_rep$model$latent_gps)) cm_rep$model$latent_gps[[i]]$data <- gp_frames[[i]]
       fit <- tryCatch(
         fit.bjlm_compiled_model(cm_rep, priors = fit_priors, chains = chains,
             iter = iter, warmup = warmup, cores = cores, seed = seed + rep,
