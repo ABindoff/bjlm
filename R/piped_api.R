@@ -6,7 +6,8 @@ bjlm_model <- function() {
   model <- list(
     propensity = NULL,
     outcome = NULL,
-    latent_gps = list()
+    latent_gps = list(),
+    regimes = list()
   )
   class(model) <- "bjlm_model"
   model
@@ -437,6 +438,23 @@ compile <- function(model) {
     tau_name <- outcome_vars[2]
     tau <- as.double(out_data[[tau_name]])
     shortcut_priors <- NULL
+  }
+
+  # ---- Regime (HMM) desugaring — v0: known-state level switching ----
+  # A regime-dependent level with known states is a factor in the b0 design, so
+  # we augment b0_formula + data here and the rest of the pipeline (design,
+  # conjugate level Gibbs, draw naming, prediction, SBC) works unchanged.
+  if (length(model$regimes %||% list()) > 0) {
+    .rg <- .desugar_regimes_v0(model$regimes, out_data, b0_formula)
+    b0_formula <- .rg$b0_formula          # used by SBC, prediction, zero-bp fit
+    out_data <- .rg$data
+    model$outcome$data <- out_data
+    # fit()'s piecewise branch reads model$outcome$b0 (which retains any RE term),
+    # so append the state factor(s) there too, keeping RE intact.
+    if (!is.null(model$outcome$b0)) {
+      model$outcome$b0 <- stats::update.formula(
+        model$outcome$b0, stats::reformulate(c(".", .rg$state_cols)))
+    }
   }
 
   # ---- Population block validation ----
