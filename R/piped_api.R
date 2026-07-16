@@ -682,6 +682,13 @@ fit.bjlm_compiled_model <- function(object, priors = NULL, dr = FALSE, ...) {
     .ensure_unweighted(fit_obj)
   }
 
+  # v1a: fit and attach the continuous-time regime transition intensities. Under
+  # clamped states these are independent of the outcome level model, so they are
+  # sampled separately and merged into fit_obj$draws.
+  if (length(object$model$regimes %||% list()) > 0) {
+    fit_obj <- .attach_regime_intensities(fit_obj, object)
+  }
+
   fit_obj
 }
 

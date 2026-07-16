@@ -16,11 +16,15 @@ test_that("regimes() validates its arguments and appends a block", {
   expect_error(regimes(m, name = "r", n_states = 2, obs_state = "s"), "data")
   d <- data.frame(s = c("A", "B"))
   expect_error(regimes(m, name = "r", data = d, n_states = 2), "obs_state")
-  expect_error(regimes(m, name = "r", data = d, n_states = 1, obs_state = "s"), "n_states")
-  expect_error(regimes(m, name = "r", data = d, n_states = 2, obs_state = "s", obs_model = 1), "obs_model")
+  expect_error(regimes(m, name = "r", data = d, n_states = 2, obs_state = "s"), "time_var")
+  expect_error(regimes(m, name = "r", data = d, n_states = 1, obs_state = "s",
+                       time_var = "t", subject = "id"), "n_states")
+  expect_error(regimes(m, name = "r", data = d, n_states = 2, obs_state = "s", obs_model = 1,
+                       time_var = "t", subject = "id"), "obs_model")
 
   m2 <- regimes(m, name = "regime", data = d, n_states = 2, states = c("A", "B"),
-                obs_state = "s", obs_model = exact(), ref_state = "A")
+                obs_state = "s", obs_model = exact(), ref_state = "A",
+                time_var = "t", subject = "id")
   expect_length(m2$regimes, 1L)
   expect_equal(m2$regimes[[1]]$name, "regime")
 })
@@ -51,28 +55,19 @@ test_that("compile() desugars a known-state regime into a b0 factor", {
 
 test_that("v0 capability gates fire", {
   dat <- .regime_data()
-  base <- function() bjlm_model() |> outcome(y ~ time, b0 = ~ 1, b1 = ~ 1, data = dat)
+  reg <- function(...) bjlm_model() |> outcome(y ~ time, b0 = ~ 1, b1 = ~ 1, data = dat) |>
+    regimes(name = "r", data = dat, time_var = "time", subject = "subj", ...) |> compile()
   # misclassification not yet active
-  expect_error(
-    base() |> regimes(name = "r", data = dat, n_states = 3, states = c("A","B","C"),
-                      obs_state = "state", obs_model = confusion(), ref_state = "A") |> compile(),
-    "exact")
-  # covariate-dependent transitions recorded but warn
-  expect_warning(
-    base() |> regimes(name = "r", data = dat, n_states = 3, states = c("A","B","C"),
-                      obs_state = "state", obs_model = exact(), transition = ~ time,
-                      ref_state = "A") |> compile(),
-    "transition")
+  expect_error(reg(n_states = 3, states = c("A","B","C"), obs_state = "state",
+                   obs_model = confusion(), ref_state = "A"), "exact")
+  # only the level switches in this phase
+  expect_error(reg(n_states = 3, states = c("A","B","C"), obs_state = "state",
+                   obs_model = exact(), switch = scale ~ 1, ref_state = "A"), "level only")
   # missing observed-state column
-  expect_error(
-    base() |> regimes(name = "r", data = dat, n_states = 3, obs_state = "nope",
-                      obs_model = exact()) |> compile(),
-    "not found")
+  expect_error(reg(n_states = 3, obs_state = "nope", obs_model = exact()), "not found")
   # bad reference state
-  expect_error(
-    base() |> regimes(name = "r", data = dat, n_states = 3, states = c("A","B","C"),
-                      obs_state = "state", obs_model = exact(), ref_state = "Z") |> compile(),
-    "ref_state")
+  expect_error(reg(n_states = 3, states = c("A","B","C"), obs_state = "state",
+                   obs_model = exact(), ref_state = "Z"), "ref_state")
 })
 
 test_that("a known-state regime fit recovers the level offsets", {
@@ -82,6 +77,7 @@ test_that("a known-state regime fit recovers the level offsets", {
     bjlm_model() |>
       outcome(y ~ time, b0 = ~ 1, b1 = ~ 1, data = dat) |>
       regimes(name = "regime", data = dat, n_states = 3, states = c("A","B","C"),
+              time_var = "time", subject = "subj",
               obs_state = "state", obs_model = exact(), ref_state = "A") |>
       compile() |>
       fit(chains = 2L, iter = 800L, warmup = 400L, seed = 2L, verbose = FALSE))
@@ -98,6 +94,7 @@ test_that("SBC certifies regime level recovery via custom functionals", {
   cm <- bjlm_model() |>
     outcome(y ~ time, b0 = ~ 1, b1 = ~ 1, data = dat) |>
     regimes(name = "regime", data = dat, n_states = 3, states = c("A","B","C"),
+            time_var = "time", subject = "subj",
             obs_state = "state", obs_model = exact(), ref_state = "A") |>
     compile()
   res <- suppressMessages(sbc(cm, reps = 4L, iter = 200L, warmup = 100L, chains = 1L,
@@ -107,4 +104,103 @@ test_that("SBC certifies regime level recovery via custom functionals", {
                                 stateC = function(p) p[["b0_stateC"]])))
   expect_true(all(c("stateB", "stateC") %in% colnames(res$ranks)))
   expect_true(all(res$ranks >= 0 & res$ranks <= 1, na.rm = TRUE))
+})
+
+# Gillespie forward simulation of a homogeneous CTMC; state at obs_times.
+.sim_ctmc_path <- function(q0, allowed, k, obs_times, s0 = 0L) {
+  outr <- vector("list", k)
+  for (i in seq_len(nrow(allowed))) {
+    fr <- allowed[i, 1] + 1L; outr[[fr]] <- rbind(outr[[fr]], c(allowed[i, 2], q0[i]))
+  }
+  t <- 0; s <- s0; oi <- 1L; states <- integer(length(obs_times))
+  repeat {
+    r <- outr[[s + 1L]]; total <- if (is.null(r)) 0 else sum(r[, 2])
+    t_next <- if (total <= 0) Inf else t + stats::rexp(1, total)
+    while (oi <= length(obs_times) && obs_times[oi] < t_next) { states[oi] <- s; oi <- oi + 1L }
+    if (oi > length(obs_times)) break
+    if (!is.finite(t_next)) { while (oi <= length(obs_times)) { states[oi] <- s; oi <- oi + 1L }; break }
+    s <- if (nrow(r) == 1) r[1, 1] else sample(r[, 1], 1, prob = r[, 2] / total); t <- t_next
+  }
+  states
+}
+
+test_that("regime transition intensities are estimated and merged into the fit (v1a)", {
+  skip_on_cran()
+  set.seed(4)
+  k <- 3L; allowed <- rbind(c(0, 1), c(1, 0), c(1, 2), c(2, 1)); q0t <- c(0.4, 0.2, 0.3, 0.15)
+  ns <- 50L; nt <- 8L; ot <- seq(0, 12, length.out = nt); sn <- c("S1", "S2", "S3")
+  rows <- lapply(seq_len(ns), function(s) {
+    st <- .sim_ctmc_path(q0t, allowed, k, ot, 0L)
+    data.frame(y = 2 + c(0, 1, -0.5)[st + 1L] + rnorm(nt, 0, 0.4), time = ot,
+               state = sn[st + 1L], subj = s)
+  })
+  dat <- do.call(rbind, rows); dat$subj <- factor(dat$subj)
+
+  fit <- suppressMessages(
+    bjlm_model() |>
+      outcome(y ~ time, b0 = ~ 1, b1 = ~ 1, data = dat) |>
+      regimes(name = "r", data = dat, n_states = 3, states = sn, time_var = "time",
+              subject = "subj", obs_state = "state", obs_model = exact(),
+              transition = ~ 1, ref_state = "S1") |>
+      compile() |>
+      fit(chains = 2L, iter = 1000L, warmup = 500L, seed = 4L, verbose = FALSE))
+
+  vn <- posterior::variables(fit$draws)
+  # intensity draws are merged alongside the level draws
+  expect_true(all(c("q0_S1_S2", "q0_S2_S3", "q0_S1_S3", "b0_stateS2") %in% vn))
+  expect_true(!is.null(fit$regime_names))
+  sm <- posterior::summarise_draws(fit$draws, "mean")
+  gm <- function(v) sm$mean[sm$variable == v]
+  # real transitions carry rate; the never-simulated S1<->S3 shrink below them
+  expect_gt(gm("q0_S1_S2"), 0.15)
+  expect_lt(gm("q0_S1_S3"), gm("q0_S1_S2"))
+})
+
+test_that("CTMC intensity SBC certification (opt-in, slow)", {
+  skip_on_cran()
+  skip_if(!nzchar(Sys.getenv("BJLM_SBC_CERT")), "set BJLM_SBC_CERT=1 to run the CTMC SBC cert")
+  frank <- function(dl, col, truth) {                       # ESS-thinned fractional rank
+    np <- nrow(dl[[1]]); nc <- length(dl); m <- sapply(dl, function(d) d[, col])
+    da <- posterior::as_draws_array(array(m, dim = c(np, nc, 1)))
+    ess <- suppressWarnings(min(posterior::ess_bulk(da), posterior::ess_tail(da), na.rm = TRUE))
+    v <- as.vector(m); if (!is.finite(ess) || ess < 2) ess <- length(v)
+    mean(v[seq(1, length(v), by = max(1L, floor(length(v) / ess)))] < truth)
+  }
+  K <- 3L
+  allowed <- do.call(rbind, lapply(0:(K - 1L), function(a)
+    do.call(rbind, lapply(setdiff(0:(K - 1L), a), function(b) c(a, b)))))
+  na <- nrow(allowed); lq0m <- log(0.5); lq0s <- 1.5; bs <- 1.0
+  REPS <- 30L; ns <- 40L; nt <- 7L; ot <- seq(0, 10, length.out = nt)
+  ranks <- matrix(NA_real_, REPS, 2 * na)
+  for (rep in seq_len(REPS)) {
+    set.seed(1000L + rep)
+    q0 <- exp(rnorm(na, lq0m, lq0s)); beta <- rnorm(na, 0, bs)
+    seg_dt <- c(); seg_iv <- c(); ifrom <- c(); ito <- c(); xr <- c(); iv <- 0L
+    for (s in seq_len(ns)) {
+      trt <- rbinom(1, 1, 0.5); q0e <- q0 * exp(beta * trt)
+      st <- .sim_ctmc_path(q0e, allowed, K, ot, 0L)
+      for (j in seq_len(nt - 1L)) {
+        seg_dt <- c(seg_dt, ot[j+1] - ot[j]); seg_iv <- c(seg_iv, iv)
+        ifrom <- c(ifrom, st[j]); ito <- c(ito, st[j+1]); xr <- c(xr, trt); iv <- iv + 1L
+      }
+    }
+    res <- run_ctmc_mh(n_states = K, x_trans = as.double(xr), p_trans = 1L,
+      seg_dt = seg_dt, seg_interval = as.integer(seg_iv), interval_from = as.integer(ifrom),
+      interval_to = as.integer(ito), allowed_from = as.integer(allowed[,1]),
+      allowed_to = as.integer(allowed[,2]), prior_logq0_mean = lq0m, prior_logq0_sd = lq0s,
+      prior_beta_mean = 0, prior_beta_sd = bs, n_iter = 1500L, warmup = 750L, chains = 2L,
+      seed = 1000L + rep, init_step = 0.4)
+    for (i in seq_len(na)) {
+      ranks[rep, i] <- frank(res$draws, i, q0[i])
+      ranks[rep, na + i] <- frank(res$draws, na + i, beta[i])
+    }
+  }
+  mr <- colMeans(ranks, na.rm = TRUE)
+  expect_true(all(mr > 0.3 & mr < 0.7))          # ranks centred near uniform
+  B <- 8L
+  pv <- apply(ranks, 2, function(x) {
+    x <- x[is.finite(x)]; h <- as.numeric(table(cut(x, seq(0, 1, length.out = B+1), include.lowest = TRUE)))
+    stats::pchisq(sum((h - length(x)/B)^2 / (length(x)/B)), B - 1L, lower.tail = FALSE)
+  })
+  expect_gte(sum(pv > 0.05 / (2 * na)), 2 * na - 2)   # allow <=2 borderline flags of 12
 })

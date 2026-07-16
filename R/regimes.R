@@ -123,6 +123,9 @@ regimes <- function(model, name, data, n_states, states = NULL,
     stop("First argument must be a bjlm_model object.")
   if (missing(data) || is.null(data)) stop("`regimes()` requires a `data` argument.")
   if (missing(obs_state)) stop("`regimes()` requires `obs_state` (the observed regime column).")
+  if (is.null(time_var) || is.null(subject))
+    stop("`regimes()` requires `time_var` and `subject`: they define the ",
+         "per-subject transition intervals for the intensity model.")
   if (!inherits(obs_model, "regime_obs_model"))
     stop("`obs_model` must be exact() or confusion().")
   if (!inherits(priors, "regime_priors"))
@@ -166,12 +169,6 @@ regimes <- function(model, name, data, n_states, states = NULL,
     if (!identical(sw_lhs, "level"))
       stop("regimes(): the current phase switches the level only (`switch = level ~ 1`).",
            call. = FALSE)
-    trans_rhs <- if (inherits(blk$transition, "formula")) all.vars(blk$transition) else character(0)
-    if (length(trans_rhs) > 0)
-      warning(sprintf("regimes('%s'): transition intensities are estimated from a later phase; ",
-                      blk$name %||% ""),
-              "the `transition` formula is recorded but not yet used (states held fixed).",
-              call. = FALSE)
 
     sc <- blk$obs_state
     if (!sc %in% names(out_data))
@@ -203,4 +200,91 @@ regimes <- function(model, name, data, n_states, states = NULL,
     state_cols <- c(state_cols, sc)
   }
   list(b0_formula = b0_formula, data = out_data, state_cols = state_cols)
+}
+
+# ---------------------------------------------------------------------------
+# v1a: fit the continuous-time transition intensities for one regime block,
+# given the CLAMPED observed state path. Under clamped states this block is
+# conditionally independent of the outcome level model, so it is sampled on its
+# own (run_ctmc_mh) with chains/iter/warmup matched to the outcome fit, and the
+# q0 / beta draws are merged into the fit's draws array. Builds one interval per
+# consecutive observation pair per subject (covariate taken at the interval
+# start; off-grid covariate splitting is a later refinement).
+# ---------------------------------------------------------------------------
+.regime_intensity_fit <- function(blk, data, chains, iter, warmup, seed) {
+  sv <- blk$subject; tv <- blk$time_var; sc <- blk$obs_state
+  for (nm in c(sv, tv, sc)) {
+    if (is.null(nm) || !nm %in% names(data))
+      stop(sprintf("regimes('%s'): column '%s' needed for the transition model is not in the outcome data.",
+                   blk$name %||% "", nm %||% "<NULL>"), call. = FALSE)
+  }
+  K <- blk$n_states
+  fac <- data[[sc]]                                  # coerced to factor (ref first) in compile()
+  st  <- as.integer(fac) - 1L                        # 0-based state; ref = 0
+  stnames <- levels(fac)
+  subj <- as.factor(data[[sv]]); tm <- as.numeric(data[[tv]])
+
+  # transition design without intercept (~1 -> no covariates)
+  X <- stats::model.matrix(blk$transition, data = data)
+  X <- X[, colnames(X) != "(Intercept)", drop = FALSE]
+  p <- ncol(X); covnames <- colnames(X)
+
+  # all off-diagonal transitions allowed
+  allowed <- do.call(rbind, lapply(0:(K - 1L), function(a)
+    do.call(rbind, lapply(setdiff(0:(K - 1L), a), function(b) c(a, b)))))
+
+  seg_dt <- numeric(0); seg_iv <- integer(0); ifrom <- integer(0)
+  ito <- integer(0); xr <- numeric(0); iv <- 0L
+  for (lv in levels(subj)) {
+    o <- which(subj == lv); o <- o[order(tm[o])]
+    if (length(o) < 2L) next
+    for (j in seq_len(length(o) - 1L)) {
+      seg_dt <- c(seg_dt, tm[o[j + 1L]] - tm[o[j]]); seg_iv <- c(seg_iv, iv)
+      ifrom <- c(ifrom, st[o[j]]); ito <- c(ito, st[o[j + 1L]])
+      if (p > 0) xr <- c(xr, X[o[j], ])
+      iv <- iv + 1L
+    }
+  }
+  if (iv == 0L) stop("regimes(): no usable transition intervals (need >= 2 observations per subject).",
+                     call. = FALSE)
+
+  ip <- blk$priors$intensity %||% list()
+  lq0m <- ip$logq0_mean %||% log(0.5); lq0s <- ip$logq0_sd %||% 1.5; bs <- ip$beta_sd %||% 1.0
+
+  res <- run_ctmc_mh(
+    n_states = K, x_trans = if (p > 0) as.double(xr) else numeric(0), p_trans = as.integer(p),
+    seg_dt = seg_dt, seg_interval = seg_iv, interval_from = ifrom, interval_to = ito,
+    allowed_from = as.integer(allowed[, 1]), allowed_to = as.integer(allowed[, 2]),
+    prior_logq0_mean = lq0m, prior_logq0_sd = lq0s, prior_beta_mean = 0.0, prior_beta_sd = bs,
+    n_iter = as.integer(iter), warmup = as.integer(warmup), chains = as.integer(chains),
+    seed = as.integer(seed), init_step = 0.4)
+
+  q0names <- vapply(seq_len(nrow(allowed)), function(i)
+    sprintf("q0_%s_%s", stnames[allowed[i, 1] + 1L], stnames[allowed[i, 2] + 1L]), character(1))
+  betanames <- character(0)
+  if (p > 0) for (i in seq_len(nrow(allowed))) for (cn in covnames)
+    betanames <- c(betanames, sprintf("beta_q_%s_%s_%s", stnames[allowed[i, 1] + 1L], stnames[allowed[i, 2] + 1L], cn))
+  list(draws = res$draws, varnames = c(q0names, betanames), chains = chains)
+}
+
+# Attach the regime transition-intensity draws to a fitted model, merging them
+# into fit$draws (valid: independent of the level model under clamped states).
+.attach_regime_intensities <- function(fit, cm) {
+  blocks <- cm$model$regimes %||% list()
+  if (length(blocks) == 0) return(fit)
+  chains <- fit$chains; iter <- fit$iter; warmup <- fit$warmup
+  seed <- (fit$fit_dots$seed %||% 1L) + 7919L
+  reg_names <- character(0)
+  for (bi in seq_along(blocks)) {
+    ri <- .regime_intensity_fit(blocks[[bi]], cm$model$outcome$data, chains, iter, warmup, seed + bi)
+    n_post <- nrow(ri$draws[[1]]); nv <- ncol(ri$draws[[1]])
+    arr <- array(NA_real_, dim = c(n_post, chains, nv),
+                 dimnames = list(NULL, paste0("chain_", seq_len(chains)), ri$varnames))
+    for (ch in seq_len(chains)) arr[, ch, ] <- ri$draws[[ch]]
+    fit$draws <- posterior::bind_draws(fit$draws, posterior::as_draws_array(arr), along = "variable")
+    reg_names <- c(reg_names, ri$varnames)
+  }
+  fit$regime_names <- reg_names
+  fit$outcome_names <- c(fit$outcome_names, reg_names)   # visible in summary()
+  fit
 }

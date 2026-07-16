@@ -23,6 +23,7 @@ use nalgebra::{DMatrix, DVector};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
+use std::collections::HashMap;
 
 fn normal_logpdf(x: f64, mean: f64, sd: f64) -> f64 {
     let z = (x - mean) / sd;
@@ -54,12 +55,15 @@ pub fn expm(q: &DMatrix<f64>, delta: f64) -> DMatrix<f64> {
     (q * delta).exp()
 }
 
-/// Preprocessed transition data for repeated likelihood evaluation.
+/// Preprocessed transition data for repeated likelihood evaluation. Distinct
+/// (covariate row, duration) segments are deduplicated so exp(Q*dt) is computed
+/// once per distinct combo per proposal (a large speedup when covariates are
+/// categorical and the time grid is regular).
 pub struct CtmcData {
     k: usize,
     p: usize,
-    x: DMatrix<f64>,                    // n_seg x p covariate rows (one per segment)
-    dt: Vec<f64>,                       // n_seg durations
+    seg_combo: Vec<usize>,              // per segment: index into `combos`
+    combos: Vec<(Vec<f64>, f64)>,       // distinct (covariate row, duration)
     interval_segs: Vec<(usize, usize)>, // (start, count) into segment order, per interval
     from: Vec<usize>,                   // per interval: source state
     to: Vec<usize>,                     // per interval: destination state
@@ -76,6 +80,22 @@ impl CtmcData {
         allowed_from: &[i32], allowed_to: &[i32],
     ) -> CtmcData {
         let n_seg = seg_dt.len();
+        let x = DMatrix::from_column_slice(n_seg, p, x_trans);
+
+        // deduplicate (x_row, dt) combos (keyed by rounded bits)
+        let mut map: HashMap<Vec<i64>, usize> = HashMap::new();
+        let mut combos: Vec<(Vec<f64>, f64)> = Vec::new();
+        let mut seg_combo = vec![0usize; n_seg];
+        for s in 0..n_seg {
+            let xrow: Vec<f64> = (0..p).map(|c| x[(s, c)]).collect();
+            let mut key: Vec<i64> = xrow.iter().map(|&v| (v * 1e9).round() as i64).collect();
+            key.push((seg_dt[s] * 1e9).round() as i64);
+            let id = *map.entry(key).or_insert_with(|| {
+                combos.push((xrow.clone(), seg_dt[s])); combos.len() - 1
+            });
+            seg_combo[s] = id;
+        }
+
         let n_intervals = interval_from.len();
         let mut interval_segs = vec![(0usize, 0usize); n_intervals];
         for s in 0..n_seg {
@@ -84,10 +104,7 @@ impl CtmcData {
             interval_segs[iv].1 += 1;
         }
         CtmcData {
-            k, p,
-            x: DMatrix::from_column_slice(n_seg, p, x_trans),
-            dt: seg_dt.to_vec(),
-            interval_segs,
+            k, p, seg_combo, combos, interval_segs,
             from: interval_from.iter().map(|&v| v as usize).collect(),
             to: interval_to.iter().map(|&v| v as usize).collect(),
             allowed: allowed_from.iter().zip(allowed_to.iter())
@@ -100,15 +117,15 @@ impl CtmcData {
 
     fn loglik(&self, log_q0: &[f64], beta: &[DVector<f64>]) -> f64 {
         let q0: Vec<f64> = log_q0.iter().map(|&l| l.exp()).collect();
+        // exp(Q(x)*dt) once per distinct combo
+        let mats: Vec<DMatrix<f64>> = self.combos.iter().map(|(xrow, dt)| {
+            expm(&build_generator(&q0, beta, xrow, &self.allowed, self.k), *dt)
+        }).collect();
         let mut ll = 0.0;
         for iv in 0..self.from.len() {
             let (start, cnt) = self.interval_segs[iv];
             let mut p = DMatrix::<f64>::identity(self.k, self.k);
-            for s in start..start + cnt {
-                let xrow: Vec<f64> = (0..self.p).map(|c| self.x[(s, c)]).collect();
-                let q = build_generator(&q0, beta, &xrow, &self.allowed, self.k);
-                p *= expm(&q, self.dt[s]);
-            }
+            for s in start..start + cnt { p *= &mats[self.seg_combo[s]]; }
             let pab = p[(self.from[iv], self.to[iv])].max(1e-300);
             ll += pab.ln();
         }
