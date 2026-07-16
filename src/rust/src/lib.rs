@@ -10,6 +10,7 @@ mod polya_gamma;
 mod propensity;
 mod weights;
 mod sampler_bjlm;
+mod ctmc;
 
 use model::{ModelData, Priors, SpikeSlabConfig};
 use propensity::{PropensityData, PropensityPriors};
@@ -529,8 +530,61 @@ fn run_bjlm_ss(
     list!(draws = chain_results, log_lik = ll_results)
 }
 
+// ---- CTMC intensity sampler (regime-switching phase v1a) --------------------
+// Adaptive-MH over the proportional-intensity generator, given a clamped state
+// path. Draws are merged with the outcome fit in R (conditionally independent of
+// the level model under clamped states). See ctmc.rs and DESIGN_regimes_hmm.md.
+
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn run_ctmc_mh(
+    n_states: i32,
+    x_trans: &[f64], p_trans: i32,
+    seg_dt: &[f64],
+    seg_interval: &[i32],
+    interval_from: &[i32],
+    interval_to: &[i32],
+    allowed_from: &[i32], allowed_to: &[i32],
+    prior_logq0_mean: f64, prior_logq0_sd: f64,
+    prior_beta_mean: f64, prior_beta_sd: f64,
+    n_iter: i32, warmup: i32, chains: i32, seed: i32,
+    init_step: f64,
+) -> Robj {
+    let data = ctmc::CtmcData::new(
+        n_states as usize, p_trans as usize,
+        x_trans, seg_dt, seg_interval, interval_from, interval_to,
+        allowed_from, allowed_to,
+    );
+    let base = seed as u64;
+    let mut chain_results: Vec<Robj> = Vec::with_capacity(chains as usize);
+    for c in 0..chains as usize {
+        let dm = ctmc::run_one_chain(
+            &data, prior_logq0_mean, prior_logq0_sd, prior_beta_mean, prior_beta_sd,
+            n_iter as usize, warmup as usize, init_step,
+            base.wrapping_add(c as u64 * 1_000_003),
+        );
+        let nr = dm.nrows(); let nc = dm.ncols();
+        let flat: Vec<f64> = dm.iter().cloned().collect();
+        chain_results.push(RMatrix::new_matrix(nr, nc, |r, cc| flat[cc * nr + r]).into());
+    }
+    list!(draws = chain_results).into()
+}
+
+/// Debug helper: flat column-major exp(Q*dt) for a K x K generator, for tests.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn ctmc_expm(q: &[f64], k: i32, dt: f64) -> Vec<f64> {
+    let kk = k as usize;
+    let qm = flat_to_dmatrix(q, kk, kk);
+    ctmc::expm(&qm, dt).iter().cloned().collect()
+}
+
 extendr_module! {
     mod bjlm;
     fn run_bjlm;
     fn run_bjlm_ss;
+    fn run_ctmc_mh;
+    fn ctmc_expm;
 }

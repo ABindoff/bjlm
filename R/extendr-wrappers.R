@@ -11,4 +11,13 @@ run_bjlm <- function(y, tau, x_b0, p_b0, x_b1, p_b1, x_deltas, p_deltas, x_om, p
 
 run_bjlm_ss <- function(y, tau, x_b0, p_b0, x_b1, p_b1, x_deltas, p_deltas, x_om, p_om, re_mask_om, x_rho, p_rho, group_b0, n_groups_b0, group_prop, prior_mean_b0, prior_sd_b0, prior_lb_b0, prior_ub_b0, prior_mean_b1, prior_sd_b1, prior_lb_b1, prior_ub_b1, prior_mean_deltas, prior_sd_deltas, prior_lb_deltas, prior_ub_deltas, prior_mean_om, prior_sd_om, prior_lb_om, prior_ub_om, prior_mean_rho, prior_sd_rho, prior_lb_rho, prior_ub_rho, sigma_shape, sigma_scale, sigma_u_shape, sigma_u_scale, prior_r_shape, prior_r_rate, x_prop, p_prop, latent_gps, treatment, n_subjects, prop_prior_sd, weight_type, max_weight, b1_spike_mask, delta_spike_mask, pi_init, pi_beta_a, pi_beta_b, step_om, step_rho, target_accept, chains, iter, warmup, seed, verbose, n_cores, outcome_family) .Call(wrap__run_bjlm_ss, y, tau, x_b0, p_b0, x_b1, p_b1, x_deltas, p_deltas, x_om, p_om, re_mask_om, x_rho, p_rho, group_b0, n_groups_b0, group_prop, prior_mean_b0, prior_sd_b0, prior_lb_b0, prior_ub_b0, prior_mean_b1, prior_sd_b1, prior_lb_b1, prior_ub_b1, prior_mean_deltas, prior_sd_deltas, prior_lb_deltas, prior_ub_deltas, prior_mean_om, prior_sd_om, prior_lb_om, prior_ub_om, prior_mean_rho, prior_sd_rho, prior_lb_rho, prior_ub_rho, sigma_shape, sigma_scale, sigma_u_shape, sigma_u_scale, prior_r_shape, prior_r_rate, x_prop, p_prop, latent_gps, treatment, n_subjects, prop_prior_sd, weight_type, max_weight, b1_spike_mask, delta_spike_mask, pi_init, pi_beta_a, pi_beta_b, step_om, step_rho, target_accept, chains, iter, warmup, seed, verbose, n_cores, outcome_family)
 
+#' @noRd
+#' @keywords internal
+run_ctmc_mh <- function(n_states, x_trans, p_trans, seg_dt, seg_interval, interval_from, interval_to, allowed_from, allowed_to, prior_logq0_mean, prior_logq0_sd, prior_beta_mean, prior_beta_sd, n_iter, warmup, chains, seed, init_step) .Call(wrap__run_ctmc_mh, n_states, x_trans, p_trans, seg_dt, seg_interval, interval_from, interval_to, allowed_from, allowed_to, prior_logq0_mean, prior_logq0_sd, prior_beta_mean, prior_beta_sd, n_iter, warmup, chains, seed, init_step)
+
+#' Debug helper: flat column-major exp(Q*dt) for a K x K generator, for tests.
+#' @noRd
+#' @keywords internal
+ctmc_expm <- function(q, k, dt) .Call(wrap__ctmc_expm, q, k, dt)
+
 # nolint end
