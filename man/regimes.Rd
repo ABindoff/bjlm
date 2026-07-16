@@ -79,11 +79,16 @@ relapsing-remitting disease (e.g. MS phenotype/EDSS states) and staged
 progression (e.g. dementia CDR stages).
 }
 \details{
-\strong{Current phase (v0).} Fits a regime-dependent \emph{level} with the
-states held fixed at the observed indicator (\code{obs_model = exact()}).
-Covariate-dependent transitions (\code{transition}), the misclassification emission
-(\code{\link[=confusion]{confusion()}}), and hierarchical subject effects are parsed and validated but
-warn that they engage in a later phase. See
+\strong{Emission modes.} With \code{obs_model = exact()} the states are known: the
+regime-dependent \emph{level} is a factor in the outcome design and the
+covariate-dependent transition intensities (\code{transition}) are fit from the
+clamped path. With \code{obs_model = confusion()} the states are \emph{latent} (the
+observed indicator is misclassified) and the whole model, including the level,
+the intensities, the misclassification matrix and the initial-state
+distribution, is fit jointly by forward-filter backward-sample (FFBS); this
+requires a change-point-free Gaussian outcome (the regime process replaces the
+smoothed change-point). Composing a smoothed change-point or non-Gaussian
+families with a latent regime is a later phase. See
 \code{data-raw/DESIGN_regimes_hmm.md}.
 }
 \seealso{

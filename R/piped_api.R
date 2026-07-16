@@ -440,20 +440,33 @@ compile <- function(model) {
     shortcut_priors <- NULL
   }
 
-  # ---- Regime (HMM) desugaring — v0: known-state level switching ----
-  # A regime-dependent level with known states is a factor in the b0 design, so
-  # we augment b0_formula + data here and the rest of the pipeline (design,
-  # conjugate level Gibbs, draw naming, prediction, SBC) works unchanged.
+  # ---- Regime (HMM) desugaring ----
+  # Two modes, chosen by the emission model of the regime block(s):
+  #  * v0/v1a (obs_model = exact()): the states are KNOWN, so a regime-dependent
+  #    level is a factor in the b0 design. We augment b0_formula + data here and
+  #    the rest of the pipeline (design, conjugate level Gibbs, draw naming,
+  #    prediction, SBC) works unchanged; v1a then fits the transition intensities
+  #    from the clamped path and merges them in fit().
+  #  * v1b (obs_model = confusion()): the states are LATENT (the observed
+  #    indicator is a misclassified emission). The whole outcome+transition+
+  #    emission model is then fit jointly by FFBS in run_regime_hmm(), so we do
+  #    NOT desugar into a factor -- fit() routes to .regime_hmm_fit() instead.
+  regime_mode <- NULL
   if (length(model$regimes %||% list()) > 0) {
-    .rg <- .desugar_regimes_v0(model$regimes, out_data, b0_formula)
-    b0_formula <- .rg$b0_formula          # used by SBC, prediction, zero-bp fit
-    out_data <- .rg$data
-    model$outcome$data <- out_data
-    # fit()'s piecewise branch reads model$outcome$b0 (which retains any RE term),
-    # so append the state factor(s) there too, keeping RE intact.
-    if (!is.null(model$outcome$b0)) {
-      model$outcome$b0 <- stats::update.formula(
-        model$outcome$b0, stats::reformulate(c(".", .rg$state_cols)))
+    regime_mode <- .regime_mode(model$regimes)
+    if (identical(regime_mode, "v1b")) {
+      .validate_regimes_v1b(model, out_data)      # errors on unsupported combos
+    } else {
+      .rg <- .desugar_regimes_v0(model$regimes, out_data, b0_formula)
+      b0_formula <- .rg$b0_formula        # used by SBC, prediction, zero-bp fit
+      out_data <- .rg$data
+      model$outcome$data <- out_data
+      # fit()'s piecewise branch reads model$outcome$b0 (which retains any RE
+      # term), so append the state factor(s) there too, keeping RE intact.
+      if (!is.null(model$outcome$b0)) {
+        model$outcome$b0 <- stats::update.formula(
+          model$outcome$b0, stats::reformulate(c(".", .rg$state_cols)))
+      }
     }
   }
 
@@ -513,7 +526,8 @@ compile <- function(model) {
     subject_var = subject_var,
     merged_cols = merged_cols,
     shared_cols = shared_cols,
-    population  = model$population
+    population  = model$population,
+    regime_mode = regime_mode
   )
   class(compiled) <- "bjlm_compiled_model"
 
@@ -603,6 +617,12 @@ fit <- function(object, ...) {
 #' @return A `bjlm_fit` object.
 #' @export
 fit.bjlm_compiled_model <- function(object, priors = NULL, dr = FALSE, ...) {
+  # v1b: latent-regime (misclassified indicator) models are fit jointly by FFBS
+  # in run_regime_hmm(), not by the change-point engine bjlm(). Route and return.
+  if (identical(object$regime_mode, "v1b")) {
+    return(.regime_hmm_fit(object, priors = priors, ...))
+  }
+
   # If it is a zero-breakpoint shortcut and priors are NULL, use our preset shortcut priors
   if (object$zero_breakpoint && is.null(priors)) {
     priors <- object$shortcut_priors

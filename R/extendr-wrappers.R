@@ -20,4 +20,8 @@ run_ctmc_mh <- function(n_states, x_trans, p_trans, seg_dt, seg_interval, interv
 #' @keywords internal
 ctmc_expm <- function(q, k, dt) .Call(wrap__ctmc_expm, q, k, dt)
 
+#' @noRd
+#' @keywords internal
+run_regime_hmm <- function(n_states, n_cat, y, x_fixed, p_fixed, x_trans, p_trans, obs_state, obs_subj, obs_time, allowed_from, allowed_to, prior_beta_sd, prior_b0_sd, sigma_shape, sigma_scale, e_diag, e_offdiag, prior_logq0_mean, prior_logq0_sd, prior_beta_q_sd, n_iter, warmup, chains, seed, init_step) .Call(wrap__run_regime_hmm, n_states, n_cat, y, x_fixed, p_fixed, x_trans, p_trans, obs_state, obs_subj, obs_time, allowed_from, allowed_to, prior_beta_sd, prior_b0_sd, sigma_shape, sigma_scale, e_diag, e_offdiag, prior_logq0_mean, prior_logq0_sd, prior_beta_q_sd, n_iter, warmup, chains, seed, init_step)
+
 # nolint end

@@ -57,9 +57,10 @@ test_that("v0 capability gates fire", {
   dat <- .regime_data()
   reg <- function(...) bjlm_model() |> outcome(y ~ time, b0 = ~ 1, b1 = ~ 1, data = dat) |>
     regimes(name = "r", data = dat, time_var = "time", subject = "subj", ...) |> compile()
-  # misclassification not yet active
+  # misclassification (v1b) replaces the change-point: erroring here is about the
+  # change-point still being present, not about confusion() being inactive.
   expect_error(reg(n_states = 3, states = c("A","B","C"), obs_state = "state",
-                   obs_model = confusion(), ref_state = "A"), "exact")
+                   obs_model = confusion(), ref_state = "A"), "change-point")
   # only the level switches in this phase
   expect_error(reg(n_states = 3, states = c("A","B","C"), obs_state = "state",
                    obs_model = exact(), switch = scale ~ 1, ref_state = "A"), "level only")
@@ -203,4 +204,142 @@ test_that("CTMC intensity SBC certification (opt-in, slow)", {
     stats::pchisq(sum((h - length(x)/B)^2 / (length(x)/B)), B - 1L, lower.tail = FALSE)
   })
   expect_gte(sum(pv > 0.05 / (2 * na)), 2 * na - 2)   # allow <=2 borderline flags of 12
+})
+
+# ===========================================================================
+# v1b: latent-regime (misclassified indicator) joint FFBS fit
+# ===========================================================================
+
+# Simulate a latent CTMC path + misclassified indicator + Gaussian outcome.
+.sim_hmm_data <- function(seed, ns = 60L, nt = 8L) {
+  set.seed(seed)
+  K <- 3L; allowed <- rbind(c(0,1), c(1,0), c(1,2), c(2,1))
+  q0t <- c(0.4, 0.2, 0.3, 0.15); bqt <- c(0.8, 0, 0, 0)
+  b0s <- c(0, 1.2, -0.7); intercept <- 2.0; trend <- 0.1; sig <- 0.4
+  E <- matrix(0.075, K, K); diag(E) <- 0.85
+  ot <- seq(0, 10, length.out = nt)
+  rows <- lapply(seq_len(ns), function(s) {
+    trt <- stats::rbinom(1, 1, 0.5)
+    st  <- .sim_ctmc_path(q0t * exp(bqt * trt), allowed, K, ot, 0L)
+    r   <- vapply(st, function(z) sample(0:(K-1), 1, prob = E[z+1, ]), integer(1))
+    data.frame(id = s, time = ot, y = intercept + trend * ot + b0s[st+1] + rnorm(nt, 0, sig),
+               r_obs = r, trt = trt)
+  })
+  do.call(rbind, rows)
+}
+
+test_that("v1b entry gates fire", {
+  dat <- .sim_hmm_data(seed = 1, ns = 5L)
+  reg_v1b <- function(oc) suppressMessages(
+    oc(bjlm_model()) |>
+      regimes(name = "r", data = dat, n_states = 3L, time_var = "time", subject = "id",
+              obs_state = "r_obs", obs_model = confusion(), transition = ~ trt) |>
+      compile())
+  # confusion() requires a change-point-free (zero-breakpoint) outcome
+  expect_error(reg_v1b(function(m) outcome(m, y ~ time, b0 = ~1, b1 = ~1, data = dat)),
+               "change-point")
+  # Gaussian only
+  expect_error(reg_v1b(function(m) outcome(m, r_obs ~ time, data = dat, family = "negbin")),
+               "Gaussian")
+  # multiple confusion blocks not yet supported
+  expect_error(suppressMessages(
+    bjlm_model() |> outcome(y ~ time, data = dat) |>
+      regimes(name = "a", data = dat, n_states = 3L, time_var = "time", subject = "id",
+              obs_state = "r_obs", obs_model = confusion()) |>
+      regimes(name = "b", data = dat, n_states = 3L, time_var = "time", subject = "id",
+              obs_state = "r_obs", obs_model = confusion()) |>
+      compile()), "single")
+  # exact() and confusion() cannot be mixed
+  expect_error(suppressMessages(
+    bjlm_model() |> outcome(y ~ time, data = dat) |>
+      regimes(name = "a", data = dat, n_states = 3L, time_var = "time", subject = "id",
+              obs_state = "r_obs", obs_model = exact()) |>
+      regimes(name = "b", data = dat, n_states = 3L, time_var = "time", subject = "id",
+              obs_state = "r_obs", obs_model = confusion()) |>
+      compile()), "mix")
+})
+
+test_that("latent-regime (confusion) fit recovers levels, intensities and misclassification (v1b)", {
+  skip_on_cran()
+  dat <- .sim_hmm_data(seed = 11, ns = 120L)
+  dat <- dat[sample(nrow(dat)), ]                     # prove (subject,time) re-ordering
+  fit <- suppressMessages(
+    bjlm_model() |>
+      outcome(y ~ time, data = dat, family = gaussian()) |>
+      regimes(name = "regime", data = dat, n_states = 3L, time_var = "time", subject = "id",
+              obs_state = "r_obs", obs_model = confusion(diag = 8, offdiag = 1),
+              transition = ~ trt, priors = regime_priors(level = prior_normal(0, 5))) |>
+      compile() |>
+      fit(chains = 2L, iter = 1200L, warmup = 600L, seed = 5L, verbose = FALSE))
+
+  expect_s3_class(fit, "bjlm_regime_fit")
+  sm <- posterior::summarise_draws(fit$draws, "mean")
+  gm <- function(v) sm$mean[sm$variable == v]
+  # outcome level model
+  expect_equal(gm("b_(Intercept)"), 2.0, tolerance = 0.3)
+  expect_equal(gm("b_time"), 0.1, tolerance = 0.05)
+  expect_equal(gm("b0_state_1"), 1.2, tolerance = 0.4)   # state names inferred: "0","1","2"
+  expect_equal(gm("b0_state_2"), -0.7, tolerance = 0.4)
+  expect_equal(gm("sigma"), 0.4, tolerance = 0.15)
+  # base intensities recover; misclassification diagonal is dominant
+  expect_gt(gm("q0_0_1"), 0.2)
+  expect_gt(gm("E_0_0"), 0.7); expect_gt(gm("E_1_1"), 0.7); expect_gt(gm("E_2_2"), 0.7)
+})
+
+test_that("latent-regime FFBS SBC certification (opt-in, slow)", {
+  skip_on_cran()
+  skip_if(!nzchar(Sys.getenv("BJLM_SBC_CERT")), "set BJLM_SBC_CERT=1 to run the FFBS SBC cert")
+  rdir <- function(a) { g <- stats::rgamma(length(a), a, 1); g / sum(g) }
+  frank <- function(dl, col, truth) {
+    np <- nrow(dl[[1]]); nc <- length(dl); m <- sapply(dl, function(d) d[, col])
+    da <- posterior::as_draws_array(array(m, dim = c(np, nc, 1)))
+    ess <- suppressWarnings(min(posterior::ess_bulk(da), posterior::ess_tail(da), na.rm = TRUE))
+    v <- as.vector(m); if (!is.finite(ess) || ess < 2) ess <- length(v)
+    mean(v[seq(1, length(v), by = max(1L, floor(length(v) / ess)))] < truth)
+  }
+  K <- 3L; allowed <- rbind(c(0,1), c(1,0), c(1,2), c(2,1)); na <- nrow(allowed)
+  pb_sd <- 3; pb0_sd <- 3; a_sig <- 3; b_sig <- 1
+  lq0m <- log(0.4); lq0s <- 0.8; bq_sd <- 0.6; ed <- 12; eo <- 1
+  # ranked functionals: intercept, trend, b0_1, b0_2, sigma, q0[4], E_00,E_11,E_22
+  REPS <- 40L; ns <- 60L; nt <- 8L; ot <- seq(0, 10, length.out = nt)
+  nf <- 5L + na + 3L; ranks <- matrix(NA_real_, REPS, nf)
+  for (rep in seq_len(REPS)) {
+    set.seed(7000L + rep)
+    beta  <- rnorm(2, 0, pb_sd)                       # intercept, trend
+    b0f   <- rnorm(2, 0, pb0_sd)                      # state 1,2 offsets (state 0 = 0)
+    sigma <- 1 / sqrt(stats::rgamma(1, a_sig, b_sig))
+    q0    <- exp(rnorm(na, lq0m, lq0s)); bq <- rnorm(na, 0, bq_sd)
+    Erows <- t(vapply(seq_len(K), function(k) rdir(ifelse(seq_len(K) == k, ed, eo)), numeric(K)))
+    b0s   <- c(0, b0f)
+    Y <- c(); XF <- c(); XT <- c(); OS <- c(); OSUB <- c(); OT <- c()
+    for (s in seq_len(ns)) {
+      trt <- rbinom(1, 1, 0.5); st <- .sim_ctmc_path(q0 * exp(bq * trt), allowed, K, ot, 0L)
+      r <- vapply(st, function(z) sample(0:(K-1), 1, prob = Erows[z+1, ]), integer(1))
+      Y <- c(Y, beta[1] + beta[2]*ot + b0s[st+1] + rnorm(nt, 0, sigma))
+      XF <- rbind(XF, cbind(1, ot)); XT <- c(XT, rep(trt, nt))
+      OS <- c(OS, r); OSUB <- c(OSUB, rep(s-1L, nt)); OT <- c(OT, ot)
+    }
+    res <- run_regime_hmm(n_states = K, n_cat = K, y = as.double(Y),
+      x_fixed = as.double(XF), p_fixed = 2L, x_trans = as.double(XT), p_trans = 1L,
+      obs_state = as.integer(OS), obs_subj = as.integer(OSUB), obs_time = as.double(OT),
+      allowed_from = as.integer(allowed[,1]), allowed_to = as.integer(allowed[,2]),
+      prior_beta_sd = pb_sd, prior_b0_sd = pb0_sd, sigma_shape = a_sig, sigma_scale = b_sig,
+      e_diag = ed, e_offdiag = eo, prior_logq0_mean = lq0m, prior_logq0_sd = lq0s,
+      prior_beta_q_sd = bq_sd, n_iter = 1500L, warmup = 750L, chains = 2L,
+      seed = 7000L + rep, init_step = 0.4)
+    truths <- c(beta, b0f, sigma, q0, diag(Erows))
+    # draw column order: beta[2] b0[K-1] sigma q0[na] beta_q[na] E[K*K row-major] pi[K]
+    ecol0  <- 5L + na + na                                        # last col before E block
+    ecols  <- c(ecol0 + 1L, ecol0 + K + 2L, ecol0 + 2L*K + 3L)    # E_00, E_11, E_22
+    cols   <- c(1, 2, 3, 4, 5, 6:(5+na), ecols)
+    for (i in seq_len(nf)) ranks[rep, i] <- frank(res$draws, cols[i], truths[i])
+  }
+  mr <- colMeans(ranks, na.rm = TRUE)
+  expect_true(all(mr > 0.25 & mr < 0.75))
+  B <- 8L
+  pv <- apply(ranks, 2, function(x) {
+    x <- x[is.finite(x)]; h <- as.numeric(table(cut(x, seq(0, 1, length.out = B+1), include.lowest = TRUE)))
+    stats::pchisq(sum((h - length(x)/B)^2 / (length(x)/B)), B - 1L, lower.tail = FALSE)
+  })
+  expect_gte(sum(pv > 0.05 / nf), nf - 2L)             # allow <=2 borderline flags
 })

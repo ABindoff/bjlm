@@ -11,6 +11,7 @@ mod propensity;
 mod weights;
 mod sampler_bjlm;
 mod ctmc;
+mod regime_hmm;
 
 use model::{ModelData, Priors, SpikeSlabConfig};
 use propensity::{PropensityData, PropensityPriors};
@@ -581,10 +582,44 @@ fn ctmc_expm(q: &[f64], k: i32, dt: f64) -> Vec<f64> {
     ctmc::expm(&qm, dt).iter().cloned().collect()
 }
 
+// ---- Regime-switching HMM regression (phase v1b) ----------------------------
+// Standalone joint sampler: FFBS latent states + conjugate regression/level +
+// Dirichlet misclassification + adaptive-MH intensities. See regime_hmm.rs.
+
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn run_regime_hmm(
+    n_states: i32, n_cat: i32,
+    y: &[f64], x_fixed: &[f64], p_fixed: i32, x_trans: &[f64], p_trans: i32,
+    obs_state: &[i32], obs_subj: &[i32], obs_time: &[f64],
+    allowed_from: &[i32], allowed_to: &[i32],
+    prior_beta_sd: f64, prior_b0_sd: f64, sigma_shape: f64, sigma_scale: f64,
+    e_diag: f64, e_offdiag: f64,
+    prior_logq0_mean: f64, prior_logq0_sd: f64, prior_beta_q_sd: f64,
+    n_iter: i32, warmup: i32, chains: i32, seed: i32, init_step: f64,
+) -> Robj {
+    let mats = regime_hmm::run(
+        n_states as usize, n_cat as usize, y, x_fixed, p_fixed as usize, x_trans, p_trans as usize,
+        obs_state, obs_subj, obs_time, allowed_from, allowed_to,
+        prior_beta_sd, prior_b0_sd, sigma_shape, sigma_scale, e_diag, e_offdiag,
+        prior_logq0_mean, prior_logq0_sd, prior_beta_q_sd,
+        n_iter as usize, warmup as usize, chains as usize, seed as u64, init_step,
+    );
+    let mut chain_results: Vec<Robj> = Vec::with_capacity(mats.len());
+    for dm in mats {
+        let nr = dm.nrows(); let nc = dm.ncols();
+        let flat: Vec<f64> = dm.iter().cloned().collect();
+        chain_results.push(RMatrix::new_matrix(nr, nc, |r, c| flat[c * nr + r]).into());
+    }
+    list!(draws = chain_results).into()
+}
+
 extendr_module! {
     mod bjlm;
     fn run_bjlm;
     fn run_bjlm_ss;
     fn run_ctmc_mh;
     fn ctmc_expm;
+    fn run_regime_hmm;
 }

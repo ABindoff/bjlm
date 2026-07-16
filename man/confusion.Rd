@@ -17,9 +17,11 @@ A \code{regime_obs_model} object.
 \description{
 Declares that the observed regime indicator is a noisy emission of the true
 latent state through a confusion (misclassification) matrix with
-diagonally-dominant Dirichlet rows. \strong{Not yet active} — recorded by
-\code{\link[=regimes]{regimes()}} but engaged from the FFBS phase onwards; the current phase
-requires \code{\link[=exact]{exact()}}.
+diagonally-dominant Dirichlet rows. With this emission the states are
+\strong{latent}: the whole model (outcome level, transition intensities,
+misclassification, initial state and noise) is fit jointly by forward-filter
+backward-sample (FFBS). Requires a change-point-free Gaussian outcome (e.g.
+\code{outcome(y ~ time)}) -- the regime process replaces the smoothed change-point.
 }
 \seealso{
 \code{\link[=regimes]{regimes()}}, \code{\link[=exact]{exact()}}.

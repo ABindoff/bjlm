@@ -135,9 +135,18 @@ fallback only. SBC ranks *parameters*, not latent states.
   likelihood; adaptive RW-MH on `{log q^0, β}`; FFI marshalling of the regime
   block + transition design + allowed-transition mask. States still clamped.
   Exit: **Gillespie-simulated** SBC on `q^0`, `β`.
-- **v1b — FFBS + misclassification.** Union-grid FFBS (latent states),
-  Dirichlet `E`, initial `π`; widen chain-runner return to a separate `states`
-  matrix (like `log_lik`). Exit: **coverage-mode** SBC on all parameters.
+- **v1b — FFBS + misclassification. [SHIPPED]** Standalone Rust `regime_hmm.rs`:
+  per-subject FFBS (log-space forward filter, backward sample) over the latent
+  CTMC path, conjugate joint draw of the outcome coefficients (fixed design +
+  state-indicator offsets), inverse-gamma `sigma`, Dirichlet `E` and initial `pi`,
+  adaptive RW-MH on `{log q^0, beta_q}`. Fit jointly (states latent, NOT clamped),
+  so the level and the intensities couple through the sampled path; routed via
+  `.regime_hmm_fit()` -> `run_regime_hmm` when `obs_model = confusion()`. Requires
+  a change-point-free Gaussian outcome. Recovery verified (levels, trend, sigma,
+  base intensities, misclassification recover; the transition covariate is
+  correctly weakly identified and converges with N). Exit: **draw==fit
+  coverage-mode** SBC on intercept/trend, `b0_state`, `sigma`, `q^0`, `E` (opt-in,
+  `BJLM_SBC_CERT=1`).
 - **v1c — composition.** GP + regime + opt-in smooth change-point together.
   Exit: **coverage-mode** SBC on the three-latent aliasing.
 
