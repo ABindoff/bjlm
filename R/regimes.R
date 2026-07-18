@@ -33,9 +33,11 @@ exact <- function() {
 #' latent state through a confusion (misclassification) matrix with
 #' diagonally-dominant Dirichlet rows. With this emission the states are
 #' \strong{latent}: the whole model (outcome level, transition intensities,
-#' misclassification, initial state and noise) is fit jointly by forward-filter
-#' backward-sample (FFBS). Requires a change-point-free Gaussian outcome (e.g.
-#' `outcome(y ~ time)`) -- the regime process replaces the smoothed change-point.
+#' misclassification, initial state and noise/dispersion) is fit jointly by
+#' forward-filter backward-sample (FFBS). Supports gaussian, binomial (logit) and
+#' negative-binomial (log) outcomes -- the non-Gaussian coefficient/level draw
+#' uses Polya-Gamma augmentation. Requires a change-point-free outcome (e.g.
+#' `outcome(y ~ time)`): the regime process replaces the smoothed change-point.
 #'
 #' @param diag,offdiag Dirichlet concentration on the diagonal (correct
 #'   classification) and off-diagonal (misclassification) entries. `diag` should
@@ -85,10 +87,11 @@ regime_priors <- function(level = prior_normal(0, 5),
 #' observed indicator is misclassified) and the whole model, including the level,
 #' the intensities, the misclassification matrix and the initial-state
 #' distribution, is fit jointly by forward-filter backward-sample (FFBS); this
-#' requires a change-point-free Gaussian outcome (the regime process replaces the
-#' smoothed change-point). Composing a smoothed change-point or non-Gaussian
-#' families with a latent regime is a later phase. See
-#' `data-raw/DESIGN_regimes_hmm.md`.
+#' requires a change-point-free outcome (the regime process replaces the smoothed
+#' change-point) and supports gaussian, binomial (logit) and negative-binomial
+#' (log) families -- the non-Gaussian coefficient/level draw uses Polya-Gamma
+#' augmentation. Composing a smoothed change-point or a latent GP with a latent
+#' regime is a later phase. See `data-raw/DESIGN_regimes_hmm.md`.
 #'
 #' @param model A `bjlm_model` object.
 #' @param name Character label for this regime block.
@@ -331,9 +334,9 @@ regimes <- function(model, name, data, n_states, states = NULL,
          "multiple confusion() blocks land in a later phase.", call. = FALSE)
   blk <- blocks[[1L]]
   fam <- model$outcome$family$family %||% "gaussian"
-  if (!identical(fam, "gaussian"))
-    stop(sprintf("regimes(): the latent-regime (confusion) phase supports Gaussian outcomes only; got '%s'. ", fam),
-         "Non-Gaussian latent-regime models land in a later phase (v1c).", call. = FALSE)
+  if (!fam %in% c("gaussian", "binomial", "negative_binomial"))
+    stop(sprintf("regimes(): the latent-regime (confusion) phase supports gaussian, binomial and negative_binomial outcomes; got '%s'.", fam),
+         call. = FALSE)
   if (!isTRUE(model$outcome$zero_breakpoint))
     stop("regimes(): a latent regime (confusion()) REPLACES the change-point by ",
          "default, so specify a plain outcome (e.g. outcome(y ~ time)) with no ",
@@ -363,6 +366,9 @@ regimes <- function(model, name, data, n_states, states = NULL,
   blk   <- object$model$regimes[[1L]]
   data  <- object$model$outcome$data
   fam   <- object$model$outcome$family
+  famname <- fam$family %||% "gaussian"
+  fam_code <- switch(famname, gaussian = 0L, binomial = 1L, negative_binomial = 2L,
+                     stop("unsupported family for latent regime: ", famname))
   sv <- blk$subject; tv <- blk$time_var; sc <- blk$obs_state
   K  <- blk$n_states
 
@@ -415,25 +421,37 @@ regimes <- function(model, name, data, n_states, states = NULL,
     do.call(rbind, lapply(setdiff(0:(K - 1L), a), function(b) c(a, b)))))
   na_t <- nrow(allowed)
 
+  # ---- family-specific response handling ----
+  n_trials <- rep(1, length(y))                        # binomial: Bernoulli (single trial)
+  if (fam_code == 1L && !all(y %in% c(0, 1)))
+    stop("regimes(): binomial latent-regime outcome must be 0/1 (Bernoulli).", call. = FALSE)
+  if (fam_code == 2L && (any(y < 0) || any(abs(y - round(y)) > 1e-8)))
+    stop("regimes(): negative-binomial latent-regime outcome must be non-negative counts.", call. = FALSE)
+
   # ---- priors (with forward-compatible bundle overrides) ----
   lp <- blk$priors$level %||% prior_normal(0, 5)
   prior_b0_sd <- lp$sd %||% 5
   ip <- blk$priors$intensity %||% list()
   lq0m <- ip$logq0_mean %||% log(0.5); lq0s <- ip$logq0_sd %||% 1.5; bqs <- ip$beta_sd %||% 1.0
   ediag <- blk$obs_model$diag %||% 8; eoff <- blk$obs_model$offdiag %||% 1
-  # fixed-coefficient and sigma priors (outcome-level); weakly-informative defaults
+  # fixed-coefficient, sigma (Gaussian) and r (NB) priors; weakly-informative defaults
   op <- priors$outcome %||% list()
   prior_beta_sd <- (op$b0 %||% list())$sd %||% 10
   sig_pr <- op$sigma %||% NULL
   sigma_shape <- if (!is.null(sig_pr) && identical(sig_pr$family, "invgamma")) sig_pr$shape else 2
   sigma_scale <- if (!is.null(sig_pr) && identical(sig_pr$family, "invgamma")) sig_pr$scale else 1
+  r_pr <- op$r %||% NULL                               # prior_gamma stores SCALE; rate = 1/scale
+  r_shape <- if (!is.null(r_pr) && identical(r_pr$family, "gamma")) r_pr$shape else 2
+  r_scale <- if (!is.null(r_pr) && identical(r_pr$family, "gamma")) r_pr$scale else 5
+  r_rate  <- 1 / r_scale
+  r_init  <- max(1, r_shape * r_scale)                 # prior mean
 
   if (isTRUE(verbose))
-    message(sprintf("bjlm: fitting latent-regime (FFBS) model -- %d states, %d subjects, %d obs.",
-                    K, nlevels(subj_f), length(y)))
+    message(sprintf("bjlm: fitting latent-regime (FFBS, %s) model -- %d states, %d subjects, %d obs.",
+                    famname, K, nlevels(subj_f), length(y)))
 
   res <- run_regime_hmm(
-    n_states = K, n_cat = K, y = y,
+    n_states = K, n_cat = K, family = fam_code, y = y, n_trials = as.double(n_trials),
     x_fixed = as.double(x_fixed), p_fixed = as.integer(p_fixed),
     x_trans = if (p_trans > 0) as.double(Xt) else numeric(0), p_trans = as.integer(p_trans),
     obs_state = as.integer(obs_state), obs_subj = as.integer(as.integer(subj_f) - 1L),
@@ -441,6 +459,7 @@ regimes <- function(model, name, data, n_states, states = NULL,
     allowed_from = as.integer(allowed[, 1]), allowed_to = as.integer(allowed[, 2]),
     prior_beta_sd = prior_beta_sd, prior_b0_sd = prior_b0_sd,
     sigma_shape = sigma_shape, sigma_scale = sigma_scale,
+    r_init = r_init, r_shape = r_shape, r_rate = r_rate,
     e_diag = ediag, e_offdiag = eoff,
     prior_logq0_mean = lq0m, prior_logq0_sd = lq0s, prior_beta_q_sd = bqs,
     n_iter = iter, warmup = warmup, chains = chains, seed = seed, init_step = 0.4)
@@ -456,13 +475,20 @@ regimes <- function(model, name, data, n_states, states = NULL,
     enames <- c(enames, sprintf("E_%s_%s", stnames[a], stnames[b]))
   pinames <- sprintf("pi_%s", stnames)
   b0names <- sprintf("b0_state_%s", stnames[-1L])         # ref is the corner (0)
-  varnames <- c(paste0("b_", fixed_names), b0names, "sigma", q0names, bqnames, enames, pinames)
+  # dispersion column: sigma (Gaussian), r (NB); binomial has none -> a placeholder
+  # slot we drop after decoding (Rust always emits one dispersion column).
+  dispname <- switch(famname, gaussian = "sigma", negative_binomial = "r", "._binom_disp")
+  varnames <- c(paste0("b_", fixed_names), b0names, dispname, q0names, bqnames, enames, pinames)
 
   n_post <- nrow(res$draws[[1L]]); nv <- ncol(res$draws[[1L]])
   stopifnot(nv == length(varnames))
   arr <- array(NA_real_, dim = c(n_post, chains, nv),
                dimnames = list(NULL, paste0("chain_", seq_len(chains)), varnames))
   for (ch in seq_len(chains)) arr[, ch, ] <- res$draws[[ch]]
+  if (identical(dispname, "._binom_disp")) {           # drop the meaningless placeholder
+    keep <- setdiff(varnames, "._binom_disp")
+    arr <- arr[, , keep, drop = FALSE]; varnames <- keep
+  }
 
   structure(list(
     draws = posterior::as_draws_array(arr),

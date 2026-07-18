@@ -238,9 +238,11 @@ test_that("v1b entry gates fire", {
   # confusion() requires a change-point-free (zero-breakpoint) outcome
   expect_error(reg_v1b(function(m) outcome(m, y ~ time, b0 = ~1, b1 = ~1, data = dat)),
                "change-point")
-  # Gaussian only
-  expect_error(reg_v1b(function(m) outcome(m, r_obs ~ time, data = dat, family = "negbin")),
-               "Gaussian")
+  # gaussian / binomial / negative_binomial all route to the v1b latent-regime mode
+  for (fm in list(gaussian(), binomial(), "negbin")) {
+    cm <- reg_v1b(function(m) outcome(m, y ~ time, data = dat, family = fm))
+    expect_identical(cm$regime_mode, "v1b")
+  }
   # multiple confusion blocks not yet supported
   expect_error(suppressMessages(
     bjlm_model() |> outcome(y ~ time, data = dat) |>
@@ -310,20 +312,24 @@ test_that("latent-regime FFBS SBC certification (opt-in, slow)", {
     sigma <- 1 / sqrt(stats::rgamma(1, a_sig, b_sig))
     q0    <- exp(rnorm(na, lq0m, lq0s)); bq <- rnorm(na, 0, bq_sd)
     Erows <- t(vapply(seq_len(K), function(k) rdir(ifelse(seq_len(K) == k, ed, eo)), numeric(K)))
+    pi_t  <- rdir(rep(1, K))                          # draw the initial distribution too
     b0s   <- c(0, b0f)
     Y <- c(); XF <- c(); XT <- c(); OS <- c(); OSUB <- c(); OT <- c()
     for (s in seq_len(ns)) {
-      trt <- rbinom(1, 1, 0.5); st <- .sim_ctmc_path(q0 * exp(bq * trt), allowed, K, ot, 0L)
+      trt <- rbinom(1, 1, 0.5); s0 <- sample(0:(K-1), 1, prob = pi_t)
+      st <- .sim_ctmc_path(q0 * exp(bq * trt), allowed, K, ot, s0)
       r <- vapply(st, function(z) sample(0:(K-1), 1, prob = Erows[z+1, ]), integer(1))
       Y <- c(Y, beta[1] + beta[2]*ot + b0s[st+1] + rnorm(nt, 0, sigma))
       XF <- rbind(XF, cbind(1, ot)); XT <- c(XT, rep(trt, nt))
       OS <- c(OS, r); OSUB <- c(OSUB, rep(s-1L, nt)); OT <- c(OT, ot)
     }
-    res <- run_regime_hmm(n_states = K, n_cat = K, y = as.double(Y),
+    res <- run_regime_hmm(n_states = K, n_cat = K, family = 0L, y = as.double(Y),
+      n_trials = as.double(rep(1, length(Y))),
       x_fixed = as.double(XF), p_fixed = 2L, x_trans = as.double(XT), p_trans = 1L,
       obs_state = as.integer(OS), obs_subj = as.integer(OSUB), obs_time = as.double(OT),
       allowed_from = as.integer(allowed[,1]), allowed_to = as.integer(allowed[,2]),
       prior_beta_sd = pb_sd, prior_b0_sd = pb0_sd, sigma_shape = a_sig, sigma_scale = b_sig,
+      r_init = 8, r_shape = 2, r_rate = 0.2,
       e_diag = ed, e_offdiag = eo, prior_logq0_mean = lq0m, prior_logq0_sd = lq0s,
       prior_beta_q_sd = bq_sd, n_iter = 1500L, warmup = 750L, chains = 2L,
       seed = 7000L + rep, init_step = 0.4)
@@ -342,4 +348,112 @@ test_that("latent-regime FFBS SBC certification (opt-in, slow)", {
     stats::pchisq(sum((h - length(x)/B)^2 / (length(x)/B)), B - 1L, lower.tail = FALSE)
   })
   expect_gte(sum(pv > 0.05 / nf), nf - 2L)             # allow <=2 borderline flags
+})
+
+# ===========================================================================
+# v1c-a: non-Gaussian latent-regime outcomes (Binomial / NegBin) via PG-FFBS
+# ===========================================================================
+
+test_that("latent-regime fit recovers non-Gaussian outcomes (binomial, negbin)", {
+  skip_on_cran()
+  K <- 3L; allowed <- rbind(c(0,1), c(1,0), c(1,2), c(2,1)); q0t <- c(0.4,0.2,0.3,0.15)
+  Et <- matrix(0.05, K, K); diag(Et) <- 0.9; nt <- 10L; ot <- seq(0, 10, length.out = nt)
+  mk <- function(seed, ns, gen) {
+    set.seed(seed)
+    do.call(rbind, lapply(seq_len(ns), function(s) {
+      trt <- rbinom(1, 1, 0.5); st <- .sim_ctmc_path(q0t, allowed, K, ot, 0L)
+      r <- vapply(st, function(z) sample(0:(K-1), 1, prob = Et[z+1, ]), integer(1))
+      data.frame(id = s, time = ot, r_obs = r, trt = trt, y = gen(st, ot))
+    }))
+  }
+
+  # --- Negative binomial (log link): recover levels, trend and dispersion r ---
+  nd <- mk(21, 200L, function(st, ot) rnbinom(length(st), size = 8, mu = exp(1.5 + 0.05*ot + c(0,0.8,-0.6)[st+1])))
+  nf <- suppressMessages(
+    bjlm_model() |> outcome(y ~ time, data = nd, family = "negbin") |>
+      regimes(name = "r", data = nd, n_states = 3L, time_var = "time", subject = "id",
+              obs_state = "r_obs", obs_model = confusion(), transition = ~ trt) |>
+      compile() |> fit(chains = 2L, iter = 1200L, warmup = 600L, seed = 3L, verbose = FALSE))
+  sm <- posterior::summarise_draws(nf$draws, "mean"); gm <- function(v) sm$mean[sm$variable == v]
+  expect_true("r" %in% sm$variable)                     # NB dispersion named "r"
+  expect_equal(gm("b_(Intercept)"), 1.5, tolerance = 0.3)
+  expect_equal(gm("b0_state_1"), 0.8, tolerance = 0.4)
+  expect_equal(gm("b0_state_2"), -0.6, tolerance = 0.4)
+  expect_gt(gm("r"), 3); expect_lt(gm("r"), 20)
+
+  # --- Binomial (logit link): recover the state-dependent log-odds offsets ---
+  bd <- mk(22, 260L, function(st, ot) rbinom(length(st), 1, plogis(0.2 + c(0,1.5,-1.5)[st+1])))
+  bf <- suppressMessages(
+    bjlm_model() |> outcome(y ~ 1, data = bd, family = binomial()) |>
+      regimes(name = "r", data = bd, n_states = 3L, time_var = "time", subject = "id",
+              obs_state = "r_obs", obs_model = confusion()) |>
+      compile() |> fit(chains = 2L, iter = 1200L, warmup = 600L, seed = 4L, verbose = FALSE))
+  sm <- posterior::summarise_draws(bf$draws, "mean"); gm <- function(v) sm$mean[sm$variable == v]
+  expect_false("sigma" %in% sm$variable)                # no dispersion for binomial
+  expect_gt(gm("b0_state_1"), 0.6)                      # truth +1.5 (logit-scale attenuation ok)
+  expect_lt(gm("b0_state_2"), -0.6)                     # truth -1.5
+})
+
+test_that("negative-binomial FFBS SBC certification (opt-in, slow)", {
+  skip_on_cran()
+  skip_if(!nzchar(Sys.getenv("BJLM_SBC_CERT")), "set BJLM_SBC_CERT=1 to run the NB FFBS SBC cert")
+  rdir <- function(a) { g <- stats::rgamma(length(a), a, 1); g / sum(g) }
+  frank <- function(dl, col, truth) {
+    np <- nrow(dl[[1]]); nc <- length(dl); m <- sapply(dl, function(d) d[, col])
+    da <- posterior::as_draws_array(array(m, dim = c(np, nc, 1)))
+    ess <- suppressWarnings(min(posterior::ess_bulk(da), posterior::ess_tail(da), na.rm = TRUE))
+    v <- as.vector(m); if (!is.finite(ess) || ess < 2) ess <- length(v)
+    mean(v[seq(1, length(v), by = max(1L, floor(length(v) / ess)))] < truth)
+  }
+  K <- 3L; allowed <- rbind(c(0,1), c(1,0), c(1,2), c(2,1)); na <- nrow(allowed)
+  # tighter priors keep the log-mean (hence counts) in a sane range for draw==fit
+  pb_sd <- 0.5; pb0_sd <- 0.7; r_shape <- 4; r_rate <- 0.5
+  lq0m <- log(0.4); lq0s <- 0.8; bq_sd <- 0.6; ed <- 12; eo <- 1
+  REPS <- 40L; ns <- 80L; nt <- 8L; ot <- seq(0, 10, length.out = nt)
+  # functionals: intercept, b0_1, b0_2, r, q0[na], E_00,E_11,E_22
+  nf <- 4L + na + 3L; ranks <- matrix(NA_real_, REPS, nf)
+  for (rep in seq_len(REPS)) {
+    set.seed(9000L + rep)
+    b0    <- rnorm(1, 0, pb_sd)                         # intercept only (no trend)
+    b0f   <- rnorm(2, 0, pb0_sd)
+    r_t   <- stats::rgamma(1, r_shape, rate = r_rate)
+    q0    <- exp(rnorm(na, lq0m, lq0s)); bq <- rnorm(na, 0, bq_sd)
+    Erows <- t(vapply(seq_len(K), function(k) rdir(ifelse(seq_len(K) == k, ed, eo)), numeric(K)))
+    pi_t  <- rdir(rep(1, K))                          # draw the initial distribution too
+    b0s   <- c(0, b0f)
+    Y <- c(); XF <- c(); XT <- c(); OS <- c(); OSUB <- c(); OT <- c()
+    for (s in seq_len(ns)) {
+      trt <- rbinom(1, 1, 0.5); s0 <- sample(0:(K-1), 1, prob = pi_t)
+      st <- .sim_ctmc_path(q0 * exp(bq * trt), allowed, K, ot, s0)
+      r <- vapply(st, function(z) sample(0:(K-1), 1, prob = Erows[z+1, ]), integer(1))
+      Y <- c(Y, rnbinom(nt, size = r_t, mu = exp(b0 + b0s[st+1])))
+      XF <- rbind(XF, matrix(1, nt, 1)); XT <- c(XT, rep(trt, nt))
+      OS <- c(OS, r); OSUB <- c(OSUB, rep(s-1L, nt)); OT <- c(OT, ot)
+    }
+    res <- run_regime_hmm(n_states = K, n_cat = K, family = 2L, y = as.double(Y),
+      n_trials = as.double(rep(1, length(Y))),
+      x_fixed = as.double(XF), p_fixed = 1L, x_trans = as.double(XT), p_trans = 1L,
+      obs_state = as.integer(OS), obs_subj = as.integer(OSUB), obs_time = as.double(OT),
+      allowed_from = as.integer(allowed[,1]), allowed_to = as.integer(allowed[,2]),
+      prior_beta_sd = pb_sd, prior_b0_sd = pb0_sd, sigma_shape = 2, sigma_scale = 1,
+      r_init = r_shape / r_rate, r_shape = r_shape, r_rate = r_rate,
+      e_diag = ed, e_offdiag = eo, prior_logq0_mean = lq0m, prior_logq0_sd = lq0s,
+      prior_beta_q_sd = bq_sd, n_iter = 1500L, warmup = 750L, chains = 2L,
+      seed = 9000L + rep, init_step = 0.4)
+    truths <- c(b0, b0f, r_t, q0, diag(Erows))
+    # p_fixed=1 col order: b0(1) b0_state(2) r(1) q0(na) beta_q(na) E(K*K) pi(K)
+    # cols before the E block = 1 + (K-1) + 1(disp) + na + na = 4 + 2*na
+    ecol0 <- 4L + na + na
+    ecols <- c(ecol0 + 1L, ecol0 + K + 2L, ecol0 + 2L*K + 3L)   # E_00,E_11,E_22
+    cols  <- c(1, 2, 3, 4, 5:(4+na), ecols)
+    for (i in seq_len(nf)) ranks[rep, i] <- frank(res$draws, cols[i], truths[i])
+  }
+  mr <- colMeans(ranks, na.rm = TRUE)
+  expect_true(all(mr > 0.25 & mr < 0.75))
+  B <- 8L
+  pv <- apply(ranks, 2, function(x) {
+    x <- x[is.finite(x)]; h <- as.numeric(table(cut(x, seq(0, 1, length.out = B+1), include.lowest = TRUE)))
+    stats::pchisq(sum((h - length(x)/B)^2 / (length(x)/B)), B - 1L, lower.tail = FALSE)
+  })
+  expect_gte(sum(pv > 0.05 / nf), nf - 2L)
 })

@@ -147,8 +147,19 @@ fallback only. SBC ranks *parameters*, not latent states.
   correctly weakly identified and converges with N). Exit: **draw==fit
   coverage-mode** SBC on intercept/trend, `b0_state`, `sigma`, `q^0`, `E` (opt-in,
   `BJLM_SBC_CERT=1`).
-- **v1c — composition.** GP + regime + opt-in smooth change-point together.
-  Exit: **coverage-mode** SBC on the three-latent aliasing.
+- **v1c-a — non-Gaussian families. [SHIPPED]** Binomial (logit) and
+  negative-binomial (log) latent-regime outcomes in the standalone
+  `regime_hmm.rs`, kept isolated (no main-loop surgery). FFBS uses the family
+  emission log-density per state; the coefficient/level draw is Polya-Gamma
+  augmented (bjlm convention: NB augments the log-odds `psi - ln r`, `b = y + r`,
+  `kappa = (y - r)/2`; Binomial `b = 1`, `kappa = y - 1/2`), reducing every family
+  to the same weighted normal equations. NB dispersion `r` by RW-MH (shared
+  `ln_gamma`); Binomial has no dispersion. `run_regime_hmm` gains `family`,
+  `n_trials`, `r_init/r_shape/r_rate`. Verified: recovery for both families
+  (levels, trend, `r`, `E`); draw==fit NB SBC (opt-in) Bonferroni-PASS.
+- **v1c-b — composition.** GP + regime + opt-in smooth change-point together,
+  integrated into `run_chain_bjlm`. Exit: **coverage-mode** SBC on the
+  three-latent aliasing.
 
 ## 6. API (forward-compatible from v0)
 

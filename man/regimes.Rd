@@ -86,10 +86,11 @@ clamped path. With \code{obs_model = confusion()} the states are \emph{latent} (
 observed indicator is misclassified) and the whole model, including the level,
 the intensities, the misclassification matrix and the initial-state
 distribution, is fit jointly by forward-filter backward-sample (FFBS); this
-requires a change-point-free Gaussian outcome (the regime process replaces the
-smoothed change-point). Composing a smoothed change-point or non-Gaussian
-families with a latent regime is a later phase. See
-\code{data-raw/DESIGN_regimes_hmm.md}.
+requires a change-point-free outcome (the regime process replaces the smoothed
+change-point) and supports gaussian, binomial (logit) and negative-binomial
+(log) families -- the non-Gaussian coefficient/level draw uses Polya-Gamma
+augmentation. Composing a smoothed change-point or a latent GP with a latent
+regime is a later phase. See \code{data-raw/DESIGN_regimes_hmm.md}.
 }
 \seealso{
 \code{\link[=exact]{exact()}}, \code{\link[=confusion]{confusion()}}, \code{\link[=regime_priors]{regime_priors()}}.

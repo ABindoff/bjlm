@@ -1,18 +1,25 @@
 // =============================================================================
 // Standalone Bayesian continuous-time hidden-Markov multistate REGRESSION with a
-// misclassified observed indicator — phase v1b.
+// misclassified observed indicator — phases v1b (Gaussian) and v1c-a (families).
 //
-// Outcome (Gaussian): y_it = x_it' beta + b0_{s_it} + eps,  eps ~ N(0, sigma^2),
+// Outcome: a state-dependent linear predictor eta_it = x_it' beta + b0_{s_it}
+// feeds one of three families,
+//   Gaussian:  y ~ N(eta, sigma^2)
+//   Binomial:  y ~ Binom(n_it, sigmoid(eta))                      (logit link)
+//   NegBin:    y ~ NB(mean = exp(eta), size = r)                  (log link)
 // where s_it is a latent continuous-time Markov state (proportional-intensity
 // generator, ctmc.rs) observed through a misclassification matrix E:
 //   r_it ~ Categorical(E_{s_it, .}),  E rows ~ Dirichlet (diagonally dominant).
-// This couples the outcome and transition models through the latent path, which
-// is drawn by forward-filter/backward-sample (FFBS) over each subject's
-// observation grid using exp(Q*delta) interval kernels. Given the path, the
-// regression coefficients + state levels are a conjugate Gaussian draw, sigma is
-// inverse-gamma, E and the initial distribution are Dirichlet, and the transition
-// intensities are adaptive RW-MH (as in ctmc.rs). It is self-contained (no GP /
-// change-point); v1c integrates FFBS into the main sampler for composition.
+// The outcome and transition models couple through the latent path, drawn by
+// forward-filter/backward-sample (FFBS) over each subject's observation grid
+// using exp(Q*delta) interval kernels. Given the path, the coefficients + state
+// levels are a (weighted) conjugate Gaussian draw -- exact for Gaussian, and via
+// Polya-Gamma augmentation for Binomial/NB (bjlm convention: psi = ln(mean); NB
+// augments the log-odds eta = psi - ln r with b = y + r, kappa = (y - r)/2;
+// Binomial b = 1, kappa = y - 0.5). The dispersion is inverse-gamma sigma
+// (Gaussian) or RW-MH r (NB); E and the initial distribution are Dirichlet and
+// the transition intensities are adaptive RW-MH (as in ctmc.rs). Self-contained
+// (no GP / change-point); the main-loop composition is a later phase.
 // See data-raw/DESIGN_regimes_hmm.md. FFI wrapper in lib.rs.
 // =============================================================================
 
@@ -22,10 +29,35 @@ use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Gamma, Normal};
 
 use crate::ctmc::{build_generator, expm};
+use crate::polya_gamma::sample_pg;
+
+// Outcome families.
+const FAM_GAUSSIAN: i32 = 0;
+const FAM_BINOMIAL: i32 = 1;
+const FAM_NEGBIN: i32 = 2;
 
 fn normal_logpdf(x: f64, mean: f64, sd: f64) -> f64 {
     let z = (x - mean) / sd;
     -0.5 * z * z - sd.ln() - 0.9189385332046727 // 0.5*ln(2pi)
+}
+
+// ln(1 + exp(x)), numerically stable.
+fn softplus(x: f64) -> f64 {
+    if x > 0.0 { x + (-x).exp().ln_1p() } else { x.exp().ln_1p() }
+}
+
+// Lanczos ln Gamma (matches sampler_bjlm::ln_gamma).
+fn ln_gamma(z: f64) -> f64 {
+    let c = [
+        76.18009172947146, -86.50532032941677, 24.01409824083091,
+        -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5,
+    ];
+    let mut sum = 1.000000000190015;
+    for (i, ci) in c.iter().enumerate() {
+        sum += ci / (z + (i as f64) + 1.0);
+    }
+    let temp = z + 5.5;
+    (z + 0.5) * temp.ln() - temp + (2.5066282746310005 * sum / z).ln()
 }
 
 fn logsumexp(v: &[f64]) -> f64 {
@@ -65,13 +97,35 @@ fn subject_ranges(obs_subj: &[i32]) -> Vec<(usize, usize)> {
 
 struct HmmReg {
     n: usize, k: usize, r: usize, p_fixed: usize, p_trans: usize,
+    family: i32,
     y: DVector<f64>,
+    n_trials: Vec<f64>,             // binomial trials per obs (1.0 for Bernoulli / unused)
     x_fixed: DMatrix<f64>,          // n x p_fixed
     x_trans: DMatrix<f64>,          // n x p_trans (covariate row for the interval starting at obs)
     obs_state: Vec<i32>,            // observed indicator per obs (0-based, -1 missing)
     obs_time: Vec<f64>,
     subj: Vec<(usize, usize)>,      // per-subject obs ranges
     allowed: Vec<(usize, usize)>,
+}
+
+// Family emission log-density of y_i given linear predictor eta and dispersion
+// (sigma for Gaussian, r for NB; ignored for Binomial). State-independent
+// constants may be dropped (they cancel in the FFBS categorical normalisation)
+// but are kept here for a well-scaled filter.
+fn emission_loglik(d: &HmmReg, i: usize, eta: f64, disp: f64) -> f64 {
+    match d.family {
+        FAM_BINOMIAL => {
+            let t = d.n_trials[i];
+            d.y[i] * eta - t * softplus(eta)
+        }
+        FAM_NEGBIN => {
+            let r = disp;
+            let mu = eta.exp();
+            ln_gamma(d.y[i] + r) - ln_gamma(r) - ln_gamma(d.y[i] + 1.0)
+                + r * (r / (r + mu)).ln() + d.y[i] * (mu / (r + mu)).ln()
+        }
+        _ => normal_logpdf(d.y[i], eta, disp), // Gaussian
+    }
 }
 
 // Interval transition matrices for a subject, given current q0/beta.
@@ -85,18 +139,19 @@ fn subject_pmats(d: &HmmReg, r0: usize, r1: usize, q0: &[f64], beta: &[DVector<f
     mats
 }
 
-// FFBS one subject: returns the sampled state per observation.
+// FFBS one subject: returns the sampled state per observation. `xbeta` is the
+// fixed-effect linear predictor x_i'beta; the state adds b0_state[s].
 fn ffbs_subject(
     d: &HmmReg, r0: usize, r1: usize,
-    xbeta: &DVector<f64>, b0_state: &[f64], sigma: f64,
+    xbeta: &DVector<f64>, b0_state: &[f64], disp: f64,
     e_log: &DMatrix<f64>, pi_log: &[f64], pmats: &[DMatrix<f64>],
     rng: &mut StdRng,
 ) -> Vec<usize> {
     let k = d.k;
     let t = r1 - r0;
     let emiss = |j: usize, s: usize| -> f64 {
-        let mu = xbeta[r0 + j] + b0_state[s];
-        let mut l = normal_logpdf(d.y[r0 + j], mu, sigma);
+        let eta = xbeta[r0 + j] + b0_state[s];
+        let mut l = emission_loglik(d, r0 + j, eta, disp);
         let ri = d.obs_state[r0 + j];
         if ri >= 0 { l += e_log[(s, ri as usize)]; }
         l
@@ -122,10 +177,18 @@ fn ffbs_subject(
     path
 }
 
-// Joint conjugate draw of (beta, b0_state_free) given the path.
-// Design D = [x_fixed | state indicators for states 1..K-1]; state 0 is the corner.
+// (weighted) conjugate Gaussian draw of (beta, b0_state_free) given the path.
+// Design D = [x_fixed | state indicators for states 1..K-1]; state 0 is the
+// corner. Per-observation weight w_i and pseudo-response wy_i (already
+// weight-folded) reduce every family to the same normal equations:
+//   precision = D' diag(w) D + diag(1/prior_var),  rhs = D' wy,
+// theta ~ N(precision^{-1} rhs, precision^{-1}).
+//   Gaussian:  w = 1/sigma^2,  wy = y / sigma^2
+//   Binomial:  omega ~ PG(1, eta_cur),        w = omega, wy = (y - 0.5)
+//   NegBin:    omega ~ PG(y + r, eta_cur-lnr), w = omega, wy = kappa + omega*ln r
+// where eta_cur is the CURRENT linear predictor (previous coefficients + path).
 fn draw_coefs(
-    d: &HmmReg, path: &[usize], sigma: f64,
+    d: &HmmReg, path: &[usize], cur_beta: &DVector<f64>, cur_b0: &[f64], disp: f64,
     prior_beta_sd: f64, prior_b0_sd: f64, rng: &mut StdRng,
 ) -> (DVector<f64>, Vec<f64>) {
     let dcol = d.p_fixed + (d.k - 1);
@@ -135,22 +198,82 @@ fn draw_coefs(
         let s = path[i];
         if s >= 1 { dm[(i, d.p_fixed + s - 1)] = 1.0; }
     }
-    let sig2 = sigma * sigma;
-    let mut lambda = (dm.transpose() * &dm) / sig2;
+    let xbeta = &d.x_fixed * cur_beta;
+
+    let mut w = vec![0.0f64; d.n];
+    let mut wy = vec![0.0f64; d.n];
+    match d.family {
+        FAM_BINOMIAL => {
+            for i in 0..d.n {
+                let eta = xbeta[i] + cur_b0[path[i]];
+                let omega = sample_pg(1.0, eta, rng).max(1e-9);
+                w[i] = omega;
+                wy[i] = d.y[i] - 0.5 * d.n_trials[i];      // kappa = y - n/2
+            }
+        }
+        FAM_NEGBIN => {
+            let log_r = disp.ln();
+            for i in 0..d.n {
+                let eta = xbeta[i] + cur_b0[path[i]]; // psi = log-mean
+                let omega = sample_pg(d.y[i] + disp, eta - log_r, rng).max(1e-9);
+                let kappa = (d.y[i] - disp) / 2.0;
+                w[i] = omega;
+                wy[i] = kappa + omega * log_r;             // pseudo-response for psi, weight-folded
+            }
+        }
+        _ => {
+            let inv_s2 = 1.0 / (disp * disp);
+            for i in 0..d.n { w[i] = inv_s2; wy[i] = d.y[i] * inv_s2; }
+        }
+    }
+
+    // precision = D' diag(w) D + prior; rhs = D' wy
+    let mut wx = dm.clone();
+    for i in 0..d.n { for c in 0..dcol { wx[(i, c)] *= w[i]; } }
+    let mut precision = dm.transpose() * &wx;
     for c in 0..dcol {
         let pv = if c < d.p_fixed { prior_beta_sd } else { prior_b0_sd };
-        lambda[(c, c)] += 1.0 / (pv * pv);
+        precision[(c, c)] += 1.0 / (pv * pv);
     }
-    let rhs = (dm.transpose() * &d.y) / sig2;
-    let cov = lambda.try_inverse().expect("coef posterior precision not invertible");
-    let mean = &cov * rhs;
-    let l = cov.cholesky().expect("coef posterior covariance not PD").l();
+    let rhs = dm.transpose() * DVector::from_vec(wy);
+    let chol = precision.cholesky().expect("coef posterior precision not PD");
+    let mean = chol.solve(&rhs);
     let z = DVector::from_iterator(dcol, (0..dcol).map(|_| Normal::new(0.0, 1.0).unwrap().sample(rng)));
-    let theta = &mean + l * z;
+    let y_samp = chol.l().transpose().solve_upper_triangular(&z)
+        .expect("upper-triangular solve failed");
+    let theta = mean + y_samp;
+
     let beta = DVector::from_iterator(d.p_fixed, (0..d.p_fixed).map(|c| theta[c]));
     let mut b0 = vec![0.0; d.k];
     for s in 1..d.k { b0[s] = theta[d.p_fixed + s - 1]; }
     (beta, b0)
+}
+
+// RW-MH update of the NB dispersion r on the log scale (weights = 1). Prior:
+// r ~ Gamma(shape, rate) (bjlm convention: rate = 1/scale). Returns (r, step).
+fn draw_nb_r(
+    d: &HmmReg, eta: &[f64], r: f64, step_r: f64,
+    r_shape: f64, r_rate: f64, adapting: bool, rng: &mut StdRng,
+) -> (f64, f64) {
+    let log_r = r.ln();
+    let prop_log_r = log_r + Normal::new(0.0, step_r).unwrap().sample(rng);
+    let prop_r = prop_log_r.exp();
+    let mut ll_diff = 0.0;
+    for i in 0..d.n {
+        let mu = eta[i].exp();
+        let ll_c = ln_gamma(d.y[i] + r) - ln_gamma(r)
+            + r * (r / (r + mu)).ln() + d.y[i] * (mu / (r + mu)).ln();
+        let ll_p = ln_gamma(d.y[i] + prop_r) - ln_gamma(prop_r)
+            + prop_r * (prop_r / (prop_r + mu)).ln() + d.y[i] * (mu / (prop_r + mu)).ln();
+        ll_diff += ll_p - ll_c;
+    }
+    let prior_c = (r_shape - 1.0) * log_r - r_rate * r;
+    let prior_p = (r_shape - 1.0) * prop_log_r - r_rate * prop_r;
+    let log_accept = ll_diff + (prior_p - prior_c) + (prop_log_r - log_r); // +Jacobian
+    let acc = log_accept.exp().min(1.0);
+    let new_r = if rng.gen::<f64>() < acc { prop_r } else { r };
+    let new_step = if adapting { (step_r * (1.0 + 0.1 * (acc - 0.44))).max(0.005) } else { step_r };
+    (new_r, new_step)
 }
 
 fn intensity_loglik(d: &HmmReg, path: &[usize], log_q0: &[f64], beta: &[DVector<f64>]) -> f64 {
@@ -167,9 +290,11 @@ fn intensity_loglik(d: &HmmReg, path: &[usize], log_q0: &[f64], beta: &[DVector<
 
 fn adapt_gain(it: usize) -> f64 { 1.0 / (1.0 + it as f64).powf(0.7) }
 
+#[allow(clippy::too_many_arguments)]
 fn run_one_chain(
     d: &HmmReg,
     prior_beta_sd: f64, prior_b0_sd: f64, sigma_shape: f64, sigma_scale: f64,
+    r_init: f64, r_shape: f64, r_rate: f64,
     e_diag: f64, e_offdiag: f64,
     prior_logq0_mean: f64, prior_logq0_sd: f64, prior_beta_q_sd: f64,
     n_iter: usize, warmup: usize, init_step: f64, seed: u64,
@@ -180,7 +305,9 @@ fn run_one_chain(
     // init
     let mut beta = DVector::<f64>::zeros(d.p_fixed);
     let mut b0_state = vec![0.0; k];
-    let mut sigma = 1.0;
+    let mut sigma = 1.0;                 // Gaussian dispersion
+    let mut r_disp = r_init;             // NB dispersion
+    let mut step_r = 0.2;
     let mut e_mat = DMatrix::<f64>::from_element(k, r, 0.1);
     for i in 0..k { if i < r { e_mat[(i, i)] = 0.8; } }
     for i in 0..k { let s: f64 = (0..r).map(|j| e_mat[(i, j)]).sum(); for j in 0..r { e_mat[(i, j)] /= s; } }
@@ -190,6 +317,11 @@ fn run_one_chain(
     let mut step = vec![init_step; na];
     let mut path = vec![0usize; d.n];
 
+    // dispersion passed to the emission (sigma for Gaussian, r for NB, 1.0 else)
+    let disp_of = |sigma: f64, r_disp: f64| -> f64 {
+        match d.family { FAM_NEGBIN => r_disp, FAM_GAUSSIAN => sigma, _ => 1.0 }
+    };
+
     let n_post = n_iter - warmup;
     let ncol = d.p_fixed + (k - 1) + 1 + na + na * pt + k * r + k;
     let mut draws = DMatrix::<f64>::zeros(n_post, ncol);
@@ -198,29 +330,37 @@ fn run_one_chain(
         let e_log = e_mat.map(|v| v.max(1e-300).ln());
         let pi_log: Vec<f64> = pi.iter().map(|&v| v.max(1e-300).ln()).collect();
         let q0v: Vec<f64> = log_q0.iter().map(|&x| x.exp()).collect();
+        let disp = disp_of(sigma, r_disp);
 
         // 1. FFBS path per subject
         let xbeta = &d.x_fixed * &beta;
         for &(r0, r1) in &d.subj {
             let mats = subject_pmats(d, r0, r1, &q0v, &beta_q);
-            let sp = ffbs_subject(d, r0, r1, &xbeta, &b0_state, sigma, &e_log, &pi_log, &mats, &mut rng);
+            let sp = ffbs_subject(d, r0, r1, &xbeta, &b0_state, disp, &e_log, &pi_log, &mats, &mut rng);
             for (jj, &s) in sp.iter().enumerate() { path[r0 + jj] = s; }
         }
 
-        // 2. (beta, b0_state) conjugate
-        let (nb, nb0) = draw_coefs(d, &path, sigma, prior_beta_sd, prior_b0_sd, &mut rng);
+        // 2. (beta, b0_state): weighted conjugate / PG-augmented draw
+        let (nb, nb0) = draw_coefs(d, &path, &beta, &b0_state, disp, prior_beta_sd, prior_b0_sd, &mut rng);
         beta = nb; b0_state = nb0;
 
-        // 3. sigma inverse-gamma
+        // 3. dispersion
         let xbeta2 = &d.x_fixed * &beta;
-        let mut ssr = 0.0;
-        for i in 0..d.n {
-            let mu = xbeta2[i] + b0_state[path[i]];
-            ssr += (d.y[i] - mu).powi(2);
+        match d.family {
+            FAM_GAUSSIAN => {
+                let mut ssr = 0.0;
+                for i in 0..d.n { let mu = xbeta2[i] + b0_state[path[i]]; ssr += (d.y[i] - mu).powi(2); }
+                let sh = sigma_shape + d.n as f64 / 2.0;
+                let sc = sigma_scale + ssr / 2.0;
+                sigma = (1.0 / Gamma::new(sh, 1.0 / sc).unwrap().sample(&mut rng)).sqrt();
+            }
+            FAM_NEGBIN => {
+                let eta: Vec<f64> = (0..d.n).map(|i| xbeta2[i] + b0_state[path[i]]).collect();
+                let (nr, ns) = draw_nb_r(d, &eta, r_disp, step_r, r_shape, r_rate, it < warmup, &mut rng);
+                r_disp = nr; step_r = ns;
+            }
+            _ => {}
         }
-        let sh = sigma_shape + d.n as f64 / 2.0;
-        let sc = sigma_scale + ssr / 2.0;
-        sigma = (1.0 / Gamma::new(sh, 1.0 / sc).unwrap().sample(&mut rng)).sqrt();
 
         // 4. E Dirichlet from (path, observed indicator)
         for a in 0..k {
@@ -258,13 +398,13 @@ fn run_one_chain(
             }
         }
 
-        // store
+        // store: [beta, b0_state(K-1), disp, q0(na), beta_q(na*pt), E(k*r), pi(k)]
         if it >= warmup {
             let row = it - warmup;
             let mut c = 0;
             for i in 0..d.p_fixed { draws[(row, c)] = beta[i]; c += 1; }
             for s in 1..k { draws[(row, c)] = b0_state[s]; c += 1; }
-            draws[(row, c)] = sigma; c += 1;
+            draws[(row, c)] = match d.family { FAM_NEGBIN => r_disp, FAM_GAUSSIAN => sigma, _ => 1.0 }; c += 1;
             for a in 0..na { draws[(row, c)] = log_q0[a].exp(); c += 1; }
             for a in 0..na { for cc in 0..pt { draws[(row, c)] = beta_q[a][cc]; c += 1; } }
             for a in 0..k { for b in 0..r { draws[(row, c)] = e_mat[(a, b)]; c += 1; } }
@@ -274,20 +414,24 @@ fn run_one_chain(
     draws
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
-    n_states: usize, n_cat: usize,
-    y: &[f64], x_fixed: &[f64], p_fixed: usize, x_trans: &[f64], p_trans: usize,
+    n_states: usize, n_cat: usize, family: i32,
+    y: &[f64], n_trials: &[f64], x_fixed: &[f64], p_fixed: usize, x_trans: &[f64], p_trans: usize,
     obs_state: &[i32], obs_subj: &[i32], obs_time: &[f64],
     allowed_from: &[i32], allowed_to: &[i32],
     prior_beta_sd: f64, prior_b0_sd: f64, sigma_shape: f64, sigma_scale: f64,
+    r_init: f64, r_shape: f64, r_rate: f64,
     e_diag: f64, e_offdiag: f64,
     prior_logq0_mean: f64, prior_logq0_sd: f64, prior_beta_q_sd: f64,
     n_iter: usize, warmup: usize, chains: usize, seed: u64, init_step: f64,
 ) -> Vec<DMatrix<f64>> {
     let n = y.len();
+    let nt = if n_trials.len() == n { n_trials.to_vec() } else { vec![1.0; n] };
     let d = HmmReg {
-        n, k: n_states, r: n_cat, p_fixed, p_trans,
+        n, k: n_states, r: n_cat, p_fixed, p_trans, family,
         y: DVector::from_column_slice(y),
+        n_trials: nt,
         x_fixed: DMatrix::from_column_slice(n, p_fixed, x_fixed),
         x_trans: DMatrix::from_column_slice(n, p_trans, x_trans),
         obs_state: obs_state.to_vec(),
@@ -297,8 +441,8 @@ pub fn run(
             .map(|(&f, &t)| (f as usize, t as usize)).collect(),
     };
     (0..chains).map(|c| run_one_chain(
-        &d, prior_beta_sd, prior_b0_sd, sigma_shape, sigma_scale, e_diag, e_offdiag,
-        prior_logq0_mean, prior_logq0_sd, prior_beta_q_sd,
+        &d, prior_beta_sd, prior_b0_sd, sigma_shape, sigma_scale, r_init, r_shape, r_rate,
+        e_diag, e_offdiag, prior_logq0_mean, prior_logq0_sd, prior_beta_q_sd,
         n_iter, warmup, init_step, seed.wrapping_add(c as u64 * 1_000_003),
     )).collect()
 }

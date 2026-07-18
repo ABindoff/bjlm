@@ -19,9 +19,11 @@ Declares that the observed regime indicator is a noisy emission of the true
 latent state through a confusion (misclassification) matrix with
 diagonally-dominant Dirichlet rows. With this emission the states are
 \strong{latent}: the whole model (outcome level, transition intensities,
-misclassification, initial state and noise) is fit jointly by forward-filter
-backward-sample (FFBS). Requires a change-point-free Gaussian outcome (e.g.
-\code{outcome(y ~ time)}) -- the regime process replaces the smoothed change-point.
+misclassification, initial state and noise/dispersion) is fit jointly by
+forward-filter backward-sample (FFBS). Supports gaussian, binomial (logit) and
+negative-binomial (log) outcomes -- the non-Gaussian coefficient/level draw
+uses Polya-Gamma augmentation. Requires a change-point-free outcome (e.g.
+\code{outcome(y ~ time)}): the regime process replaces the smoothed change-point.
 }
 \seealso{
 \code{\link[=regimes]{regimes()}}, \code{\link[=exact]{exact()}}.
