@@ -30,7 +30,8 @@ bjlm(
   cores = 1L,
   step_om = 0.01,
   step_rho = 0.01,
-  target_accept = 0.8
+  target_accept = 0.8,
+  regimes = list()
 )
 }
 \arguments{
