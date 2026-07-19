@@ -57,10 +57,10 @@ test_that("v0 capability gates fire", {
   dat <- .regime_data()
   reg <- function(...) bjlm_model() |> outcome(y ~ time, b0 = ~ 1, b1 = ~ 1, data = dat) |>
     regimes(name = "r", data = dat, time_var = "time", subject = "subj", ...) |> compile()
-  # misclassification (v1b) replaces the change-point: erroring here is about the
-  # change-point still being present, not about confusion() being inactive.
-  expect_error(reg(n_states = 3, states = c("A","B","C"), obs_state = "state",
-                   obs_model = confusion(), ref_state = "A"), "change-point")
+  # confusion() with a b0/b1 outcome is now VALID (composes in-loop, v1c-b):
+  # compiles to the latent-regime mode rather than erroring.
+  expect_identical(reg(n_states = 3, states = c("A","B","C"), obs_state = "state",
+                       obs_model = confusion(), ref_state = "A")$regime_mode, "v1b")
   # only the level switches in this phase
   expect_error(reg(n_states = 3, states = c("A","B","C"), obs_state = "state",
                    obs_model = exact(), switch = scale ~ 1, ref_state = "A"), "level only")
@@ -235,9 +235,8 @@ test_that("v1b entry gates fire", {
       regimes(name = "r", data = dat, n_states = 3L, time_var = "time", subject = "id",
               obs_state = "r_obs", obs_model = confusion(), transition = ~ trt) |>
       compile())
-  # confusion() requires a change-point-free (zero-breakpoint) outcome
-  expect_error(reg_v1b(function(m) outcome(m, y ~ time, b0 = ~1, b1 = ~1, data = dat)),
-               "change-point")
+  # a change-point may COMPOSE with the regime (v1c-b, fit in-loop): valid compile
+  expect_identical(reg_v1b(function(m) outcome(m, y ~ time, b0 = ~1, b1 = ~1, data = dat))$regime_mode, "v1b")
   # gaussian / binomial / negative_binomial all route to the v1b latent-regime mode
   for (fm in list(gaussian(), binomial(), "negbin")) {
     cm <- reg_v1b(function(m) outcome(m, y ~ time, data = dat, family = fm))
@@ -420,6 +419,41 @@ test_that("in-loop regime engine (v1c-b) reproduces the isolated v1b fit", {
   # recovery of the levels (truth 1.2 / -0.7)
   expect_equal(gc("b0_state_1"), 1.2, tolerance = 0.4)
   expect_equal(gc("b0_state_2"), -0.7, tolerance = 0.4)
+})
+
+test_that("in-loop regime COMPOSES with a smoothed change-point (v1c-b)", {
+  skip_on_cran()
+  sig <- function(x) 1 / (1 + exp(-x))
+  K <- 3L; allowed <- rbind(c(0,1), c(1,0), c(1,2), c(2,1)); q0t <- c(0.4,0.2,0.3,0.15)
+  b0s <- c(0, 1.0, -0.8); Et <- matrix(0.05, K, K); diag(Et) <- 0.9
+  b0 <- 2; b1 <- 0.2; delta <- -0.5; om <- 5; rho <- 2.0; sg <- 0.4
+  nt <- 8L; ot <- seq(0, 10, length.out = nt)
+  set.seed(41); rows <- list()
+  for (s in seq_len(130L)) {
+    st <- .sim_ctmc_path(q0t, allowed, K, ot, 0L)
+    r  <- vapply(st, function(z) sample(0:(K-1), 1, prob = Et[z+1, ]), integer(1))
+    d  <- ot - om
+    rows[[s]] <- data.frame(subject = s, tau = ot,
+                            y = b0 + b1*d + delta*d*sig(rho*d) + b0s[st+1] + rnorm(nt, 0, sg), r_obs = r)
+  }
+  dat <- do.call(rbind, rows)
+  fit <- suppressMessages(
+    bjlm_model() |>
+      outcome(y ~ tau, b0 = ~ 1, b1 = ~ 1, deltas = list(~ 1), omega = list(~ 1), rho = list(~ 1),
+              data = dat, family = gaussian()) |>
+      regimes(name = "r", data = dat, n_states = 3L, time_var = "tau", subject = "subject",
+              obs_state = "r_obs", obs_model = confusion(diag = 8, offdiag = 1)) |>
+      compile() |> fit(chains = 2L, iter = 1200L, warmup = 600L, seed = 5L, verbose = FALSE))
+
+  expect_s3_class(fit, "bjlm_fit")
+  sm <- posterior::summarise_draws(fit$draws, "mean"); gm <- function(v) sm$mean[sm$variable == v]
+  # change-point recovered (location + slope-change) alongside the regime
+  expect_equal(gm("omega1_(Intercept)"), 5.0, tolerance = 1.0)
+  expect_equal(gm("delta1_(Intercept)"), -0.5, tolerance = 0.3)
+  # regime levels + misclassification NOT absorbed by the change-point
+  expect_equal(gm("b0_state_1"), 1.0, tolerance = 0.4)
+  expect_equal(gm("b0_state_2"), -0.8, tolerance = 0.4)
+  expect_gt(gm("E_0_0"), 0.75); expect_gt(gm("E_1_1"), 0.75)
 })
 
 test_that("state_occupancy() returns Rao-Blackwellized smoothed state probabilities", {

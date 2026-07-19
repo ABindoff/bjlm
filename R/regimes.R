@@ -337,11 +337,10 @@ regimes <- function(model, name, data, n_states, states = NULL,
   if (!fam %in% c("gaussian", "binomial", "negative_binomial"))
     stop(sprintf("regimes(): the latent-regime (confusion) phase supports gaussian, binomial and negative_binomial outcomes; got '%s'.", fam),
          call. = FALSE)
-  if (!isTRUE(model$outcome$zero_breakpoint))
-    stop("regimes(): a latent regime (confusion()) REPLACES the change-point by ",
-         "default, so specify a plain outcome (e.g. outcome(y ~ time)) with no ",
-         "b1/deltas/omega/rho. Composing a smoothed change-point with the regime ",
-         "process is a later phase (v1c).", call. = FALSE)
+  # A change-point may compose with the latent regime (v1c-b): such a model is
+  # fit by the IN-LOOP engine (bjlm regimes=), which fit() selects automatically
+  # when a change-point or a latent GP is present. A change-point-free regime
+  # without a GP uses the faster isolated engine. (Both are valid here.)
   sw_lhs <- if (inherits(blk$switch, "formula") && length(blk$switch) == 3L)
     all.vars(blk$switch[[2L]]) else character(0)
   if (!identical(sw_lhs, "level"))

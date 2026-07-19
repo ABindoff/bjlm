@@ -626,8 +626,11 @@ fit.bjlm_compiled_model <- function(object, priors = NULL, dr = FALSE, ...) {
   # when explicitly requested (BJLM_REGIME_INLOOP=1, for A/B against isolated).
   regime_list <- list()
   if (identical(object$regime_mode, "v1b")) {
+    # Compose in-loop when a latent GP or a smoothed change-point is present
+    # (the isolated engine handles neither), or when explicitly requested.
     inloop <- nzchar(Sys.getenv("BJLM_REGIME_INLOOP")) ||
-              length(object$model$latent_gps %||% list()) > 0
+              length(object$model$latent_gps %||% list()) > 0 ||
+              !isTRUE(object$zero_breakpoint)
     if (!inloop) return(.regime_hmm_fit(object, priors = priors, ...))
     regime_list <- .build_regime_list(object)
   }

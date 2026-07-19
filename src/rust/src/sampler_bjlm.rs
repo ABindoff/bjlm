@@ -2379,6 +2379,11 @@ impl LinearCache {
                 if g >= 0 { re_contrib[i] = state.u_b0[g as usize]; }
             }
         }
+        // Fold in latent-regime level offsets b0_state[path[i]] (v1c-b) so the
+        // change-point (omega/rho) HMC residual excludes them, matching means().
+        for rs in &state.regime_states {
+            for i in 0..data.n { b0_fixed[i] += rs.b0_state[rs.state_path[i]]; }
+        }
         let mut b1_eff = state.beta_b1.clone();
         for j in 0..b1_eff.len() {
             if !state.gamma_b1[j] { b1_eff[j] = 0.0; }
