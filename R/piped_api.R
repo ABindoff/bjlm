@@ -617,10 +617,19 @@ fit <- function(object, ...) {
 #' @return A `bjlm_fit` object.
 #' @export
 fit.bjlm_compiled_model <- function(object, priors = NULL, dr = FALSE, ...) {
-  # v1b: latent-regime (misclassified indicator) models are fit jointly by FFBS
-  # in run_regime_hmm(), not by the change-point engine bjlm(). Route and return.
+  # Latent-regime (misclassified indicator) models have two engines:
+  #  * ISOLATED (v1b): the whole outcome IS the regime level model -> the
+  #    standalone FFBS sampler run_regime_hmm() (fast, no main-loop cost).
+  #  * IN-LOOP (v1c-b): the regime COMPOSES with a latent GP and/or change-point,
+  #    so the FFBS runs as a Gibbs step inside run_chain_bjlm() via bjlm(regimes=).
+  # Use the in-loop engine when a latent GP is present (composition needed) or
+  # when explicitly requested (BJLM_REGIME_INLOOP=1, for A/B against isolated).
+  regime_list <- list()
   if (identical(object$regime_mode, "v1b")) {
-    return(.regime_hmm_fit(object, priors = priors, ...))
+    inloop <- nzchar(Sys.getenv("BJLM_REGIME_INLOOP")) ||
+              length(object$model$latent_gps %||% list()) > 0
+    if (!inloop) return(.regime_hmm_fit(object, priors = priors, ...))
+    regime_list <- .build_regime_list(object)
   }
 
   # If it is a zero-breakpoint shortcut and priors are NULL, use our preset shortcut priors
@@ -667,6 +676,7 @@ fit.bjlm_compiled_model <- function(object, priors = NULL, dr = FALSE, ...) {
     priors = priors,
     outcome_family = object$model$outcome$family$family %||% "gaussian",
     propensity_family = object$model$propensity$family$family %||% "binomial",
+    regimes = regime_list,
     ...
   )
 
@@ -702,10 +712,13 @@ fit.bjlm_compiled_model <- function(object, priors = NULL, dr = FALSE, ...) {
     .ensure_unweighted(fit_obj)
   }
 
-  # v1a: fit and attach the continuous-time regime transition intensities. Under
-  # clamped states these are independent of the outcome level model, so they are
-  # sampled separately and merged into fit_obj$draws.
-  if (length(object$model$regimes %||% list()) > 0) {
+  # v1a (exact/known states): fit and attach the continuous-time transition
+  # intensities. Under clamped states these are independent of the outcome level
+  # model, so they are sampled separately and merged into fit_obj$draws. For the
+  # latent-regime engines (v1b isolated / v1c-b in-loop) the intensities are
+  # already sampled jointly, so this is skipped.
+  if (length(object$model$regimes %||% list()) > 0 &&
+      !identical(object$regime_mode, "v1b")) {
     fit_obj <- .attach_regime_intensities(fit_obj, object)
   }
 

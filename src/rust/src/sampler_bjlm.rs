@@ -2035,6 +2035,13 @@ fn sample_linear_coefs_weighted(
     let mut w_y = DVector::<f64>::zeros(n);
     let mut inv_sig2_eff = 1.0 / sigma2; // For Gaussian
 
+    // Latent-regime level offset per obs (v1c-b): Σ_blocks b0_state[path[i]].
+    // Treated exactly like the random intercept u_b0 (a known additive offset).
+    let mut state_off = vec![0.0f64; n];
+    for rs in &state.regime_states {
+        for i in 0..n { state_off[i] += rs.b0_state[rs.state_path[i]]; }
+    }
+
     use crate::model::OutcomeFamily;
     match data.outcome_family {
         OutcomeFamily::Gaussian => {
@@ -2048,6 +2055,7 @@ fn sample_linear_coefs_weighted(
                     }
                 }
             }
+            for i in 0..n { y_tilde[i] -= state_off[i]; }
             for i in 0..n {
                 let mut row = w_x.row_mut(i);
                 for j in 0..p_total {
@@ -2065,21 +2073,19 @@ fn sample_linear_coefs_weighted(
                 if g >= 0 {
                     c_i += state.u_b0[g as usize];
                 }
+                c_i += state_off[i];                       // regime level offset
                 let omega = crate::polya_gamma::sample_pg(1.0, c_i, rng);
                 let kappa = data.y[i] - 0.5;
-                
+
                 let w_eff = weights[i] * omega;
                 let mut row = w_x.row_mut(i);
                 for j in 0..p_total {
                     row[j] *= w_eff;
                 }
-                
-                // y_tilde_i = (kappa / omega - u_b0)
-                // w_y[i] = y_tilde_i * w_eff 
-                //        = (kappa / omega - u_b0) * weights[i] * omega 
-                //        = kappa * weights[i] - u_b0 * weights[i] * omega
+
+                // y_tilde_i = (kappa / omega - u_b0 - state_off)
                 let u_b0_val = if g >= 0 { state.u_b0[g as usize] } else { 0.0 };
-                w_y[i] = kappa * weights[i] - u_b0_val * w_eff;
+                w_y[i] = kappa * weights[i] - (u_b0_val + state_off[i]) * w_eff;
             }
         }
         OutcomeFamily::NegativeBinomial => {
@@ -2094,24 +2100,21 @@ fn sample_linear_coefs_weighted(
                 if g >= 0 {
                     psi_i += state.u_b0[g as usize];
                 }
+                psi_i += state_off[i];                     // regime level offset (log-mean)
                 // NB-PG operates on log-odds: eta = psi - ln(r) = ln(mu/r)
                 let eta_i = psi_i - log_r;
                 let omega = crate::polya_gamma::sample_pg(data.y[i] + r, eta_i, rng);
                 let kappa = (data.y[i] - r) / 2.0;
-                
+
                 let w_eff = weights[i] * omega;
                 let mut row = w_x.row_mut(i);
                 for j in 0..p_total {
                     row[j] *= w_eff;
                 }
-                
-                // Pseudo-response on logit scale: z = kappa/omega
-                // But beta is on log-mean scale: psi = X*beta + u = eta + ln(r)
-                // So regression target: z + ln(r) - u_b0
-                // w_y[i] = (kappa/omega + ln(r) - u_b0) * w_eff
-                //        = (kappa + omega*ln(r)) * weights[i] - u_b0 * w_eff
+
+                // target: z + ln(r) - u_b0 - state_off  (log-mean scale)
                 let u_b0_val = if g >= 0 { state.u_b0[g as usize] } else { 0.0 };
-                w_y[i] = (kappa + omega * log_r) * weights[i] - u_b0_val * w_eff;
+                w_y[i] = (kappa + omega * log_r) * weights[i] - (u_b0_val + state_off[i]) * w_eff;
             }
         }
     }
@@ -3030,6 +3033,29 @@ pub fn run_chain_bjlm(
             sample_r_weighted(
                 outcome_data, outcome_priors, &mut outcome_state, &weights_obs, iter < n_warmup, &mut rng,
             );
+        }
+
+        // === LATENT REGIME BLOCK (v1c-b): FFBS path + b0_state levels + E/pi +
+        // transition intensities, composed with the mean above. No-op when there
+        // are no regime blocks. `mu_full` is owned so it does not borrow
+        // outcome_state while the block mutates its regime_states.
+        if !outcome_data.regimes.is_empty() {
+            let mu_full = outcome_state.means_full(outcome_data);
+            let disp = match outcome_data.outcome_family {
+                crate::model::OutcomeFamily::NegativeBinomial => outcome_state.r,
+                crate::model::OutcomeFamily::Gaussian => outcome_state.sigma,
+                _ => 1.0,
+            };
+            let fam = outcome_data.outcome_family;
+            let mut dummy: [f64; 0] = [];
+            for b in 0..outcome_data.regimes.len() {
+                let rg = &outcome_data.regimes[b];
+                let rs = &mut outcome_state.regime_states[b];
+                crate::regime_step::regime_update(
+                    rg, rs, mu_full.as_slice(), outcome_data.y.as_slice(), &weights_obs,
+                    fam, disp, iter, n_warmup, false, &mut dummy, &mut rng,
+                );
+            }
         }
 
         // === HMC adaptation ===

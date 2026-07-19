@@ -97,7 +97,8 @@ bjlm <- function(
     cores = 1L,
     step_om = 0.01,
     step_rho = 0.01,
-    target_accept = 0.8
+    target_accept = 0.8,
+    regimes = list()
 ) {
   cl <- match.call()
   weights <- match.arg(weights)
@@ -285,6 +286,12 @@ bjlm <- function(
     outcome_names <- c(outcome_names, "r")
   }
   outcome_names <- c(outcome_names, gp_hyper_names)
+  # Regime (latent CTMC) draw names, appended LAST to match to_vec: each block
+  # emits b0_state(1..K) -> q0 -> beta_q -> E(row-major) -> pi. The caller
+  # (.build_regime_list) precomputes these as `varnames` on each block.
+  if (length(regimes) > 0) {
+    for (rg in regimes) outcome_names <- c(outcome_names, rg$varnames)
+  }
 
   # ---- Process Latent GPs ----
   gp_list <- list()
@@ -402,7 +409,8 @@ bjlm <- function(
       seed = as.integer(seed),
       verbose = verbose,
       n_cores = as.integer(cores),
-      outcome_family = outcome_family
+      outcome_family = outcome_family,
+      regimes = regimes
     )
   } else {
   raw <- run_bjlm(
@@ -462,7 +470,8 @@ bjlm <- function(
     seed = as.integer(seed),
     verbose = verbose,
     n_cores = as.integer(cores),
-    outcome_family = outcome_family
+    outcome_family = outcome_family,
+    regimes = regimes
   )
   } # end else (non-spike path)
 

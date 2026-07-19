@@ -12,6 +12,7 @@ mod weights;
 mod sampler_bjlm;
 mod ctmc;
 mod regime_hmm;
+mod regime_step;
 
 use model::{ModelData, Priors, SpikeSlabConfig};
 use propensity::{PropensityData, PropensityPriors};
@@ -31,6 +32,48 @@ fn list_to_vec_dmatrix(list: List, nrow: usize, p_vec: &[i32]) -> Vec<DMatrix<f6
             flat_to_dmatrix(&data, nrow, p as usize)
         })
         .collect()
+}
+
+// Parse the regime (latent CTMC multistate) blocks from R into RegimeData (v1c-b).
+// Each element is a named list mirroring run_regime_hmm's fields; an empty outer
+// list yields an empty vec (a strict no-op in run_chain_bjlm).
+fn parse_regimes(regimes: List, n: usize) -> Vec<crate::model::RegimeData> {
+    let mut out = Vec::new();
+    for (_, robj) in regimes.iter() {
+        let rl = robj.as_list().unwrap();
+        let iv = |f: &str| rl.dollar(f).unwrap().as_integer_vector().unwrap();
+        let rv = |f: &str| rl.dollar(f).unwrap().as_real_vector().unwrap();
+        let i1 = |f: &str| iv(f)[0] as usize;
+        let r1 = |f: &str| rv(f)[0];
+        let p_trans = i1("p_trans");
+        let allowed_from = iv("allowed_from");
+        let allowed_to = iv("allowed_to");
+        let allowed: Vec<(usize, usize)> = allowed_from.iter().zip(allowed_to.iter())
+            .map(|(&a, &b)| (a as usize, b as usize)).collect();
+        let obs_subj: Vec<usize> = iv("obs_subj").into_iter().map(|g| g as usize).collect();
+        let x_trans = if p_trans > 0 { flat_to_dmatrix(&rv("x_trans"), n, p_trans) } else { DMatrix::zeros(n, 0) };
+        let mut rg = crate::model::RegimeData {
+            n_states: i1("n_states"),
+            n_cat: i1("n_cat"),
+            obs_state: iv("obs_state"),
+            obs_time: rv("obs_time"),
+            x_trans,
+            p_trans,
+            allowed,
+            subj_obs: Vec::new(),
+            ref_state: i1("ref_state"),
+            prior_b0_sd: r1("prior_b0_sd"),
+            e_diag: r1("e_diag"),
+            e_offdiag: r1("e_offdiag"),
+            prior_logq0_mean: r1("prior_logq0_mean"),
+            prior_logq0_sd: r1("prior_logq0_sd"),
+            prior_beta_q_sd: r1("prior_beta_q_sd"),
+            init_step: r1("init_step"),
+        };
+        rg.process(&obs_subj);
+        out.push(rg);
+    }
+    out
 }
 
 // Parse a GP hyperprior encoded from R as c(family_code, p1, p2); fall back to the
@@ -95,6 +138,7 @@ fn run_bjlm(
     verbose: bool,
     n_cores: i32,
     outcome_family: &str,
+    regimes: List,
 ) -> List {
     let mut p_deltas = p_deltas;
     let mut p_om = p_om;
@@ -175,7 +219,7 @@ fn run_bjlm(
         n,
         re_mask_om: re_mask_om.iter().map(|r| r.1.as_integer_vector().unwrap().iter().map(|&v| v != 0).collect()).collect(),
         latent_gps: gps,
-        regimes: Vec::new(),     // v1c-b: populated in a later increment
+        regimes: parse_regimes(regimes, n),
     };
 
     let outcome_priors = Priors {
@@ -339,6 +383,7 @@ fn run_bjlm_ss(
     verbose: bool,
     n_cores: i32,
     outcome_family: &str,
+    regimes: List,
 ) -> List {
     let mut p_deltas = p_deltas;
     let mut p_om = p_om;
@@ -417,7 +462,7 @@ fn run_bjlm_ss(
         n,
         re_mask_om: re_mask_om.iter().map(|r| r.1.as_integer_vector().unwrap().iter().map(|&v| v != 0).collect()).collect(),
         latent_gps: gps,
-        regimes: Vec::new(),     // v1c-b: populated in a later increment
+        regimes: parse_regimes(regimes, n),
     };
 
     let outcome_priors = Priors {

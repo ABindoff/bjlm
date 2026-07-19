@@ -539,6 +539,66 @@ state_occupancy <- function(fit) {
   fit$state_occupancy
 }
 
+# Build the regime FFI list for the IN-LOOP composed sampler (v1c-b): one element
+# per block with the exact fields parse_regimes() reads, plus `varnames`/`stnames`
+# (ignored by Rust) so bjlm() can name the appended draw columns in to_vec order.
+# Arrays are in the outcome data's row order (aligned with y); the Rust side sorts
+# each subject's obs by time internally.
+.build_regime_list <- function(object) {
+  blocks <- object$model$regimes %||% list()
+  lapply(blocks, function(blk) {
+    data <- object$model$outcome$data
+    sv <- blk$subject; tv <- blk$time_var; sc <- blk$obs_state
+    K <- blk$n_states
+    subj_f <- factor(data[[sv]], levels = unique(as.character(data[[sv]])))
+    obs_subj <- as.integer(subj_f) - 1L
+    tm <- as.numeric(data[[tv]])
+
+    raw_s <- data[[sc]]
+    lv  <- blk$states %||% sort(unique(as.character(raw_s[!is.na(raw_s)])))
+    ref <- if (is.numeric(blk$ref_state)) lv[blk$ref_state] else as.character(blk$ref_state)
+    stnames <- c(ref, setdiff(lv, ref))
+    if (length(stnames) < K) stnames <- c(stnames, paste0("S", (length(stnames) + 1L):K))
+    fac <- factor(as.character(raw_s), levels = stnames)
+    obs_state <- as.integer(fac) - 1L; obs_state[is.na(obs_state)] <- -1L
+
+    Xt <- stats::model.matrix(blk$transition, data = data)
+    Xt <- Xt[, colnames(Xt) != "(Intercept)", drop = FALSE]
+    p_trans <- ncol(Xt); covnames <- colnames(Xt)
+    allowed <- do.call(rbind, lapply(0:(K - 1L), function(a)
+      do.call(rbind, lapply(setdiff(0:(K - 1L), a), function(b) c(a, b)))))
+
+    lp <- blk$priors$level %||% prior_normal(0, 5); prior_b0_sd <- lp$sd %||% 5
+    ip <- blk$priors$intensity %||% list()
+    lq0m <- ip$logq0_mean %||% log(0.5); lq0s <- ip$logq0_sd %||% 1.5; bqs <- ip$beta_sd %||% 1.0
+    ediag <- blk$obs_model$diag %||% 8; eoff <- blk$obs_model$offdiag %||% 1
+
+    b0names <- sprintf("b0_state_%s", stnames[-1L])
+    q0names <- vapply(seq_len(nrow(allowed)), function(i)
+      sprintf("q0_%s_%s", stnames[allowed[i, 1] + 1L], stnames[allowed[i, 2] + 1L]), character(1))
+    bqnames <- character(0)
+    if (p_trans > 0) for (i in seq_len(nrow(allowed))) for (cn in covnames)
+      bqnames <- c(bqnames, sprintf("beta_q_%s_%s_%s", stnames[allowed[i, 1] + 1L], stnames[allowed[i, 2] + 1L], cn))
+    enames <- character(0)
+    for (a in seq_len(K)) for (b in seq_len(K)) enames <- c(enames, sprintf("E_%s_%s", stnames[a], stnames[b]))
+    pinames <- sprintf("pi_%s", stnames)
+    varnames <- c(b0names, q0names, bqnames, enames, pinames)
+
+    list(
+      n_states = as.integer(K), n_cat = as.integer(K),
+      obs_state = as.integer(obs_state), obs_subj = as.integer(obs_subj),
+      obs_time = as.double(tm),
+      x_trans = if (p_trans > 0) as.double(Xt) else numeric(0), p_trans = as.integer(p_trans),
+      allowed_from = as.integer(allowed[, 1]), allowed_to = as.integer(allowed[, 2]),
+      ref_state = 0L,                      # ref is first in stnames -> 0-based 0
+      prior_b0_sd = as.double(prior_b0_sd), e_diag = as.double(ediag), e_offdiag = as.double(eoff),
+      prior_logq0_mean = as.double(lq0m), prior_logq0_sd = as.double(lq0s),
+      prior_beta_q_sd = as.double(bqs), init_step = 0.4,
+      varnames = varnames, stnames = stnames
+    )
+  })
+}
+
 #' @export
 print.bjlm_regime_fit <- function(x, ...) {
   cat("bjlm latent-regime fit (FFBS)\n")

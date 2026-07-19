@@ -179,9 +179,11 @@ pub struct RegimeData {
 impl RegimeData {
     /// Group observations by subject and sort each subject's obs by time, so the
     /// FFBS can walk contiguous, time-increasing intervals regardless of the row
-    /// order of the outcome data. `obs_subj` is the 0-based subject per obs.
-    pub fn process(&mut self, obs_subj: &[usize], n_subjects: usize) {
-        let mut by_subj: Vec<Vec<usize>> = vec![Vec::new(); n_subjects];
+    /// order of the outcome data. `obs_subj` is the 0-based subject per obs; the
+    /// subject count is derived from it (independent of the propensity grouping).
+    pub fn process(&mut self, obs_subj: &[usize]) {
+        let ns = obs_subj.iter().copied().max().map(|m| m + 1).unwrap_or(0);
+        let mut by_subj: Vec<Vec<usize>> = vec![Vec::new(); ns];
         for (i, &g) in obs_subj.iter().enumerate() { by_subj[g].push(i); }
         for v in by_subj.iter_mut() {
             v.sort_by(|&a, &b| self.obs_time[a].partial_cmp(&self.obs_time[b]).unwrap());
@@ -433,6 +435,13 @@ impl State {
                 let g = data.group_b0[i];
                 if g >= 0 { mu[i] += self.u_b0[g as usize]; }
             }
+        }
+
+        // Add latent-regime level offsets b0_state[path[i]] (v1c-b). A pure
+        // additive term like the random intercept; every means()/means_full()
+        // consumer inherits it. Empty regime_states = no-op.
+        for rs in &self.regime_states {
+            for i in 0..n { mu[i] += rs.b0_state[rs.state_path[i]]; }
         }
 
         // Segment 1 (initial slope)

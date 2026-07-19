@@ -394,6 +394,34 @@ test_that("latent-regime fit recovers non-Gaussian outcomes (binomial, negbin)",
   expect_lt(gm("b0_state_2"), -0.6)                     # truth -1.5
 })
 
+test_that("in-loop regime engine (v1c-b) reproduces the isolated v1b fit", {
+  skip_on_cran()
+  dat <- .sim_hmm_data(seed = 11, ns = 120L)
+  mk <- function() bjlm_model() |>
+    outcome(y ~ time, data = dat, family = gaussian()) |>
+    regimes(name = "regime", data = dat, n_states = 3L, time_var = "time", subject = "id",
+            obs_state = "r_obs", obs_model = confusion(diag = 8, offdiag = 1), transition = ~ trt)
+  gm <- function(fit) { sm <- posterior::summarise_draws(fit$draws, "mean"); function(v) sm$mean[sm$variable == v] }
+
+  fi <- suppressMessages(mk() |> compile() |> fit(chains = 2L, iter = 1000L, warmup = 500L, seed = 5L, verbose = FALSE))
+  gi <- gm(fi)
+  fc <- withr::with_envvar(c(BJLM_REGIME_INLOOP = "1"),
+    suppressMessages(mk() |> compile() |> fit(chains = 2L, iter = 1000L, warmup = 500L, seed = 5L, verbose = FALSE)))
+  gc <- gm(fc)
+
+  expect_s3_class(fc, "bjlm_fit")                       # in-loop returns a full bjlm_fit
+  vn <- posterior::variables(fc$draws)
+  expect_true(all(c("b0_state_1","b0_state_2","q0_0_1","E_0_0","pi_0") %in% vn))
+  # the two engines agree (same FFBS math, different orchestration)
+  for (v in c("b0_state_1","b0_state_2","E_0_0","E_1_1","E_2_2")) {
+    expect_equal(gc(v), gi(v), tolerance = 0.12,
+                 info = sprintf("%s: in-loop %.3f vs isolated %.3f", v, gc(v), gi(v)))
+  }
+  # recovery of the levels (truth 1.2 / -0.7)
+  expect_equal(gc("b0_state_1"), 1.2, tolerance = 0.4)
+  expect_equal(gc("b0_state_2"), -0.7, tolerance = 0.4)
+})
+
 test_that("state_occupancy() returns Rao-Blackwellized smoothed state probabilities", {
   skip_on_cran()
   K <- 3L; allowed <- rbind(c(0,1), c(1,0), c(1,2), c(2,1)); q0t <- c(0.4,0.2,0.3,0.15)
