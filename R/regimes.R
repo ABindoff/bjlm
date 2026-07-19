@@ -490,6 +490,21 @@ regimes <- function(model, name, data, n_states, states = NULL,
     arr <- arr[, , keep, drop = FALSE]; varnames <- keep
   }
 
+  # ---- Rao-Blackwellized per-observation state occupancy ----
+  # Rust returns, per chain, the posterior-mean smoothed marginals P(s_i = s | y)
+  # in the (subject, time)-sorted row order. Average across chains and map back
+  # to the ORIGINAL data row order so the frame aligns with the user's data.
+  occ_sorted <- Reduce(`+`, res$occupancy) / chains   # n x K, sorted order
+  colnames(occ_sorted) <- stnames
+  occ_orig <- matrix(NA_real_, nrow(occ_sorted), K, dimnames = list(NULL, stnames))
+  occ_orig[ord, ] <- occ_sorted                        # un-sort (sorted row i = data[ord[i]])
+  odata <- object$model$outcome$data
+  occ_df <- data.frame(occ_orig, check.names = FALSE)
+  names(occ_df) <- paste0("p_", stnames)
+  occ_df[[sv]] <- odata[[sv]]; occ_df[[tv]] <- odata[[tv]]
+  occ_df$modal_state <- stnames[max.col(occ_orig, ties.method = "first")]
+  occ_df <- occ_df[, c(sv, tv, paste0("p_", stnames), "modal_state")]
+
   structure(list(
     draws = posterior::as_draws_array(arr),
     chains = chains, iter = iter, warmup = warmup,
@@ -498,10 +513,30 @@ regimes <- function(model, name, data, n_states, states = NULL,
     level_names = b0names, intensity_names = c(q0names, bqnames),
     emission_names = enames, init_names = pinames,
     outcome_names = varnames, regime_block = blk,
+    state_occupancy = occ_df,
     model = object$model, compiled_model = object,
     family = fam, subject_var = sv, time_var = tv,
     fit_dots = list(seed = seed)
   ), class = "bjlm_regime_fit")
+}
+
+#' Per-observation latent state occupancy from a latent-regime fit
+#'
+#' Returns the Rao-Blackwellized posterior probability that each observation was
+#' in each latent state, \eqn{P(s_i = s \mid \text{data})}, obtained by averaging
+#' the forward-backward smoothed marginals over the posterior draws (lower
+#' variance than tallying the sampled paths). Aligned with the original data row
+#' order.
+#'
+#' @param fit A `bjlm_regime_fit` (a `confusion()` latent-regime fit).
+#' @return A data frame with the subject and time columns, one `p_<state>` column
+#'   per state (rows sum to 1), and a `modal_state` column (the argmax state).
+#' @seealso [regimes()], [confusion()].
+#' @export
+state_occupancy <- function(fit) {
+  if (!inherits(fit, "bjlm_regime_fit"))
+    stop("state_occupancy() requires a bjlm_regime_fit (a confusion() latent-regime fit).")
+  fit$state_occupancy
 }
 
 #' @export
@@ -510,7 +545,7 @@ print.bjlm_regime_fit <- function(x, ...) {
   cat(sprintf("  states: %d (%s)\n", x$n_states, paste(x$state_names, collapse = ", ")))
   cat(sprintf("  chains: %d   iter: %d   warmup: %d\n", x$chains, x$iter, x$warmup))
   cat(sprintf("  parameters: %d\n", length(x$outcome_names)))
-  cat("  use summary() for posterior quantities.\n")
+  cat("  use summary() for posterior quantities, state_occupancy() for smoothed state probabilities.\n")
   invisible(x)
 }
 

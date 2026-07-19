@@ -611,12 +611,16 @@ fn run_regime_hmm(
         n_iter as usize, warmup as usize, chains as usize, seed as u64, init_step,
     );
     let mut chain_results: Vec<Robj> = Vec::with_capacity(mats.len());
-    for dm in mats {
+    let mut occ_results: Vec<Robj> = Vec::with_capacity(mats.len());
+    for (dm, occ) in mats {
         let nr = dm.nrows(); let nc = dm.ncols();
         let flat: Vec<f64> = dm.iter().cloned().collect();
         chain_results.push(RMatrix::new_matrix(nr, nc, |r, c| flat[c * nr + r]).into());
+        let onr = occ.nrows(); let onc = occ.ncols();
+        let oflat: Vec<f64> = occ.iter().cloned().collect();
+        occ_results.push(RMatrix::new_matrix(onr, onc, |r, c| oflat[c * onr + r]).into());
     }
-    list!(draws = chain_results).into()
+    list!(draws = chain_results, occupancy = occ_results).into()
 }
 
 extendr_module! {

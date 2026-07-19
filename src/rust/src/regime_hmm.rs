@@ -139,14 +139,18 @@ fn subject_pmats(d: &HmmReg, r0: usize, r1: usize, q0: &[f64], beta: &[DVector<f
     mats
 }
 
-// FFBS one subject: returns the sampled state per observation. `xbeta` is the
-// fixed-effect linear predictor x_i'beta; the state adds b0_state[s].
+// FFBS one subject. Returns the sampled state per observation (for the Gibbs
+// updates) AND the forward-backward SMOOTHED marginals gamma[j][s] =
+// p(s_j = s | y, theta) as probabilities (for the Rao-Blackwellized occupancy
+// estimate -- averaging these across draws is lower-variance than counting the
+// hard sampled path). `xbeta` is the fixed-effect predictor x_i'beta; the state
+// adds b0_state[s].
 fn ffbs_subject(
     d: &HmmReg, r0: usize, r1: usize,
     xbeta: &DVector<f64>, b0_state: &[f64], disp: f64,
     e_log: &DMatrix<f64>, pi_log: &[f64], pmats: &[DMatrix<f64>],
     rng: &mut StdRng,
-) -> Vec<usize> {
+) -> (Vec<usize>, Vec<Vec<f64>>) {
     let k = d.k;
     let t = r1 - r0;
     let emiss = |j: usize, s: usize| -> f64 {
@@ -156,7 +160,7 @@ fn ffbs_subject(
         if ri >= 0 { l += e_log[(s, ri as usize)]; }
         l
     };
-    // forward (log alpha)
+    // forward (log alpha): alpha_j(s) = p(y_1:j, s_j = s)
     let mut la = vec![vec![0.0; k]; t];
     for s in 0..k { la[0][s] = pi_log[s] + emiss(0, s); }
     for j in 1..t {
@@ -166,7 +170,23 @@ fn ffbs_subject(
             la[j][l] = emiss(j, l) + logsumexp(&terms);
         }
     }
-    // backward sample
+    // backward (log beta): beta_j(s) = p(y_{j+1:T} | s_j = s)
+    let mut lb = vec![vec![0.0; k]; t];
+    for j in (0..t - 1).rev() {
+        let p = &pmats[j];
+        for s in 0..k {
+            let terms: Vec<f64> = (0..k).map(|l| p[(s, l)].max(1e-300).ln() + emiss(j + 1, l) + lb[j + 1][l]).collect();
+            lb[j][s] = logsumexp(&terms);
+        }
+    }
+    // smoothed marginals gamma_j(s) proportional to alpha_j(s) beta_j(s)
+    let mut gamma = vec![vec![0.0; k]; t];
+    for j in 0..t {
+        let lg: Vec<f64> = (0..k).map(|s| la[j][s] + lb[j][s]).collect();
+        let z = logsumexp(&lg);
+        for s in 0..k { gamma[j][s] = (lg[s] - z).exp(); }
+    }
+    // backward sample the hard path (uses alpha; unchanged)
     let mut path = vec![0usize; t];
     path[t - 1] = sample_cat_logits(&la[t - 1], rng);
     for j in (0..t - 1).rev() {
@@ -174,7 +194,7 @@ fn ffbs_subject(
         let logits: Vec<f64> = (0..k).map(|kk| la[j][kk] + p[(kk, path[j + 1])].max(1e-300).ln()).collect();
         path[j] = sample_cat_logits(&logits, rng);
     }
-    path
+    (path, gamma)
 }
 
 // (weighted) conjugate Gaussian draw of (beta, b0_state_free) given the path.
@@ -298,7 +318,7 @@ fn run_one_chain(
     e_diag: f64, e_offdiag: f64,
     prior_logq0_mean: f64, prior_logq0_sd: f64, prior_beta_q_sd: f64,
     n_iter: usize, warmup: usize, init_step: f64, seed: u64,
-) -> DMatrix<f64> {
+) -> (DMatrix<f64>, DMatrix<f64>) {
     let mut rng = StdRng::seed_from_u64(seed);
     let (k, r, na, pt) = (d.k, d.r, d.allowed.len(), d.p_trans);
 
@@ -325,6 +345,9 @@ fn run_one_chain(
     let n_post = n_iter - warmup;
     let ncol = d.p_fixed + (k - 1) + 1 + na + na * pt + k * r + k;
     let mut draws = DMatrix::<f64>::zeros(n_post, ncol);
+    // Rao-Blackwellized occupancy: sum of smoothed marginals over post-warmup
+    // iterations, averaged at the end -> p(s_i = s | data).
+    let mut occ = DMatrix::<f64>::zeros(d.n, k);
 
     for it in 0..n_iter {
         let e_log = e_mat.map(|v| v.max(1e-300).ln());
@@ -332,12 +355,17 @@ fn run_one_chain(
         let q0v: Vec<f64> = log_q0.iter().map(|&x| x.exp()).collect();
         let disp = disp_of(sigma, r_disp);
 
-        // 1. FFBS path per subject
+        // 1. FFBS path per subject (+ smoothed marginals for occupancy)
         let xbeta = &d.x_fixed * &beta;
         for &(r0, r1) in &d.subj {
             let mats = subject_pmats(d, r0, r1, &q0v, &beta_q);
-            let sp = ffbs_subject(d, r0, r1, &xbeta, &b0_state, disp, &e_log, &pi_log, &mats, &mut rng);
+            let (sp, gamma) = ffbs_subject(d, r0, r1, &xbeta, &b0_state, disp, &e_log, &pi_log, &mats, &mut rng);
             for (jj, &s) in sp.iter().enumerate() { path[r0 + jj] = s; }
+            if it >= warmup {
+                for (jj, g) in gamma.iter().enumerate() {
+                    for s in 0..k { occ[(r0 + jj, s)] += g[s]; }
+                }
+            }
         }
 
         // 2. (beta, b0_state): weighted conjugate / PG-augmented draw
@@ -411,7 +439,8 @@ fn run_one_chain(
             for a in 0..k { draws[(row, c)] = pi[a]; c += 1; }
         }
     }
-    draws
+    occ /= n_post as f64;                          // posterior-mean occupancy
+    (draws, occ)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -425,7 +454,7 @@ pub fn run(
     e_diag: f64, e_offdiag: f64,
     prior_logq0_mean: f64, prior_logq0_sd: f64, prior_beta_q_sd: f64,
     n_iter: usize, warmup: usize, chains: usize, seed: u64, init_step: f64,
-) -> Vec<DMatrix<f64>> {
+) -> Vec<(DMatrix<f64>, DMatrix<f64>)> {
     let n = y.len();
     let nt = if n_trials.len() == n { n_trials.to_vec() } else { vec![1.0; n] };
     let d = HmmReg {

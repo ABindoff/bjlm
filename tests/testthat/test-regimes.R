@@ -394,6 +394,36 @@ test_that("latent-regime fit recovers non-Gaussian outcomes (binomial, negbin)",
   expect_lt(gm("b0_state_2"), -0.6)                     # truth -1.5
 })
 
+test_that("state_occupancy() returns Rao-Blackwellized smoothed state probabilities", {
+  skip_on_cran()
+  K <- 3L; allowed <- rbind(c(0,1), c(1,0), c(1,2), c(2,1)); q0t <- c(0.4,0.2,0.3,0.15)
+  b0s <- c(0, 1.5, -1.2); Et <- matrix(0.05, K, K); diag(Et) <- 0.9
+  nt <- 8L; ot <- seq(0, 10, length.out = nt)
+  set.seed(31); rows <- list(); truth <- c()
+  for (s in seq_len(70L)) {
+    st <- .sim_ctmc_path(q0t, allowed, K, ot, 0L)
+    r  <- vapply(st, function(z) sample(0:(K-1), 1, prob = Et[z+1, ]), integer(1))
+    rows[[s]] <- data.frame(id = s, time = ot, y = 2 + 0.1*ot + b0s[st+1] + rnorm(nt, 0, 0.4),
+                            r_obs = r, truth = st)
+  }
+  dat <- do.call(rbind, rows); dat <- dat[sample(nrow(dat)), ]     # shuffle -> tests re-order map
+  fit <- suppressMessages(
+    bjlm_model() |> outcome(y ~ time, data = dat, family = gaussian()) |>
+      regimes(name = "r", data = dat, n_states = 3L, time_var = "time", subject = "id",
+              obs_state = "r_obs", obs_model = confusion()) |>
+      compile() |> fit(chains = 2L, iter = 1000L, warmup = 500L, seed = 5L, verbose = FALSE))
+
+  occ <- state_occupancy(fit)
+  pc <- paste0("p_", c("0","1","2"))
+  expect_true(all(c("id","time",pc,"modal_state") %in% names(occ)))
+  expect_equal(nrow(occ), nrow(dat))
+  expect_equal(unname(rowSums(as.matrix(occ[, pc]))), rep(1, nrow(dat)), tolerance = 1e-8)
+  # occupancy is in ORIGINAL (shuffled) data order -> aligns with dat$truth
+  modal_idx <- max.col(as.matrix(occ[, pc]), ties.method = "first") - 1L
+  acc <- mean(modal_idx == dat$truth)
+  expect_gt(acc, 0.9)                       # smoothing beats the ~0.9 raw indicator
+})
+
 test_that("negative-binomial FFBS SBC certification (opt-in, slow)", {
   skip_on_cran()
   skip_if(!nzchar(Sys.getenv("BJLM_SBC_CERT")), "set BJLM_SBC_CERT=1 to run the NB FFBS SBC cert")

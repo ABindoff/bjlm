@@ -206,6 +206,12 @@ v1a+.
 2. **Time:** continuous-time (hard requirement); discrete-time not pursued.
 3. **State-path output:** per-observation smoothed occupancy probabilities
    (Rao-Blackwellized), plus optional modal path — not raw sampled paths.
+   \[SHIPPED\] `run_regime_hmm` returns, per chain, the posterior-mean
+   forward-backward smoothed marginals `P(s_i = s | y)`; R averages across chains,
+   maps back to the original row order, and exposes them via `state_occupancy(fit)`
+   (a `p_<state>` column per state + a `modal_state`). Averaging the smoothed
+   marginals (not tallying sampled paths) is the Rao-Blackwellization; recovers the
+   true latent state ~0.98 at `E`-diag 0.9 (beats the raw indicator).
 4. **`π`:** estimated (Dirichlet-conjugate) by default; fixable.
 5. **Observed alphabet R ≠ K:** supported (rectangular K×R confusion) — coarser
    observed categories (EDSS bands, CDR) are the norm.
