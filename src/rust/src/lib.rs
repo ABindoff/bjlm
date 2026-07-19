@@ -175,6 +175,7 @@ fn run_bjlm(
         n,
         re_mask_om: re_mask_om.iter().map(|r| r.1.as_integer_vector().unwrap().iter().map(|&v| v != 0).collect()).collect(),
         latent_gps: gps,
+        regimes: Vec::new(),     // v1c-b: populated in a later increment
     };
 
     let outcome_priors = Priors {
@@ -416,6 +417,7 @@ fn run_bjlm_ss(
         n,
         re_mask_om: re_mask_om.iter().map(|r| r.1.as_integer_vector().unwrap().iter().map(|&v| v != 0).collect()).collect(),
         latent_gps: gps,
+        regimes: Vec::new(),     // v1c-b: populated in a later increment
     };
 
     let outcome_priors = Priors {

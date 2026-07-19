@@ -5,11 +5,11 @@
 // unused `run_mcmc` / `run_mcmc_ss` FFI entry points; `sampler_bjlm` only ever
 // imported these two functions from this module.
 
-use nalgebra::DVector;
+use nalgebra::{DVector, DMatrix};
 use rand::rngs::StdRng;
 use rand_distr::{Normal, Gamma, Distribution};
 
-use crate::model::{ModelData, Priors, State, SpikeSlabConfig, GpState};
+use crate::model::{ModelData, Priors, State, SpikeSlabConfig, GpState, RegimeState};
 
 pub fn sample_pi(ss: &SpikeSlabConfig, state: &mut State, rng: &mut StdRng) {
     let mut n1 = 0.0;
@@ -76,6 +76,25 @@ pub fn init_state(data: &ModelData, priors: &Priors, rng: &mut StdRng) -> State 
         });
     }
 
+    // Latent regime blocks (v1c-b): diag-dominant E, uniform pi, zero levels,
+    // baseline intensities at the prior mean. Empty when no regimes (no-op).
+    let mut regime_states = Vec::new();
+    for rg in &data.regimes {
+        let k = rg.n_states; let ncat = rg.n_cat; let na = rg.allowed.len();
+        let mut emat = DMatrix::<f64>::from_element(k, ncat, 0.1);
+        for i in 0..k { if i < ncat { emat[(i, i)] = 0.8; } }
+        for i in 0..k { let s: f64 = (0..ncat).map(|j| emat[(i, j)]).sum(); for j in 0..ncat { emat[(i, j)] /= s; } }
+        regime_states.push(RegimeState {
+            state_path: vec![rg.ref_state; data.n],
+            b0_state: vec![0.0; k],
+            log_q0: vec![rg.prior_logq0_mean; na],
+            beta_q: (0..na).map(|_| DVector::zeros(rg.p_trans)).collect(),
+            emat,
+            pi_init: vec![1.0 / k as f64; k],
+            step: vec![rg.init_step; na],
+        });
+    }
+
     State {
         beta_b0, u_b0, beta_b1, beta_deltas, beta_om, beta_rho,
         sigma: 1.0, sigma_u: 1.0, a_u: 1.0, step_sigma_u: 0.1,
@@ -87,5 +106,6 @@ pub fn init_state(data: &ModelData, priors: &Priors, rng: &mut StdRng) -> State 
         gp_states,
         r: 1.0,
         step_r: 0.1,
+        regime_states,
     }
 }

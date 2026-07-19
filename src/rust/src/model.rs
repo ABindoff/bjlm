@@ -33,6 +33,8 @@ pub struct ModelData {
     pub re_mask_om: Vec<Vec<bool>>,
     /// List of latent GP data configurations
     pub latent_gps: Vec<GpData>,
+    /// Latent regime (hidden CTMC multistate) blocks; empty = no-op (v1c-b).
+    pub regimes: Vec<RegimeData>,
 }
 
 /// A GP hyperparameter prior, evaluated in log-space as a closed-form log-density
@@ -143,6 +145,63 @@ impl GpData {
 }
 
 // ---------------------------------------------------------------------------
+// Regime (latent continuous-time hidden-Markov multistate) block — v1c-b.
+//
+// A discrete latent state per observation whose level offset b0_state[s] is an
+// additive term in the outcome linear predictor (structurally like a random
+// intercept u_b0, but with a LATENT, re-sampled group membership = the CTMC
+// path). Composes with the change-point, GP and RE in run_chain_bjlm. The FFBS
+// path, transition intensities (log q0 + covariate beta_q), misclassification E
+// and initial distribution pi live in RegimeState; the fixed data + priors live
+// here. An empty ModelData.regimes vec is a strict no-op.
+// ---------------------------------------------------------------------------
+pub struct RegimeData {
+    pub n_states: usize,
+    pub n_cat: usize,
+    pub obs_state: Vec<i32>,          // observed indicator per obs (0-based, -1 missing)
+    pub obs_time: Vec<f64>,           // time per obs (for the interval kernels)
+    pub x_trans: DMatrix<f64>,        // n x p_trans transition design (intercept-free)
+    pub p_trans: usize,
+    pub allowed: Vec<(usize, usize)>, // allowed off-diagonal transitions
+    /// Per-subject global observation indices, sorted by time (built in process()).
+    pub subj_obs: Vec<Vec<usize>>,
+    pub ref_state: usize,             // corner state (b0_state[ref] = 0)
+    // priors
+    pub prior_b0_sd: f64,
+    pub e_diag: f64,
+    pub e_offdiag: f64,
+    pub prior_logq0_mean: f64,
+    pub prior_logq0_sd: f64,
+    pub prior_beta_q_sd: f64,
+    pub init_step: f64,
+}
+
+impl RegimeData {
+    /// Group observations by subject and sort each subject's obs by time, so the
+    /// FFBS can walk contiguous, time-increasing intervals regardless of the row
+    /// order of the outcome data. `obs_subj` is the 0-based subject per obs.
+    pub fn process(&mut self, obs_subj: &[usize], n_subjects: usize) {
+        let mut by_subj: Vec<Vec<usize>> = vec![Vec::new(); n_subjects];
+        for (i, &g) in obs_subj.iter().enumerate() { by_subj[g].push(i); }
+        for v in by_subj.iter_mut() {
+            v.sort_by(|&a, &b| self.obs_time[a].partial_cmp(&self.obs_time[b]).unwrap());
+        }
+        self.subj_obs = by_subj;
+    }
+}
+
+#[derive(Clone)]
+pub struct RegimeState {
+    pub state_path: Vec<usize>,    // current latent state per obs (global index)
+    pub b0_state: Vec<f64>,        // per-state level offset; b0_state[ref] = 0 (corner)
+    pub log_q0: Vec<f64>,          // baseline log-intensity per allowed transition
+    pub beta_q: Vec<DVector<f64>>, // covariate effect on each allowed transition
+    pub emat: DMatrix<f64>,        // n_states x n_cat misclassification matrix E
+    pub pi_init: Vec<f64>,         // initial-state distribution
+    pub step: Vec<f64>,            // RW-MH step per allowed transition (adapted)
+}
+
+// ---------------------------------------------------------------------------
 // Prior hyperparameters
 // ---------------------------------------------------------------------------
 
@@ -249,6 +308,8 @@ pub struct State {
     pub step_r: f64,
     /// States for latent Gaussian Processes
     pub gp_states: Vec<GpState>,
+    /// States for latent regime (CTMC multistate) blocks; empty = no-op (v1c-b).
+    pub regime_states: Vec<RegimeState>,
 }
 
 #[derive(Clone)]
@@ -289,6 +350,14 @@ impl State {
             n += 1;
         }
         n += self.gp_states.len() * 3; // alpha, rho, sigma_x per GP
+        // Regime blocks: b0_state(K-1) + q0(na) + beta_q(na*p_trans) + E(K*n_cat) + pi(K)
+        for rs in &self.regime_states {
+            let k = rs.b0_state.len();
+            let na = rs.log_q0.len();
+            let pt = if na > 0 { rs.beta_q[0].len() } else { 0 };
+            let ncat = if k > 0 { rs.emat.ncols() } else { 0 };
+            n += (k - 1) + na + na * pt + k * ncat + k;
+        }
         n
     }
 
@@ -326,7 +395,19 @@ impl State {
             v.push(gp.rho);
             v.push(gp.sigma_x);
         }
-        
+
+        // Regime blocks, in the same order as run_regime_hmm's storage:
+        // b0_state(states 1..K) -> q0 = exp(log_q0) (na) -> beta_q(na*pt)
+        // -> E (K x n_cat, row-major) -> pi (K).
+        for rs in &self.regime_states {
+            let k = rs.b0_state.len();
+            for s in 1..k { v.push(rs.b0_state[s]); }
+            for &lq in &rs.log_q0 { v.push(lq.exp()); }
+            for bq in &rs.beta_q { v.extend_from_slice(bq.as_slice()); }
+            for a in 0..k { for b in 0..rs.emat.ncols() { v.push(rs.emat[(a, b)]); } }
+            for &p in &rs.pi_init { v.push(p); }
+        }
+
         v
     }
 
