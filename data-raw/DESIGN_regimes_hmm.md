@@ -157,9 +157,29 @@ fallback only. SBC ranks *parameters*, not latent states.
   `ln_gamma`); Binomial has no dispersion. `run_regime_hmm` gains `family`,
   `n_trials`, `r_init/r_shape/r_rate`. Verified: recovery for both families
   (levels, trend, `r`, `E`); draw==fit NB SBC (opt-in) Bonferroni-PASS.
-- **v1c-b — composition.** GP + regime + opt-in smooth change-point together,
-  integrated into `run_chain_bjlm`. Exit: **coverage-mode** SBC on the
-  three-latent aliasing.
+- **v1c-b — composition. [SHIPPED]** The latent regime is now a Gibbs step
+  INSIDE `run_chain_bjlm`, composing with the latent GP confounder and the
+  smoothed change-point. Keystone: the state level `b0_state[path[i]]` is a pure
+  additive term like the random intercept `u_b0`, so (a) `means()` adds it and
+  every consumer inherits it, (b) `LinearCache::build` folds it into `b0_fixed`
+  so the omega/rho HMC residual excludes it, (c) `sample_linear_coefs_weighted`
+  subtracts it as an offset (Gaussian `y_tilde`, Binomial/NB PG centres). The
+  FFBS runs on the state-excluded mean `mu_full - b0_state[path]` (the GP block's
+  cache-and-subtract pattern); the level draw mirrors
+  `sample_random_effects_weighted` grouped by the path. New Rust module
+  `regime_step.rs`; `RegimeData`/`RegimeState` in `ModelData`/`State` (empty =
+  strict no-op); FFI `run_bjlm(regimes=)`. R: `bjlm(regimes=)` + draw naming;
+  `fit()` auto-selects the in-loop engine when a GP or change-point is present
+  (else the faster isolated engine); `.build_regime_list()` marshals the block.
+  Built and verified in gated increments: (0) inert scaffolding, non-regime fits
+  byte-identical; (1) regime-only in-loop reproduces the SBC-certified isolated
+  v1b to ~3 decimals on every parameter; (2) regime + change-point recover
+  SEPARATELY (omega/delta vs b0_state, all rhat <=1.02); (3) regime + GP +
+  change-point all three recover (GP hypers alpha/rho/sigma_x + loading to 2-3
+  decimals with the regime composed on top). Follow-up: full **coverage-mode**
+  SBC on the three-latent aliasing; non-Gaussian composition (the emission +
+  PG offset already handle families, but GP-in-non-Gaussian has its own known
+  interactions to re-verify).
 
 ## 6. API (forward-compatible from v0)
 

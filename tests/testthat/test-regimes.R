@@ -456,6 +456,45 @@ test_that("in-loop regime COMPOSES with a smoothed change-point (v1c-b)", {
   expect_gt(gm("E_0_0"), 0.75); expect_gt(gm("E_1_1"), 0.75)
 })
 
+test_that("in-loop regime COMPOSES with a latent GP confounder (v1c-b)", {
+  skip_on_cran()
+  dat <- simulate_bjlm(n_subj = 60L, n_obs = 8L, b0 = 2, b0_trt = 0, b1 = -0.3,
+    omegas = c(5), rhos = c(4), deltas_int = c(-0.4), deltas_trt = 0, sigma = 0.4,
+    sigma_u = 0, gp_confounder = TRUE, gp_alpha = 1.0, gp_rho = 3.0, gp_sigma_x = 0.5,
+    b0_gp = 1.2, trt_gp = 0, seed = 51)
+  K <- 3L; allowed <- rbind(c(0,1), c(1,0), c(1,2), c(2,1)); q0t <- c(0.4,0.2,0.3,0.15)
+  b0s <- c(0, 1.5, -1.2); Et <- matrix(0.05, K, K); diag(Et) <- 0.9
+  set.seed(7); dat$r_obs <- NA_integer_
+  for (sj in unique(dat$subject)) {
+    idx <- which(dat$subject == sj); ot <- dat$tau[idx]
+    st <- .sim_ctmc_path(q0t, allowed, K, ot, 0L)
+    dat$y[idx] <- dat$y[idx] + b0s[st + 1]
+    dat$r_obs[idx] <- vapply(st, function(z) sample(0:(K-1), 1, prob = Et[z+1, ]), integer(1))
+  }
+  fit <- suppressMessages(
+    bjlm_model() |>
+      outcome(y ~ tau, b0 = ~ 1 + X_obs, b1 = ~ 1, deltas = list(~ 1), omega = list(~ 1),
+              rho = list(~ 1), data = dat, family = gaussian()) |>
+      latent_gp(name = "X_obs", data = dat, time_var = "tau", obs_var = "X_obs",
+                subject = "subject", time_out_var = "tau", time_trt_var = "tau") |>
+      regimes(name = "regime", data = dat, n_states = 3L, time_var = "tau", subject = "subject",
+              obs_state = "r_obs", obs_model = confusion(diag = 8, offdiag = 1)) |>
+      compile() |> fit(chains = 2L, iter = 1200L, warmup = 600L, seed = 5L, verbose = FALSE))
+
+  expect_s3_class(fit, "bjlm_fit")
+  sm <- posterior::summarise_draws(fit$draws, "mean"); gm <- function(v) sm$mean[sm$variable == v]
+  vn <- posterior::variables(fit$draws)
+  expect_true(all(c("X_obs_alpha","X_obs_rho","X_obs_sigma_x","b0_X_obs","b0_state_1") %in% vn))
+  # GP hypers + loading recover with the regime composed on top
+  expect_equal(gm("b0_X_obs"), 1.2, tolerance = 0.4)
+  expect_equal(gm("X_obs_rho"), 3.0, tolerance = 1.5)
+  expect_equal(gm("X_obs_sigma_x"), 0.5, tolerance = 0.25)
+  # regime levels + misclassification recover, not absorbed by the GP
+  expect_equal(gm("b0_state_1"), 1.5, tolerance = 0.5)
+  expect_equal(gm("b0_state_2"), -1.2, tolerance = 0.5)
+  expect_gt(gm("E_0_0"), 0.75)
+})
+
 test_that("state_occupancy() returns Rao-Blackwellized smoothed state probabilities", {
   skip_on_cran()
   K <- 3L; allowed <- rbind(c(0,1), c(1,0), c(1,2), c(2,1)); q0t <- c(0.4,0.2,0.3,0.15)
