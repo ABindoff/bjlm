@@ -495,6 +495,56 @@ test_that("in-loop regime COMPOSES with a latent GP confounder (v1c-b)", {
   expect_gt(gm("E_0_0"), 0.75)
 })
 
+test_that("composed three-latent (regime + GP + change-point) coverage SBC (opt-in, slow)", {
+  skip_on_cran()
+  skip_if(!nzchar(Sys.getenv("BJLM_SBC_CERT")), "set BJLM_SBC_CERT=1 to run the coverage cert")
+  K <- 3L; allowed <- rbind(c(0,1), c(1,0), c(1,2), c(2,1)); q0t <- c(0.4,0.2,0.3,0.15)
+  b0s <- c(0, 1.5, -1.2); Et <- matrix(0.05, K, K); diag(Et) <- 0.9
+  TR <- c(`delta1_(Intercept)` = -0.4, b0_X_obs = 1.2, X_obs_alpha = 1.0, X_obs_rho = 3.0,
+          X_obs_sigma_x = 0.5, b0_state_1 = 1.5, b0_state_2 = -1.2, E_0_0 = 0.9, E_1_1 = 0.9,
+          E_2_2 = 0.9, sigma = 0.4)                       # omega excluded (mixing, not aliasing)
+  fp <- bjlm_priors(outcome = smoothbp_priors(
+    b0 = prior_normal(0, 3), b1 = prior_normal(0, 1), deltas = prior_normal(0, 1),
+    omega = prior_normal(5, 2, lb = 0.5, ub = 9.5), rho = prior_normal(4, 2, lb = 1, ub = 10),
+    sigma = prior_invgamma(3, 1)))
+  REPS <- 24L; hit90 <- matrix(NA, REPS, length(TR), dimnames = list(NULL, names(TR)))
+  for (rep in seq_len(REPS)) {
+    dat <- tryCatch(simulate_bjlm(n_subj = 45L, n_obs = 7L, b0 = 2, b0_trt = 0, b1 = -0.3,
+      omegas = c(5), rhos = c(4), deltas_int = c(-0.4), deltas_trt = 0, sigma = 0.4, sigma_u = 0,
+      gp_confounder = TRUE, gp_alpha = 1.0, gp_rho = 3.0, gp_sigma_x = 0.5, b0_gp = 1.2,
+      trt_gp = 0, seed = 3000 + rep), error = function(e) NULL)
+    if (is.null(dat)) next
+    set.seed(9000 + rep); dat$r_obs <- NA_integer_
+    for (sj in unique(dat$subject)) {
+      idx <- which(dat$subject == sj); ot <- dat$tau[idx]
+      st <- .sim_ctmc_path(q0t, allowed, K, ot, 0L)
+      dat$y[idx] <- dat$y[idx] + b0s[st + 1]
+      dat$r_obs[idx] <- vapply(st, function(z) sample(0:(K-1), 1, prob = Et[z+1, ]), integer(1))
+    }
+    fit <- tryCatch(suppressMessages(
+      bjlm_model() |>
+        outcome(y ~ tau, b0 = ~ 1 + X_obs, b1 = ~ 1, deltas = list(~ 1), omega = list(~ 1),
+                rho = list(~ 1), data = dat, family = gaussian()) |>
+        latent_gp(name = "X_obs", data = dat, time_var = "tau", obs_var = "X_obs",
+                  subject = "subject", time_out_var = "tau", time_trt_var = "tau") |>
+        regimes(name = "r", data = dat, n_states = 3L, time_var = "tau", subject = "subject",
+                obs_state = "r_obs", obs_model = confusion(diag = 8, offdiag = 1)) |>
+        compile() |>
+        fit(priors = fp, chains = 2L, iter = 1000L, warmup = 500L, seed = 5 + rep, cores = 2L, verbose = FALSE)),
+      error = function(e) NULL)
+    if (is.null(fit)) next
+    q <- posterior::summarise_draws(fit$draws, ~quantile(.x, c(0.05, 0.95)))
+    for (v in names(TR)) {
+      r <- q[q$variable == v, ]
+      if (nrow(r)) hit90[rep, v] <- TR[[v]] >= r$`5%` && TR[[v]] <= r$`95%`
+    }
+  }
+  cov90 <- colMeans(hit90, na.rm = TRUE)
+  # at ~24 reps the 90%-coverage SE is ~0.06; require all identifiability params
+  # within ~2.5 SE of nominal (allow one borderline for sampling noise)
+  expect_gte(sum(cov90 >= 0.75), length(TR) - 1L)
+})
+
 test_that("state_occupancy() returns Rao-Blackwellized smoothed state probabilities", {
   skip_on_cran()
   K <- 3L; allowed <- rbind(c(0,1), c(1,0), c(1,2), c(2,1)); q0t <- c(0.4,0.2,0.3,0.15)
