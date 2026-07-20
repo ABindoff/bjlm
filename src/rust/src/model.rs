@@ -444,23 +444,27 @@ impl State {
             for i in 0..n { mu[i] += rs.b0_state[rs.state_path[i]]; }
         }
 
-        // Segment 1 (initial slope)
-        let mut b1_eff = self.beta_b1.clone();
-        for j in 0..b1_eff.len() {
-            if !self.gamma_b1[j] { b1_eff[j] = 0.0; }
-        }
-        let b1_vals = &data.x_b1 * &b1_eff;
-
-        if data.n_breakpoints > 0 {
-            // Center at first breakpoint for segment 1
-            let om1 = self.omega_vec(0, &data.x_om[0]);
-            for i in 0..n {
-                mu[i] += b1_vals[i] * (data.tau[i] - om1[i]);
+        // Segment 1 (initial slope). Skip entirely when there is no b1 design
+        // (a b0-only model, e.g. intercept + latent GP + regime with no slope and
+        // no change-point) -- otherwise b1_vals is empty and indexing panics.
+        if data.x_b1.ncols() > 0 {
+            let mut b1_eff = self.beta_b1.clone();
+            for j in 0..b1_eff.len() {
+                if !self.gamma_b1[j] { b1_eff[j] = 0.0; }
             }
-        } else {
-            // Linear model fallback
-            for i in 0..n {
-                mu[i] += b1_vals[i] * data.tau[i];
+            let b1_vals = &data.x_b1 * &b1_eff;
+
+            if data.n_breakpoints > 0 {
+                // Center at first breakpoint for segment 1
+                let om1 = self.omega_vec(0, &data.x_om[0]);
+                for i in 0..n {
+                    mu[i] += b1_vals[i] * (data.tau[i] - om1[i]);
+                }
+            } else {
+                // Linear model fallback
+                for i in 0..n {
+                    mu[i] += b1_vals[i] * data.tau[i];
+                }
             }
         }
 

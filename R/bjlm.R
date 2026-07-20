@@ -347,6 +347,9 @@ bjlm <- function(
 
   # ---- Call Rust sampler ----
   if (use_spike) {
+    if (length(regimes) > 0)
+      stop("Spike-and-slab is not supported together with a latent-regime block ",
+           "(confusion()). Use one or the other.", call. = FALSE)
     raw <- run_bjlm_ss(
       y = y,
       tau = tau,
@@ -409,8 +412,7 @@ bjlm <- function(
       seed = as.integer(seed),
       verbose = verbose,
       n_cores = as.integer(cores),
-      outcome_family = outcome_family,
-      regimes = regimes
+      outcome_family = outcome_family
     )
   } else {
   raw <- run_bjlm(

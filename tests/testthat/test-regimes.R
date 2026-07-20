@@ -495,6 +495,53 @@ test_that("in-loop regime COMPOSES with a latent GP confounder (v1c-b)", {
   expect_gt(gm("E_0_0"), 0.75)
 })
 
+test_that("in-loop regime composes with a latent GP + NON-Gaussian outcome (v1c-b)", {
+  skip_on_cran()
+  sig <- function(x) 1/(1+exp(-x))
+  K <- 3L; allowed <- rbind(c(0,1), c(1,0), c(1,2), c(2,1)); q0t <- c(0.4,0.2,0.3,0.15)
+  Et <- matrix(0.05, K, K); diag(Et) <- 0.9; nt <- 8L; ot <- seq(0,10,length.out=nt)
+  gen <- function(seed, ns, family, b0, b0_gp, b0s, rr = 8) {
+    set.seed(seed); rows <- list()
+    for (s in seq_len(ns)) {
+      D <- as.matrix(dist(ot)); Kmat <- 1.0*exp(-0.5*(D/3.0)^2) + diag(1e-8, nt)
+      f <- as.numeric(t(chol(Kmat)) %*% rnorm(nt)); X_obs <- f + rnorm(nt, 0, 0.5)
+      st <- .sim_ctmc_path(q0t, allowed, K, ot, 0L)
+      r_obs <- vapply(st, function(z) sample(0:(K-1), 1, prob = Et[z+1, ]), integer(1))
+      eta <- b0 + b0_gp*f + b0s[st+1]
+      y <- if (family == "negbin") rnbinom(nt, size=rr, mu=exp(eta)) else rbinom(nt, 1, sig(eta))
+      rows[[s]] <- data.frame(subject=s, tau=ot, y=y, X_obs=X_obs, r_obs=r_obs)
+    }
+    do.call(rbind, rows)
+  }
+  fitit <- function(df, family) suppressMessages(
+    bjlm_model() |>
+      outcome(y ~ tau, b0 = ~ 1 + X_obs, b1 = ~ 1, data = df, family = family) |>
+      latent_gp(name = "X_obs", data = df, time_var = "tau", obs_var = "X_obs",
+                subject = "subject", time_out_var = "tau", time_trt_var = "tau") |>
+      regimes(name = "r", data = df, n_states = 3L, time_var = "tau", subject = "subject",
+              obs_state = "r_obs", obs_model = confusion(diag = 8, offdiag = 1)) |>
+      compile() |> fit(chains = 2L, iter = 1000L, warmup = 500L, seed = 5L, cores = 2L, verbose = FALSE))
+  gm <- function(fit) { sm <- posterior::summarise_draws(fit$draws, "mean"); function(v) sm$mean[sm$variable == v] }
+
+  # Negative binomial: GP hypers + NB dispersion + regime all recover together
+  fn <- fitit(gen(21, 200L, "negbin", b0 = 1.6, b0_gp = 0.6, b0s = c(0,0.8,-0.7)), "negbin")
+  g <- gm(fn); vn <- posterior::variables(fn$draws)
+  expect_s3_class(fn, "bjlm_fit"); expect_true("r" %in% vn)
+  expect_equal(g("X_obs_rho"), 3.0, tolerance = 1.5)
+  expect_equal(g("X_obs_sigma_x"), 0.5, tolerance = 0.25)
+  expect_equal(g("b0_X_obs"), 0.6, tolerance = 0.4)
+  expect_gt(g("r"), 3); expect_lt(g("r"), 20)
+  expect_equal(g("b0_state_1"), 0.8, tolerance = 0.5)
+  expect_gt(g("E_0_0"), 0.75)
+
+  # Binomial: GP hypers + regime recover on the logit scale
+  fb <- fitit(gen(22, 280L, "binomial", b0 = 0, b0_gp = 1.0, b0s = c(0,1.6,-1.6)), "binomial")
+  g <- gm(fb)
+  expect_equal(g("X_obs_rho"), 3.0, tolerance = 1.5)
+  expect_equal(g("X_obs_sigma_x"), 0.5, tolerance = 0.25)
+  expect_gt(g("b0_state_1"), 0.7); expect_lt(g("b0_state_2"), -0.7)
+})
+
 test_that("composed three-latent (regime + GP + change-point) coverage SBC (opt-in, slow)", {
   skip_on_cran()
   skip_if(!nzchar(Sys.getenv("BJLM_SBC_CERT")), "set BJLM_SBC_CERT=1 to run the coverage cert")

@@ -383,7 +383,10 @@ fn run_bjlm_ss(
     verbose: bool,
     n_cores: i32,
     outcome_family: &str,
-    regimes: List,
+    // NOTE: run_bjlm_ss (spike-and-slab) is already at R's hard 65-argument .Call
+    // limit, so it takes NO `regimes` arg. Latent regimes compose through the
+    // NON-spike engine run_bjlm (routed in fit()); spike + latent-regime is not a
+    // supported combination (a regime block is not a spike-and-slab component).
 ) -> List {
     let mut p_deltas = p_deltas;
     let mut p_om = p_om;
@@ -462,7 +465,7 @@ fn run_bjlm_ss(
         n,
         re_mask_om: re_mask_om.iter().map(|r| r.1.as_integer_vector().unwrap().iter().map(|&v| v != 0).collect()).collect(),
         latent_gps: gps,
-        regimes: parse_regimes(regimes, n),
+        regimes: Vec::new(),     // spike-slab path: no latent-regime composition (arg-limit)
     };
 
     let outcome_priors = Priors {

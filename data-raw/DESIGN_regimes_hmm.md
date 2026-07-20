@@ -186,9 +186,20 @@ fallback only. SBC ranks *parameters*, not latent states.
   sigma (0.82). So the three latents are IDENTIFIABLE and none aliases another.
   Sole caveat: omega cov50 0.38 with maxRhat 1.64 -- a MIXING artifact (the
   change-point location mixes slowly with three latents; cov90 still 0.90),
-  fixed by more iterations, not a calibration defect. Follow-up: non-Gaussian
-  composition (the emission + PG offset already handle families, but
-  GP-in-non-Gaussian has its own known interactions to re-verify).
+  fixed by more iterations, not a calibration defect.
+- **v1c-b non-Gaussian composition. [SHIPPED]** Binomial (logit) and NegBin (log)
+  outcomes compose in-loop with the regime + latent GP + change-point -- no new
+  sampler code (the FFBS emission + the PG level offset already dispatch on
+  family; the main-loop `r` draw reads `means_full` so it sees the regime level).
+  Verified: regime + NB in-loop reproduces the certified ISOLATED NB engine
+  (b0_state/r/E match); regime + NB + GP recovers GP hypers (alpha 0.99, rho 2.75,
+  sigma_x 0.49) + the NB dispersion (r 8.5/8) + the regime together (the CANTAB
+  counts + confounder + regime case); regime + Binomial + GP likewise. ONE fix:
+  a b0-only model (no b1 slope, no change-point) panicked in means()'s linear
+  fallback on an empty x_b1 -- guarded (skip the b1 segment when x_b1 has no
+  columns). NB+GP transport composes with the FFBS without the historical
+  instability. (GP code still assumes a b1 for GP-loaded b0-only specs; realistic
+  models carry a slope, so left as-is.)
 
 ## 6. API (forward-compatible from v0)
 
