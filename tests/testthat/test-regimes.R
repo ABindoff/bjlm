@@ -458,6 +458,7 @@ test_that("in-loop regime COMPOSES with a smoothed change-point (v1c-b)", {
 
 test_that("in-loop regime COMPOSES with a latent GP confounder (v1c-b)", {
   skip_on_cran()
+  skip_if(!nzchar(Sys.getenv("BJLM_SBC_CERT")), "set BJLM_SBC_CERT=1 to run the slow GP-composition recovery tests")
   dat <- simulate_bjlm(n_subj = 60L, n_obs = 8L, b0 = 2, b0_trt = 0, b1 = -0.3,
     omegas = c(5), rhos = c(4), deltas_int = c(-0.4), deltas_trt = 0, sigma = 0.4,
     sigma_u = 0, gp_confounder = TRUE, gp_alpha = 1.0, gp_rho = 3.0, gp_sigma_x = 0.5,
@@ -497,6 +498,7 @@ test_that("in-loop regime COMPOSES with a latent GP confounder (v1c-b)", {
 
 test_that("in-loop regime composes with a latent GP + NON-Gaussian outcome (v1c-b)", {
   skip_on_cran()
+  skip_if(!nzchar(Sys.getenv("BJLM_SBC_CERT")), "set BJLM_SBC_CERT=1 to run the slow GP-composition recovery tests")
   sig <- function(x) 1/(1+exp(-x))
   K <- 3L; allowed <- rbind(c(0,1), c(1,0), c(1,2), c(2,1)); q0t <- c(0.4,0.2,0.3,0.15)
   Et <- matrix(0.05, K, K); diag(Et) <- 0.9; nt <- 8L; ot <- seq(0,10,length.out=nt)
